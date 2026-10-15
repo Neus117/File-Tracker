@@ -247,3 +247,62 @@ def test_settings_icon_comes_from_roboc_original():
     # ICO 文件头：保留位 0x0000 + 类型 0x0001
     assert head[:2] == b"\x00\x00" and head[2:4] == b"\x01\x00", \
         "settings.ico 不是有效的 ICO"
+
+
+# --------------------------------------------------------------------------
+# 文案不能"在 import 时被冻结" —— 一个真实缺陷
+# --------------------------------------------------------------------------
+
+def test_path_bar_hint_is_a_property_not_a_frozen_class_attribute():
+    """`PathBar.HINT` 必须是 **property**，不能是类属性。
+
+    ## 这条测试防的是什么
+
+    原来是 ``HINT = L("输入或粘贴路径", "Type or paste a path")``。
+    **类属性在 import 时求值一次**，而那时语言还没定下来
+    （`lang.apply` 在 `FileTracker.__init__` 里、建界面之前才调）。
+
+    后果（审计实测）：中文系统上 import widgets → `HINT` 冻结成中文
+    → 用户选了英文 → **每次启动看到的都还是中文提示**，
+    只有去设置里重选一次语言才会被 `retranslate` 改过来。
+    英文系统上选中文，镜像同样成立。
+
+    ## 为什么静态查而不是跑起来查
+
+    `PathBar` 要建 `wx` 面板，而这一组测试是**不碰 GUI** 的
+    （CI 上没有桌面会话）。要守住的不变量"是不是 property"
+    在 AST 上就能确定地判出来，比建窗口更可靠，也不依赖环境。
+    """
+    import ast
+
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "src", "file_tracker", "widgets.py")
+    with open(path, encoding="utf-8") as handle:
+        tree = ast.parse(handle.read())
+
+    path_bar = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "PathBar":
+            path_bar = node
+            break
+    assert path_bar is not None, "找不到 PathBar 类"
+
+    property_names = {
+        item.name for item in path_bar.body
+        if isinstance(item, ast.FunctionDef)
+        and any(isinstance(deco, ast.Name) and deco.id == "property"
+                for deco in item.decorator_list)
+    }
+    assert "HINT" in property_names, (
+        "PathBar.HINT 不再是 property——它会在 import 时被求值并冻结，"
+        "于是语言切换后提示语不会跟着变（用户报过这个现象）")
+
+    # 顺带守住：不许再出现"类属性形式的 HINT"
+    for item in path_bar.body:
+        if isinstance(item, ast.Assign):
+            for target in item.targets:
+                assert not (isinstance(target, ast.Name)
+                            and target.id == "HINT"), (
+                    "PathBar 里又出现了 HINT 的类属性赋值——"
+                    "它会在 import 时求值")

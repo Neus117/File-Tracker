@@ -889,27 +889,6 @@ class FileTracker(wx.Frame):
         """
         self.apply_sort(column, toggle=True)
 
-    def _remember_sort(self) -> None:
-        """把当前排序写进配置（下次启动就用它）。
-
-        ## 为什么"点表头"也写配置
-
-        用户要的是"能根据自己的习惯调节"。设置窗口是**显式**调节，
-        而点表头是**顺手**表达同一个偏好——如果只有设置窗口算数，
-        用户点了一整天的路径排序、重启后又被弹回频次排序，
-        那正是他抱怨的"太死板"。
-
-        两处都写，谁最后动谁生效，符合直觉。
-        """
-        self.config.set_sort_column(self.sort_key)
-        self.config.set_sort_direction(self.sort_key, self.sort_reverse)
-        try:
-            self.config.save()
-        except OSError as error:
-            self._report_resource_error(
-                L(f"无法保存排序偏好: {error}",
-                  f"Could not save the sort preference: {error}"))
-
     def _sync_header(self) -> None:
         """把列表的列宽同步给自绘表头，并标出排序列。
 
@@ -1862,6 +1841,16 @@ class FileTracker(wx.Frame):
         那正是他抱怨的"太死板"。
 
         两处都写，谁最后动谁生效，符合直觉。
+
+        ⚠️ **这个方法在这个类里只能有一份。**
+
+        审计查出过它被定义了**两次**（一次在这里、一次在 `on_open` 附近）。
+        函数体完全一样，所以行为没出错；但 Python **只用后一个**，
+        于是改前一个**不会有任何效果**——而且不报错。
+        本模块开头那段"同一功能定义两次、后一个静默生效"的教训，
+        就是这么重新长出来的。
+
+        `tests/test_no_duplicate_methods.py` 现在会静态拦住这一类。
         """
         self.config.set_sort_column(self.sort_key)
         self.config.set_sort_direction(self.sort_key, self.sort_reverse)
@@ -2319,7 +2308,9 @@ class FileTracker(wx.Frame):
 
         self.open_btn.SetLabel(L("打开", "Open"))
         self.clear_btn.SetLabel(L("清空", "Clear"))
-        self.path_bar.SetHint(L("输入或粘贴路径", "Type or paste a path"))
+        # 只让路径栏**自己重取**提示，不由这里传文案——
+        # 传文案就意味着"文案"有两份来源，迟早有一处忘了跟着语言走。
+        self.path_bar.refresh_hint()
         self._refresh_pin_label()
         self.Layout()
         self.Refresh()

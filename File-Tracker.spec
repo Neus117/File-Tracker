@@ -112,8 +112,28 @@ a = Analysis(  # noqa: F821
     # 所以现在 `_build_info.py` 就写在包内（见上），`SPECPATH` 不再需要。
     pathex=[os.path.join(SPECPATH, "src")],  # noqa: F821
     binaries=[],
-    # 显式声明 images/ → _MEIPASS/images，不再依赖"目录结构碰巧同构"
-    datas=[(os.path.join(SPECPATH, "images"), "images")],  # noqa: F821
+    # **只打运行时真正用的那几个资源，不再整目录塞进去。**
+    #
+    # 原来是 `(images 目录, "images")` —— 整目录复制。于是**文档用的截图
+    # 也被打进了 exe**：`FileTracker_v1.0-Overview.jpg`（148 KB）与
+    # `FileTracker_v1.1-Overview.jpg`（259 KB），合计 358 KB（约产物的 2%）。
+    #
+    # 那两张图是 **README 的展示图**（`README.md` 用 raw.githubusercontent
+    # 链接引用 `v1.1` 那张），**程序运行时一个字节都不读**。
+    # 它们该留在仓库里，但不该进产物。
+    #
+    # 逐个列出而不是"排除两个"：这样**新增资源必须显式登记**，
+    # 不会因为"放进 images/ 就自动进产物"而再次混进文档文件。
+    # 漏登记会立刻暴露——资源加载失败是可见的（`--selftest` 也会报）。
+    datas=[
+        (os.path.join(SPECPATH, "images", name), "images")  # noqa: F821
+        for name in (
+            "shell32_star.ico",   # 窗口/任务栏图标
+            "pin_grey.png",       # 顶置按钮（未顶置）
+            "pin_red.png",        # 顶置按钮（已顶置）
+            "settings.png",       # 设置按钮
+        )
+    ],
     # `file_tracker._build_info` 是**运行时才有**的模块（打包时刚生成），
     # 静态分析看不到它被 import，所以要显式声明，否则会被漏掉。
     hiddenimports=["file_tracker._build_info"],
@@ -126,6 +146,19 @@ a = Analysis(  # noqa: F821
         "numpy", "PyQt5", "PyQt6", "PySide2", "PySide6",
         "pytest", "_pytest", "unittest", "pydoc", "doctest",
         "tkinter", "test", "distutils",
+        # === 体积：这几个只有 stdlib 内部才用，应用从不 import ===
+        #
+        # `libcrypto-3-x64.dll`（2.11 MB）的依赖链（用 PyInstaller 的 xref 查清）：
+        #   libcrypto ← _hashlib ← hashlib ← tarfile / zipfile
+        # 应用源码里**没有** ssl / hashlib / http / urllib / socket。
+        # 排掉这三个之后 `libcrypto` 与 `_hashlib` 都不再进产物。
+        #
+        # ⚠️ **`ast` / `dis` 不能排**：`inspect` 依赖它们，排掉会让
+        #    `pyi_rth_inspect` 在启动时抛 ModuleNotFoundError（实测：弹崩溃框）。
+        # ⚠️ **`socket` 不能排**：实测进程活着但窗口起不来。
+        # ⚠️ **每加一项都要跑 GUI 回归**（`tools/verify_gui.py`）——
+        #    "包打得出来"与"界面能用"是两件事，本项目为此栽过跟头。
+        "tarfile", "hashlib", "email",
     ],
     noarchive=False,
     optimize=0,

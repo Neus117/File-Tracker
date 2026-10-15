@@ -1435,10 +1435,29 @@ class PathBar(BufferedPanel):
     **提示直接被截断**。字号也比正文小一号，避免在窄框里喧宾夺主。
     """
 
-    #: 提示语。**短到不会在窄输入框里被截断**——改长之前先量宽度。
-    #: 提示文字。**用 L() 包起来**——这是运行时读取的（`self.HINT`），
-    #: 不是模块级求值后就被冻结的常量。
-    HINT = L("输入或粘贴路径", "Type or paste a path")
+    @property
+    def HINT(self) -> str:
+        """提示语。**每次读都重新取**，所以永远跟着当前语言。
+
+        ## 为什么必须是 property，而不是类属性
+
+        原来是 ``HINT = L("输入或粘贴路径", "Type or paste a path")`` ——
+        **类属性在 import 时求值一次**，而那时语言还没定下来
+        （`lang.apply` 在 `FileTracker.__init__` 里、建界面之前才调）。
+
+        后果（审计实测）：中文系统上 import widgets → `HINT` 已经冻结成中文
+        → 用户选了英文 → **启动后每一次看到的都还是中文提示**。
+        只有去设置里重选一次语言，`retranslate` 才会把它改过来。
+        英文系统上选中文，镜像同样成立。
+
+        原来那行注释写着"这是运行时读取的（`self.HINT`），不是模块级求值后
+        就被冻结的常量"——**那句话是错的**：类属性的求值时机与模块级常量
+        一样早。这正是"注释与代码不一致"最坏的一种：它让人不去查。
+
+        做成 property 之后，`PathBar.HINT`（类上读）返回的也是当前语言，
+        而 `self.HINT` 与重建提示都自动正确，不需要额外同步。
+        """
+        return L("输入或粘贴路径", "Type or paste a path")
 
     def __init__(self, parent, theme: Theme, on_submit):
         super().__init__(parent, theme)
@@ -1553,14 +1572,23 @@ class PathBar(BufferedPanel):
             dc.SetPen(wx.Pen(colour))
             dc.DrawRoundedRectangle(x, y, w, h, METRICS.radius_field)
 
-    def SetHint(self, text: str) -> None:
-        """换提示文字（**换语言时用**）。
+    def refresh_hint(self) -> None:
+        """把提示文字重新取一遍（**换语言时用**）。
 
-        名字故意与 `wx.TextCtrl.SetHint` 一致，这样"设置提示"只有一种叫法；
-        真正的实现是把提示转交给内部的文本框。
+        ## 为什么不再叫 `SetHint`、也不再接收文字
+
+        原来是 ``SetHint(text)``：调用方算好文案传进来，还要 ``self.HINT = text``
+        把它记下来。那是**两份状态**——一处忘了更新，提示与 `HINT` 就不一致。
+
+        现在 `HINT` 是 property（每次读都按当前语言取），所以"换语言"这件事
+        只需要**重新取一次并转交给内部文本框**。调用方不再需要知道文案是什么，
+        也就不可能传错语言。
+
+        取名 `refresh_hint` 而不是 `SetHint`：它不接受文案，
+        叫 `Set*` 会让人以为要塞东西进去。
         """
-        self.HINT = text
-        self.text_ctrl.SetHint(text)
+        hint = self.HINT
+        self.text_ctrl.SetHint(hint)
         # 提示文字换了、字体没换，所以行高不用重算；
         # 这里只要重画一遍，让自绘的那一层跟上。
         self.Refresh()

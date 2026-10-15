@@ -94,6 +94,15 @@ if ($SkipTests) {
 & $Python -X utf8 (Join-Path $Root 'tools\check_dialogs.py')
 Assert-Success '对话框调用点检查'
 
+# **同名方法定义了两次。**
+#
+# 审计发现 `FileTracker._remember_sort` 被定义了两次（函数体完全相同）。
+# Python 只用后一个，于是"改前一个"**不会有任何效果**，而且不报错——
+# 而 `app.py` 开头的模块文档就记着同一类教训，它**又长出来了一次**。
+# 人工审查看不出来（两份相隔一千多行），AST 一眼就能判。
+& $Python -X utf8 (Join-Path $Root 'tools\check_duplicate_methods.py')
+Assert-Success '重复方法检查'
+
 # --------------------------------------------------------------------------
 Write-Step '2. 确定构建身份'
 # --------------------------------------------------------------------------

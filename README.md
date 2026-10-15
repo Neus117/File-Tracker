@@ -200,6 +200,10 @@ python tools/check_wiring_negative.py   # 它的阳性对照
 # 对话框调用点检查：两按钮却没读返回值（用户报过"两个按钮功能完全一致"）
 python tools/check_dialogs.py
 python tools/check_dialogs_negative.py  # 它的阳性对照
+
+# 重复方法检查：同名方法定义两次，Python 只用后一个，"改前一个"没有任何效果
+python tools/check_duplicate_methods.py
+python tools/check_duplicate_methods_negative.py
 ```
 
 `build.ps1` 最后会真的运行产物的 `--version`，确认它**自报的提交哈希**与本次

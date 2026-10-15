@@ -3,13 +3,14 @@
 # 骨架来自 Roboc 的 .github/workflows/build.yml。值得每次推送自动跑一遍的，
 # 都是那些"编译通过、运行无异常、只是不生效"的缺陷——本项目最难查的一类。
 #
-# 具体跑六件事：
-#   1. 单元测试（175 条，不依赖 GUI）
+# 具体跑七件事：
+#   1. 单元测试（不依赖 GUI）
 #   2. 接线检查 + 它的阳性对照
 #   3. 对话框调用点检查 + 它的阳性对照
-#   4. .ps1 的 UTF-8 BOM 检查
-#   5. 打包并让产物自报版本（--version / --selftest）
-#   6. 产物的版本资源（属性 → 详细信息那一页）
+#   4. 重复方法检查 + 它的阳性对照
+#   5. .ps1 的 UTF-8 BOM 检查
+#   6. 打包并让产物自报版本（--version / --selftest）
+#   7. 产物的版本资源（属性 → 详细信息那一页）
 #
 # 最后两项是唯一能证明"打包配置真的能用"的手段。仓库里此前**没有任何打包配置**，
 # v1.1.0 那个 exe 怎么打出来的只存在于作者记忆里。
@@ -83,6 +84,13 @@ jobs:
 
       - name: 对话框检查的阳性对照
         run: python -X utf8 tools/check_dialogs_negative.py
+
+      # 同名方法定义两次：Python 只用后一个，"改前一个"没有效果且不报错。
+      - name: 重复方法检查
+        run: python -X utf8 tools/check_duplicate_methods.py
+
+      - name: 重复方法检查的阳性对照
+        run: python -X utf8 tools/check_duplicate_methods_negative.py
 
       # Windows PowerShell 5.1 读没有 BOM 的 UTF-8 文件会按 ANSI 解码，
       # 脚本里的中文变成乱码甚至语法错误。踩过一次——一个检查器因此
