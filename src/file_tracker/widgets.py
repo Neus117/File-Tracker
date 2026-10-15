@@ -868,19 +868,14 @@ class ThemedDialog(wx.Dialog):
         self.Refresh()
 
 
-def _row_lines(label, chunks, content_width: int, gap: int) -> int:
-    """这一行占几**行**：能同行是 1，放不下就是"标签一行 + 按钮块数"。
+def _row_height_lines(chunks) -> int:
+    """一组按钮块占几**行**（不含标签）。
 
-    **`_layout`（算高度）与 `_place_rows`（摆位置）都调它。**
-    这个判据原来在两处各写了一遍——而"两处实现迟早不一致"
-    正是本项目反复修过的那类缺陷（`set_icon`、`load_last_directory`、
-    分隔线几何都栽在这上面）。写成函数就不可能分叉。
+    标签**不额外占行**：它与第一块按钮垂直居中（见 `_place_rows`）。
+    这一点是用户指出的——早先让标签独占一行，于是"排序方式"孤零零飘在
+    按钮上方，既不对称也不像"这一行的标题"。
     """
-    buttons_width = (sum(b.GetBestSize().width for b in chunks[0])
-                     + gap * (len(chunks[0]) - 1))
-    if len(chunks) == 1 and _label_width(label) + gap + buttons_width <= content_width:
-        return 1
-    return 1 + len(chunks)
+    return len(chunks)
 
 
 def _label_width(label) -> int:
@@ -931,7 +926,8 @@ def _wrap_buttons(buttons, content_width: int, gap: int,
     * 后续行预算 = ``content_width``
     * **每块至少两个**——一行一个太散，不像"一组里选一个"。
       所以首行预算不够放两个时，就退回用整条内容宽
-      （那时标签会独占一行，见 :func:`_row_lines`）。
+      （那时首行预算退回整条内容宽——标签仍与第一块**垂直居中**，
+      只是水平方向不再与按钮同行）。
     """
     if not buttons:
         return [[]]
@@ -1229,12 +1225,10 @@ class SettingsDialog(ThemedDialog):
             for label, buttons in groups
         )
 
-        # 高度按"这一行占几行"算，判据与 `_place_rows` **共用**
-        # `_row_lines`，两处不可能分叉。
+        # 高度 = 按钮块数 × 行高。**标签不额外占行**（它与第一块垂直居中）。
         body_height = 0
-        for label, chunks in self._rows:
-            body_height += (row_height + row_gap) * _row_lines(
-                label, chunks, content_width, gap)
+        for _label, chunks in self._rows:
+            body_height += (row_height + row_gap) * _row_height_lines(chunks)
         body_height -= row_gap                     # 末尾那一次多加的
 
         client_width = content_width + margin * 2
@@ -1275,13 +1269,12 @@ class SettingsDialog(ThemedDialog):
             # 见 `_label_width` 的说明）。
             label_height = label.GetSize().height
             label_width = _label_width(label)
+
+            # **标签与第一块按钮垂直居中，不额外占行。**
+            # 早先让它独占一行，结果"排序方式"飘在按钮上方——
+            # 用户直接指出"你自己看看现在怪不怪"。
             label.SetSize(left, y + max((row_pitch - label_height) // 2, 0),
                           label_width, label_height)
-
-            # 与标签同一行，还是另起一行？判据与 `_layout` 共用
-            # `_row_lines`——两处用同一个函数，不会再分叉。
-            if _row_lines(label, chunks, content_width, gap) > len(chunks):
-                y += row_pitch          # 标签单独占一行
 
             for index, chunk in enumerate(chunks):
                 row_top = y + index * row_pitch

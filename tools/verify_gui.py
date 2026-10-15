@@ -1257,6 +1257,31 @@ def main() -> int:
             else "标签与按钮同行时留出间距，放不下则标签独占一行",
         )
 
+        # **标签要与第一行按钮垂直居中对齐。**
+        #
+        # 用户截图："把标题「排序方式」和右边的按钮水平对齐，
+        # 你自己看看现在怪不怪" —— 那一版让标签**独占一行**，
+        # 于是它孤零零飘在按钮上方。标签是"这一行的标题"，
+        # 就该与这一行的按钮在同一条基线上。
+        misaligned = []
+        for label, chunks in sort_probe._rows:
+            buttons = chunks[0]
+            if not buttons:
+                continue
+            label_rect = label.GetRect()
+            button_rect = buttons[0].GetRect()
+            label_mid = label_rect.y + label_rect.height // 2
+            button_mid = button_rect.y + button_rect.height // 2
+            if abs(label_mid - button_mid) > 3:
+                misaligned.append(
+                    (label.GetLabel(), label_mid, button_mid))
+        check(
+            "设置窗口的标签与第一行按钮垂直居中（不再飘在上方）",
+            not misaligned,
+            f"中心不对齐的 = {misaligned}" if misaligned
+            else "三个标签的中心都落在各自第一行按钮的中心上",
+        )
+
         check(
             "阳性对照：当前选中项被标成 accent（一眼看出选的是哪个）",
             [b.variant for b in sort_probe._sort_buttons].count("accent") == 1
