@@ -447,6 +447,27 @@ class BorderLine(wx.Control):
             dc.DrawLine(0, y, width, y)
 
 
+class _NoButton:
+    """哨兵：传给 ``no_label`` 表示**这个弹窗只有一个按钮**。
+
+    为什么需要它，见 :meth:`ThemedDialog.__init__` 里的说明——
+    简单说：``None`` 已经用来表示"没传，用默认的否(N)"了，
+    没法再兼任"不要第二个按钮"。
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:                       # 便于调试时一眼认出
+        return "NO_BUTTON"
+
+
+#: 单按钮弹窗的写法：``ThemedDialog(..., no_label=NO_BUTTON)``。
+#:
+#: 用于**纯告知**（"已经删除了""版本是 x.y.z"）——那种弹窗给一个
+#: "否"按钮是在骗用户以为还有得选。
+NO_BUTTON = _NoButton()
+
+
 class ThemedDialog(wx.Dialog):
     """一个**自己画的**模态确认框，尺寸与间距照抄 Roboc 的原生对话框。
 
@@ -523,13 +544,29 @@ class ThemedDialog(wx.Dialog):
 
     def __init__(self, parent, theme: Theme, message: str, *,
                  title: str = "", yes_label: str | None = None,
-                 no_label: str | None = None):
+                 no_label: str | None | object = None):
         # **默认值不能在签名里写 `L(...)`。** 默认参数在**函数定义时**求值一次，
         # 而那时语言可能还没定下来。所以在体内取。
         if yes_label is None:
             yes_label = L("是(Y)", "Yes")
         if no_label is None:
             no_label = L("否(N)", "No")
+        elif no_label is NO_BUTTON:
+            # **明确要求"只有一个按钮"。**
+            #
+            # 这里踩过一个很贵的坑：原来只有 `no_label=None → 默认"否(N)"`
+            # 这一条路，于是**没有办法**建一个单按钮的弹窗——
+            # `_notify` 一直写着 `no_label=None` 并**以为**那是"不要第二个按钮"，
+            # 实际却拿到了「好 / 否(N)」两个按钮，而两个都只是关掉它。
+            #
+            # 用户报的就是这个："失效删除确认弹窗有两个按钮，功能完全一致
+            # ——关闭窗口，请简化为一个按钮「确定」。"
+            #
+            # `None` 在 Python 里是"没传"的意思，没法同时表达"不要"，
+            # 所以必须有一个明确的\"不要\"值。用 `NO_BUTTON` 而不是
+            # 空字符串或 `False`：那两种都像是"标签写错了"，
+            # 而这是一个**意图**，值得有自己的名字。
+            no_label = None
         # **必须给弹窗一个真正的标题栏。**
         #
         # 我原来用的是 `wx.BORDER_NONE` —— 结果是"一个没有标题栏、也没有

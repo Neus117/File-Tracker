@@ -43,7 +43,7 @@ from .lang import (L, PREFERENCE_CHINESE, PREFERENCE_ENGLISH,
 from .theme import METRICS, Theme, from_system as theme_from_system, scale_for_dpi
 from .tree_nav import TreeWalker, build_walk_plan, find_child_by_label, pick_fallback_item
 from .widgets import (BorderLine, IconButton, PathBar, RoundedButton,
-                       SettingsDialog, ThemedDialog, dpi_of)
+                       NO_BUTTON, SettingsDialog, ThemedDialog, dpi_of)
 
 #: 列表列定义：(标题, 初始宽, 是否居中)
 #:
@@ -374,6 +374,8 @@ class FileTracker(wx.Frame):
         self._enable_tree_row_highlight(tree)
         tree.Bind(wx.EVT_TREE_ITEM_ACTIVATED, self.on_dir_item_activated)
         tree.Bind(wx.EVT_SCROLLWIN, self.on_scroll)
+        # 导航窗格里选了东西 → 之后的「打开」以它为准（见 `on_list_selection_made`）
+        tree.Bind(wx.EVT_TREE_SEL_CHANGED, self.on_tree_selection_made)
         left_sizer.Add(self.dir_ctrl, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM,
                        METRICS.padding_gap)
         left_panel.SetSizer(left_sizer)
@@ -423,6 +425,18 @@ class FileTracker(wx.Frame):
         self.list_ctrl.Bind(wx.EVT_LIST_COL_CLICK, self.on_column_click)
         self.list_ctrl.Bind(wx.EVT_LIST_ITEM_RIGHT_CLICK, self.on_right_click)
         self.list_ctrl.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_item_activated)
+        # **记录"用户最后一次从哪里选的东西"。**
+        #
+        # 「打开」原来只看导航窗格（`dir_ctrl.GetPaths()`），
+        # 所以在记录窗格里选哪一条都没用——用户报的就是这个：
+        # "记录窗格中无论选中哪条记录，「打开」按钮都只会响应左侧导航窗格的选中项。"
+        #
+        # 判据按**选中事件**而不是 `EVT_SET_FOCUS`：
+        # 焦点会撒谎（点空白处、Tab 键、`Show()` 都会改焦点，
+        # 而用户的"选中"没变）。选中事件只在选择真的变了时候来。
+        self._focus_pane = "tree"
+        self.list_ctrl.Bind(wx.EVT_LIST_ITEM_SELECTED,
+                            self.on_list_selection_made)
         # **选中行整行高亮**（原生高亮被 item 底色压掉了，见
         # `_apply_selection_highlight`）。这几个事件都要接：
         # 点选、键盘上下、全选、以及"点空白处取消选中"。
@@ -1693,6 +1707,15 @@ class FileTracker(wx.Frame):
         if path in self.pinned_paths:
             self.pinned_paths.remove(path)
         self._rows = [r for r in self._rows if r.path != path]
+        # **走 `_notify`（单按钮），不要自己建两按钮的确认框。**
+        #
+        # 用户报的："失效删除确认弹窗有两个按钮，功能完全一致——关闭窗口，
+        # 请简化为一个按钮「确定」。"
+        #
+        # 原来这里直接建了个默认的 `ThemedDialog`，于是它带上了
+        # 「好 / 否(N)」两个按钮，而**两个都只是关掉它**——这是一条"已完成"
+        # 的通知，不是需要回答的问题。给一个不需要回答的提示配一个
+        # "否"按钮，是在骗用户以为还有得选。
         self._notify(
             L(f"路径 '{path}' 已失效，已从记录中删除。",
               f"The path '{path}' no longer exists; it has been removed."),
@@ -1854,8 +1877,60 @@ class FileTracker(wx.Frame):
     # 操作
     # ------------------------------------------------------------------
 
+    def on_list_selection_made(self, event) -> None:
+        """记录窗格里选中了某条 → 之后的「打开」以它为准。"""
+        self._focus_pane = "list"
+        # 这个控件还挂着整行高亮的处理，别把它吞掉
+        event.Skip()
+
+    def on_tree_selection_made(self, event) -> None:
+        """导航窗格里选中了某项 → 之后的「打开」以它为准。"""
+        self._focus_pane = "tree"
+        event.Skip()
+
+    def open_targets(self) -> list[str]:
+        """「打开」该打开的路径：**用户最后一次选中的那一处**。
+
+        ## 这一版修的是什么
+
+        用户报的："记录窗格中无论选中哪条记录，「打开」按钮都只会响应左侧
+        导航窗格的选中项。"
+
+        原来这里写的是 `self.dir_ctrl.GetPaths()` ——**只看导航窗格**，
+        记录窗格里选了什么完全没读。所以右边选哪一条都白选。
+
+        用户要的是"按用户鼠标焦点，即最后一个选中的项目/条目打开"。
+
+        ## 判据为什么是"选中"而不是"焦点"
+
+        `EVT_SET_FOCUS` 看着更直接，但它会撒谎：点列表**空白处**、
+        按 Tab、`Show()` 之后焦点都会跳，而用户**选中的东西没变**。
+        按焦点决定打开哪个，会在这些时刻突然换目标。
+
+        "选中事件"只在选择真的变了时候来，与用户的意图一致。
+
+        ## 为什么每次只返回**一个**
+
+        打开是"打开这一处"，不是"打开所有选中"。原来那个 `for` 循环
+        会一次弹出好几个资源管理器窗口（导航窗格是多选的）——
+        那是另一个没人要的行为，一并收掉。
+
+        选中的那一处若为空，**回退到另一处**：用户在右边点了空白取消选中
+        之后按「打开」，打开左边选中的目录，比什么都不做合理。
+        """
+        if self._focus_pane == "list":
+            path = self.selected_path()
+            if path:
+                return [path]
+            return [p for p in self.dir_ctrl.GetPaths() if p]
+        paths = [p for p in self.dir_ctrl.GetPaths() if p]
+        if paths:
+            return paths[:1]
+        path = self.selected_path()
+        return [path] if path else []
+
     def on_open(self, event) -> None:
-        for path in self.dir_ctrl.GetPaths():
+        for path in self.open_targets():
             if os.path.exists(path):
                 self.record_accessed_path(path)
                 self.open_folder(path)
@@ -1908,11 +1983,21 @@ class FileTracker(wx.Frame):
     def _notify(self, message: str, title: str) -> None:
         """弹一个**跟主题一致**的提示框（单按钮）。
 
-        用 :class:~file_tracker.widgets.ThemedDialog 而不是
+        用 :class:`~file_tracker.widgets.ThemedDialog` 而不是
         `wx.MessageBox`——后者是系统对话框，深色主题下永远是浅色面板。
+
+        **只给一个按钮**（`no_label=NO_BUTTON`）。这是一条"已经做完了"的
+        告知，不是问题；给不需要回答的提示配一个"否"，会让用户以为还有得选
+        ——那正是用户报的"两个按钮功能完全一致"。
+
+        ⚠️ **不能写 `no_label=None`。** `None` 在这套 API 里是"没传，
+        用默认的否(N)"，于是弹窗照样有两个按钮——这个坑我踩过，
+        `_notify` 一直带着一个多余的「否(N)」，直到用户截图指出。
+        所以"不要第二个按钮"必须用一个明确的哨兵值。
         """
         dialog = ThemedDialog(self, self.theme, f"{WARN} {message}",
-                              title=title, yes_label=L("好", "OK"), no_label=None)
+                              title=title, yes_label=L("好", "OK"),
+                              no_label=NO_BUTTON)
         dialog.ShowModal()
         dialog.Destroy()
         self.Refresh()
@@ -2309,7 +2394,8 @@ def _show_message_safely(text: str) -> None:
         app = _wx.App(redirect=False)
         dialog = ThemedDialog(None, theme_from_system(), text,
                               title=L(f"{APP_NAME} 版本", f"{APP_NAME} version"),
-                              yes_label=L("好", "OK"), no_label=None)
+                              yes_label=L("好", "OK"),
+                              no_label=NO_BUTTON)
         dialog.CentreOnScreen()
         dialog.ShowModal()
         dialog.Destroy()

@@ -196,6 +196,10 @@ powershell -File tools/verify_gui.ps1
 # 接线检查：找出"定义了却从来没有人读取"的东西
 python tools/check_wiring.py
 python tools/check_wiring_negative.py   # 它的阳性对照
+
+# 对话框调用点检查：两按钮却没读返回值（用户报过"两个按钮功能完全一致"）
+python tools/check_dialogs.py
+python tools/check_dialogs_negative.py  # 它的阳性对照
 ```
 
 `build.ps1` 最后会真的运行产物的 `--version`，确认它**自报的提交哈希**与本次

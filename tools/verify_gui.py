@@ -1202,6 +1202,117 @@ def main() -> int:
 
         # ==============================================================
         print()
+        print("=== 改动 ⑳：「打开」跟着最后一次选中 ===")
+        # ==============================================================
+        #
+        # 用户报："记录窗格中无论选中哪条记录，「打开」按钮都只会响应左侧
+        # 导航窗格的选中项。把「打开」设计成按用户鼠标焦点，
+        # 即最后一个选中的项目/条目打开。"
+        #
+        # 原来 `on_open` 只看 `dir_ctrl.GetPaths()`。现在走 `open_targets()`，
+        # 它按**最后一次选中**决定目标。
+        #
+        # **不真的调 `on_open`** —— 那会弹出资源管理器窗口。
+        # `on_open` 的判断输入就是 `open_targets()` 的返回值，
+        # 验这里等价于验它，而且没有副作用（并且能重复跑）。
+        row_count = frame.list_ctrl.GetItemCount()
+        check(
+            "阳性对照：列表里有记录可选中（否则下面测的是空场景）",
+            row_count > 0,
+            f"列表 {row_count} 行",
+        )
+        # 选中列表第 0 行 → 最后一次选中来自**记录窗格**
+        frame.list_ctrl.Select(0)
+        frame.list_ctrl.Focus(0)
+        for _ in range(10):
+            wx.YieldIfNeeded()
+        frame._focus_pane = "list"
+        chosen_from_list = frame.open_targets()
+        check(
+            "在记录窗格里选中 → 「打开」的目标是**列表那一行**",
+            chosen_from_list == [frame.selected_path()]
+            and frame.selected_path() != "",
+            f"目标 = {[p[-30:] for p in chosen_from_list]}，"
+            f"列表选中 = {frame.selected_path()[-30:]!r}",
+        )
+        # 再把导航窗格设为最后选中 → 目标应切回导航窗格
+        frame._focus_pane = "tree"
+        chosen_from_tree = frame.open_targets()
+        tree_paths = [p for p in frame.dir_ctrl.GetPaths() if p]
+        check(
+            "切回导航窗格后 → 「打开」的目标是**导航窗格那一项**",
+            chosen_from_tree == tree_paths[:1],
+            f"目标 = {[p[-30:] for p in chosen_from_tree]}，"
+            f"导航窗格 = {[p[-30:] for p in tree_paths]}",
+        )
+        check(
+            "阳性对照：两处目标**确实不同**（否则上面的断言什么也证明不了）",
+            chosen_from_list != chosen_from_tree,
+            f"列表 → {[p[-24:] for p in chosen_from_list]}；"
+            f"导航 → {[p[-24:] for p in chosen_from_tree]}",
+        )
+        check(
+            "一次只打开**一处**（导航窗格是多选的，原来会弹出好几个窗口）",
+            len(chosen_from_list) <= 1 and len(chosen_from_tree) <= 1,
+            f"列表 {len(chosen_from_list)} 个，导航 {len(chosen_from_tree)} 个",
+        )
+
+        # ==============================================================
+        print()
+        print("=== 改动 ㉑：不需要回答的提示只给一个按钮 ===")
+        # ==============================================================
+        #
+        # 用户报："失效删除确认弹窗有两个按钮，功能完全一致——关闭窗口，
+        # 请简化为一个按钮「确定」。"
+        single = _widgets.ThemedDialog(
+            frame, frame.theme, "测试：纯告知",
+            title="测试", yes_label="确定", no_label=_widgets.NO_BUTTON)
+        two = _widgets.ThemedDialog(
+            frame, frame.theme, "测试：需要回答", title="测试")
+        check(
+            "`no_label=NO_BUTTON` 时只有一个按钮（用户要求的那条）",
+            len(single._buttons) == 1,
+            f"按钮数 = {len(single._buttons)}"
+            f"（{[b.label for b in single._buttons]}）",
+        )
+        check(
+            "阳性对照：不给 `no_label` 时仍是两个按钮（确认框没被一起改坏）",
+            len(two._buttons) == 2,
+            f"按钮数 = {len(two._buttons)}"
+            f"（{[b.label for b in two._buttons]}）",
+        )
+        # **`no_label=None` 是一个陷阱**：它是"没传"的意思，
+        # 于是 `__init__` 补上默认的「否(N)」——单按钮弹窗建不出来。
+        # `_notify` 就这样带着一个多余的「否(N)」活了很久，直到用户截图指出。
+        trap = _widgets.ThemedDialog(
+            frame, frame.theme, "测试：None 陷阱",
+            title="测试", yes_label="好", no_label=None)
+        check(
+            "`no_label=None` **不会**给出单按钮（记录这个陷阱，别再踩）",
+            len(trap._buttons) == 2,
+            f"按钮数 = {len(trap._buttons)}"
+            f"（{[b.label for b in trap._buttons]}）——"
+            "所以要单按钮必须用 NO_BUTTON",
+        )
+        # 用户报的那条路径：失效告知走 `_notify`，而 `_notify` 传 NO_BUTTON。
+        # **验调用链而不是验字符串**：`remove_invalid_path` 里根本不会出现
+        # `no_label=`，它调的是 `_notify`。
+        source = _inspect.getsource(_app_module.FileTracker.remove_invalid_path)
+        notify_source = _inspect.getsource(_app_module.FileTracker._notify)
+        check(
+            "失效路径的告知走单按钮（`remove_invalid_path` → `_notify` → NO_BUTTON）",
+            "_notify(" in source and "NO_BUTTON" in notify_source,
+            f"remove_invalid_path 调 _notify = {'_notify(' in source}；"
+            f"_notify 用 NO_BUTTON = {'NO_BUTTON' in notify_source}",
+        )
+        single.Destroy()
+        two.Destroy()
+        trap.Destroy()
+        for _ in range(10):
+            wx.YieldIfNeeded()
+
+        # ==============================================================
+        print()
         print("=== 改动 ⑲：排序偏好（下次启动生效）===")
         # ==============================================================
         #
