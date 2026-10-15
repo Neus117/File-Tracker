@@ -35,10 +35,12 @@ from .core import (
 )
 from .store import TIME_FORMAT, PathRecord, PathStore, default_db_path, split_timestamp
 from .header import ColumnHeader
+from .lang import (L, PREFERENCE_CHINESE, PREFERENCE_ENGLISH,
+                   apply as apply_language, is_chinese)
 from .theme import METRICS, Theme, from_system as theme_from_system, scale_for_dpi
 from .tree_nav import TreeWalker, build_walk_plan, find_child_by_label, pick_fallback_item
 from .widgets import (BorderLine, IconButton, PathBar, RoundedButton,
-                       ThemedDialog, dpi_of)
+                       SettingsDialog, ThemedDialog, dpi_of)
 
 #: 列表列定义：(标题, 初始宽, 是否居中)
 #:
@@ -46,14 +48,31 @@ from .widgets import (BorderLine, IconButton, PathBar, RoundedButton,
 #: 拆成"访问日期"+"访问时间"之后两者之间有真正的列间距，比换用任何分隔符
 #: 都明确——同一个分隔符在不同字号、不同 DPI 下观感差别很大。
 #: 数据库里仍存整串，只在显示时拆（见 :func:`store.split_timestamp`）。
+#:
+#: **宽度与居中标记是"结构"，列标题是"文案"——两者分开。**
+#:
+#: 标题不能写在这里：模块级常量在 **import 时**求值，而语言偏好要等
+#: `lang.apply()`（启动早期、但晚于 import）才知道。写在模块级，
+#: 双语判断就会永远用系统的默认答案，用户在设置里选了也不生效。
+#: 所以标题走 `column_labels()`，**每次用的时候现取**。
 COLUMNS = (
-    ("访问的路径", 400, False),
-    ("频次", 90, True),
-    ("访问日期", 120, True),
-    ("访问时间", 110, True),
+    (400, False),
+    (90, True),
+    (120, True),
+    (110, True),
 )
 
 COLUMN_PATH, COLUMN_COUNT, COLUMN_DATE, COLUMN_CLOCK = 0, 1, 2, 3
+
+
+def column_labels() -> tuple[str, ...]:
+    """四个列标题（跟随当前语言）。"""
+    return (
+        L("访问的路径", "Path"),
+        L("频次", "Count"),
+        L("访问日期", "Date"),
+        L("访问时间", "Time"),
+    )
 # 注：曾经还有一个 `COLUMN_TIME = COLUMN_DATE`，给"切换排序"按钮在两个
 # 排序列之间切换用。那个按钮已按用户要求删除（"没什么用"），
 # 排序列改由列头点击直接指定，所以这个别名没有读者了——已删。
@@ -85,6 +104,12 @@ class FileTracker(wx.Frame):
         if not os.path.exists(self.app_data_dir):
             os.makedirs(self.app_data_dir, exist_ok=True)
         self.config = Config(os.path.join(self.app_data_dir, "config.json"))
+        # **语言必须在建任何界面之前定下来。**
+        #
+        # 按钮文字、列标题、提示都是建控件时按当时语言取的字面量；
+        # 晚一步就会先看到中文、切主题或重开才变英文。
+        # （`apply(None)` 表示"配置里没存过"，此时问系统。）
+        apply_language(self.config.get_language())
 
         try:
             self.store = PathStore(default_db_path())
@@ -98,7 +123,10 @@ class FileTracker(wx.Frame):
             # **不要为了统一外观把这条也换掉**：换了会连提示都弹不出来。
             # ⚠️ 同样放**正文**开头（与其余弹窗一致，见 `_notify`）。
             # 系统对话框只有正文与标题两个位置，这里沿用同一套约定。
-            wx.MessageBox(f"{WARN} 初始化数据库时发生错误: {error}", "数据库错误",
+            wx.MessageBox(
+                f"{WARN} " + L("初始化数据库时发生错误: ",
+                                 "Could not open the database: ") + str(error),
+                L("数据库错误", "Database error"),
                           wx.OK | wx.ICON_ERROR)
             raise
 
@@ -159,13 +187,14 @@ class FileTracker(wx.Frame):
         """
         icon_path = resource_path(os.path.join("images", icon_name))
         if not os.path.exists(icon_path):
-            self._report_resource_error(f"图标不存在：{icon_path}")
+            self._report_resource_error(L(f"图标不存在：{icon_path}", f"Icon not found: {icon_path}"))
             return False
         try:
             self.SetIcon(wx.Icon(icon_path, wx.BITMAP_TYPE_ICO))
             return True
         except Exception as error:
-            self._report_resource_error(f"图标加载失败：{icon_path}（{error}）")
+            self._report_resource_error(L(f"图标加载失败：{icon_path}（{error}）",
+                            f"Could not load icon: {icon_path} ({error})"))
             return False
 
     def load_bitmap(self, bitmap_name: str, size=None) -> wx.Bitmap | None:
@@ -179,12 +208,13 @@ class FileTracker(wx.Frame):
         """
         bitmap_path = resource_path(os.path.join("images", bitmap_name))
         if not os.path.exists(bitmap_path):
-            self._report_resource_error(f"图片不存在：{bitmap_path}")
+            self._report_resource_error(L(f"图片不存在：{bitmap_path}", f"Image not found: {bitmap_path}"))
             return None
 
         image = wx.Image(bitmap_path, wx.BITMAP_TYPE_PNG)
         if not image.IsOk():
-            self._report_resource_error(f"图片无法解码：{bitmap_path}")
+            self._report_resource_error(L(f"图片无法解码：{bitmap_path}",
+                                    f"Could not decode image: {bitmap_path}"))
             return None
         if size:
             image = image.Scale(size[0], size[1], wx.IMAGE_QUALITY_HIGH)
@@ -344,8 +374,9 @@ class FileTracker(wx.Frame):
             | wx.LC_NO_HEADER,
         )
         self.list_ctrl.SetBackgroundColour(wx.Colour(self.theme.card))
-        for index, (title, width, _centered) in enumerate(COLUMNS):
-            self.list_ctrl.InsertColumn(index, title, width=width)
+        for index, (width, _centered) in enumerate(COLUMNS):
+            self.list_ctrl.InsertColumn(index, column_labels()[index],
+                                        width=width)
         # **恢复原版 1.1 的三条接线。** 中间一版换成 DataViewListCtrl 时，
         # 列头点击排序被删掉了——用户实测指出"所有点击功能全部失效"。
         self.list_ctrl.Bind(wx.EVT_LIST_COL_CLICK, self.on_column_click)
@@ -372,8 +403,8 @@ class FileTracker(wx.Frame):
         # **自绘表头**：原生 SysHeader32 在深色主题下不采纳任何设色，见 header.py
         self.header = ColumnHeader(
             card_panel, self.theme,
-            titles=[title for title, _w, _c in COLUMNS],
-            widths=[width for _t, width, _c in COLUMNS],
+            titles=list(column_labels()),
+            widths=[width for width, _c in COLUMNS],
             on_column_click=self.on_header_clicked,
         )
         # 注意：**这里不能马上藏原生表头**——此刻它还没被创建。
@@ -385,17 +416,17 @@ class FileTracker(wx.Frame):
         right_sizer.Add(card_panel, 1, wx.EXPAND | wx.ALL, METRICS.padding_gap)
 
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.open_btn = RoundedButton(right_panel, "打开", self.theme,
+        self.open_btn = RoundedButton(right_panel, L("打开", "Open"), self.theme,
                                       variant="accent", min_width=72,
                                       on_click=self.on_open)
-        self.clear_btn = RoundedButton(right_panel, "清空", self.theme,
+        self.clear_btn = RoundedButton(right_panel, L("清空", "Clear"), self.theme,
                                        variant="danger", min_width=72,
                                        on_click=self.on_clear)
 
-        # **按钮排布（用户 2026-10-15 最终指定）**：
+        # **按钮排布（用户指定）**：
         #
-        #     [打开] ......... [清空] ......... [顶置]
-        #      最左             正中           最右
+        #     [打开] ..... [清空] ..... [⚙设置] [📌顶置]
+        #      最左         正中          最右（设置紧靠顶置左边）
         #
         # 中途试过一版"清空最左、打开正中"，用户要求换回来：
         # "打开和清空位置还是交换回来吧。"
@@ -403,10 +434,18 @@ class FileTracker(wx.Frame):
         # 「切换排序」按钮已被用户要求删除（"没什么用"）；
         # **排序入口没有丢**——列头点击排序一直是好的
         # （`wx.EVT_LIST_COL_CLICK` → `on_column_click`）。
+        #
+        # 设置按钮是 2026-10-16 加的，位置由用户指定：
+        # "把设置按钮放在底部右侧、程序置顶按钮左边"。
         btn_sizer.Add(self.open_btn, 0, 0)
         btn_sizer.AddStretchSpacer()
         btn_sizer.Add(self.clear_btn, 0, 0)
         btn_sizer.AddStretchSpacer()
+        self.settings_btn = self._build_icon_button(
+            right_panel, "settings.png", L("设置", "Settings"),
+            self.on_settings)
+        btn_sizer.Add(self.settings_btn, 0, wx.ALIGN_CENTER_VERTICAL)
+        btn_sizer.AddSpacer(METRICS.padding_tight)
 
         self.pin_btn = self._build_pin_button(right_panel)
         btn_sizer.Add(self.pin_btn, 0, wx.ALIGN_CENTER_VERTICAL)
@@ -443,34 +482,51 @@ class FileTracker(wx.Frame):
         self.center_frequency_column()
         self.list_ctrl.Bind(wx.EVT_SIZE, self._on_list_resized)
 
-    def _build_pin_button(self, parent) -> IconButton:
+    def _build_pin_button(self, parent):
         """构造顶置开关按钮。
 
-        图片加载失败时退化成文字按钮而不是留一个空白的不可见按钮——
-        原来的写法会让"资源没找到"表现为"这里什么都没有"。
+        `_pin_is_text_button` 是给"图片缺失时退化成文字按钮"留的标记，
+        测试与验证脚本靠它区分两种形态。
         """
-        bitmap = self.load_bitmap("pin_grey.png")
-        if bitmap is None:
-            fallback = RoundedButton(parent, "顶置", self.theme, min_width=64,
-                                     on_click=self.on_always_on_top)
-            self._pin_is_text_button = True
-            return fallback
+        button = self._build_icon_button(
+            parent, "pin_grey.png", L("顶置", "Pin"), self.on_always_on_top)
+        self._pin_is_text_button = isinstance(button, RoundedButton)
+        return button
 
-        # 图标尺寸必须过 DPI：原来写死的 28 在 175% 缩放下偏大。
-        # **用 self 而不是 parent 算 DPI**——parent 此时可能还没绑定到顶层窗口，
-        # FromDIP 会退回 96（踩过：按钮因此变成 42 像素高）。
+    def _build_icon_button(self, parent, png_name: str, fallback_label: str,
+                           handler):
+        """构造一个图标按钮，**图片加载失败时退化成文字按钮**。
+
+        ## 为什么必须有退化路径
+
+        原来的写法会让"资源没找到"表现为"这里什么都没有"——
+        用户看到的是一个空白的、也点不动的方块。退化成文字按钮，
+        功能至少还在，而且"图标没加载"这件事是看得见的。
+
+        ## 三个踩过的点，都还在
+
+        1. **图标尺寸必须过 DPI。** 原来写死的 28 在 175% 缩放下偏大。
+        2. **用 `self` 而不是 `parent` 算 DPI。** parent 此时可能还没绑定到
+           顶层窗口，`FromDIP` 会退回 96（踩过：按钮因此变成 42 像素高）。
+        3. **回调必须在这里传进去。** 曾经只造了控件、没有绑任何东西，
+           于是"画得好好的、点了没反应"——用户报的"功能本身都失效了"。
+
+        顶置与设置两个按钮**共用这一份实现**：原来只有顶置有这段逻辑，
+        再抄一遍给设置就是把上面三个坑各踩第二次。
+        """
+        bitmap = self.load_bitmap(png_name)
+        if bitmap is None:
+            return RoundedButton(parent, fallback_label, self.theme,
+                                 min_width=64, on_click=handler)
+
         dpi = dpi_of(self)
         icon_size = self.calculate_icon_size(
             bitmap.GetSize(), scale_for_dpi(METRICS.icon_target_size, dpi),
         )
-        scaled = self.load_bitmap("pin_grey.png", icon_size) or bitmap
+        scaled = self.load_bitmap(png_name, icon_size) or bitmap
         side = scale_for_dpi(METRICS.button_height, dpi)
-        self._pin_is_text_button = False
-        # **回调必须在这里传进去。**
-        # 原来只造了控件、没有绑任何东西，于是"画得好好的、点了没反应"——
-        # 用户报的"功能本身都失效了"。见 widgets.IconButton 的说明。
         return IconButton(parent, scaled, self.theme, (side, side),
-                          on_click=self.on_always_on_top)
+                          on_click=handler)
 
     def _apply_initial_size(self) -> None:
         """改动 ①：初始窗口增大 15%，并按显示器工作区夹取。
@@ -649,7 +705,8 @@ class FileTracker(wx.Frame):
             tree.Refresh()
             return True
         except Exception as error:
-            self._report_resource_error(f"设置目录树整行高亮失败：{error}")
+            self._report_resource_error(L(f"设置目录树整行高亮失败：{error}",
+                f"Could not enable full-row highlight: {error}"))
             return False
 
     def _remove_tree_client_edge(self) -> bool:
@@ -675,8 +732,10 @@ class FileTracker(wx.Frame):
         if win32.remove_client_edge(tree.GetHandle()):
             return True
         self._report_resource_error(
-            "去掉导航窗格的原生边框失败（WS_EX_CLIENTEDGE）——"
-            "深色主题下它会显示为一圈白线。"
+            L("去掉导航窗格的原生边框失败（WS_EX_CLIENTEDGE）——"
+              "深色主题下它会显示为一圈白线。",
+              "Could not remove the navigation pane's native border "
+              "(WS_EX_CLIENTEDGE) — it shows as a white ring in dark mode.")
         )
         return False
 
@@ -726,7 +785,9 @@ class FileTracker(wx.Frame):
         handle = self.list_ctrl.GetHandle()
         win32.hide_child_window(handle, "SysHeader32")
         self._report_resource_error(
-            "原生表头仍在占用列表顶部空间——自绘表头下方会多出一条空白。"
+            L("原生表头仍在占用列表顶部空间——自绘表头下方会多出一条空白。",
+                  "The native header still occupies space at the top of the "
+                  "list — a blank strip appears under the self-drawn header.")
         )
 
     def on_header_clicked(self, column: int) -> None:
@@ -857,13 +918,18 @@ class FileTracker(wx.Frame):
             | win32.LVS_EX_ONECLICKACTIVATE)
         if leftover:
             self._report_resource_error(
-                f"列表扩展样式没清干净（{leftover:#x}）——"
-                "热跟踪会让预选色随主题而变，ONECLICKACTIVATE 还会让单击直接打开")
+                L(f"列表扩展样式没清干净（{leftover:#x}）——"
+                  "热跟踪会让预选色随主题而变，"
+                  "ONECLICKACTIVATE 还会让单击直接打开",
+                  f"List extended styles not cleared ({leftover:#x}) — "
+                  "hot tracking makes the hover colour theme-dependent, "
+                  "and ONECLICKACTIVATE opens on a single click"))
 
         dpi = dpi_of(self)
         extra = scale_for_dpi(METRICS.list_item_extra_height, dpi)
         if not win32.set_item_spacing(handle, -1, extra):
-            self._report_resource_error("设置列表行距未生效（LVM_SETITEMSPACING）")
+            self._report_resource_error(L("设置列表行距未生效（LVM_SETITEMSPACING）",
+                                              "Row spacing was not applied (LVM_SETITEMSPACING)"))
         # 行距变了，竖线要按新行高重画
         self._draw_column_separators()
 
@@ -986,9 +1052,13 @@ class FileTracker(wx.Frame):
                 widths.append(extent(self.list_ctrl.GetItemText(row, column)).width)
             return max(widths) + extra
 
-        frequency_width = fitted(COLUMN_COUNT, COLUMNS[COLUMN_COUNT][0])
-        date_width = fitted(COLUMN_DATE, COLUMNS[COLUMN_DATE][0])
-        clock_width = fitted(COLUMN_CLOCK, COLUMNS[COLUMN_CLOCK][0])
+        # 列宽按**当前语言**的表头量。`COLUMNS` 里现在只有宽度与居中标记，
+        # 标题要从 `column_labels()` 取——用 `COLUMNS[i][0]` 会拿到一个整数
+        # （实测报 `GetTextExtent(): argument 1 has unexpected type 'int'`）。
+        labels = column_labels()
+        frequency_width = fitted(COLUMN_COUNT, labels[COLUMN_COUNT])
+        date_width = fitted(COLUMN_DATE, labels[COLUMN_DATE])
+        clock_width = fitted(COLUMN_CLOCK, labels[COLUMN_CLOCK])
 
         self.list_ctrl.SetColumnWidth(COLUMN_COUNT, frequency_width)
         self.list_ctrl.SetColumnWidth(COLUMN_DATE, date_width)
@@ -1133,7 +1203,8 @@ class FileTracker(wx.Frame):
             tree.Refresh()
             wx.CallLater(50, self.finalize_scroll_restore)
         except Exception as error:
-            self._report_resource_error(f"恢复滚动位置时出错: {error}")
+            self._report_resource_error(L(f"恢复滚动位置时出错: {error}",
+                              f"Could not restore the scroll position: {error}"))
 
     def finalize_scroll_restore(self) -> None:
         tree = self.dir_ctrl.GetTreeCtrl()
@@ -1207,7 +1278,7 @@ class FileTracker(wx.Frame):
             return
 
         if plan["status"] == "missing":
-            self._notify(plan["hint"], "路径不存在")
+            self._notify(plan["hint"], L("路径不存在", "Path not found"))
             self.path_bar.focus()
             return
 
@@ -1515,7 +1586,8 @@ class FileTracker(wx.Frame):
             self._hover_painted = hovered
             self.list_ctrl.Refresh()
         except Exception as error:
-            self._report_resource_error(f"设置行高亮失败：{error}")
+            self._report_resource_error(L(f"设置行高亮失败：{error}",
+                              f"Could not apply the row highlight: {error}"))
 
     def _center_text(self, text: str) -> str:
         # 把公式改成按真实列宽算
@@ -1560,7 +1632,10 @@ class FileTracker(wx.Frame):
         if path in self.pinned_paths:
             self.pinned_paths.remove(path)
         self._rows = [r for r in self._rows if r.path != path]
-        self._notify(f"路径 '{path}' 已失效，已从记录中删除。", "路径失效")
+        self._notify(
+            L(f"路径 '{path}' 已失效，已从记录中删除。",
+              f"The path '{path}' no longer exists; it has been removed."),
+            L("路径失效", "Path missing"))
 
     def confirm_remove_invalid_path(self, path: str) -> bool:
         """失效路径：**先问用户**要不要删，返回是否真的删了。
@@ -1580,8 +1655,12 @@ class FileTracker(wx.Frame):
         """
         dialog = ThemedDialog(
             self, self.theme,
-            f"{WARN} 这条路径已失效：\n\n{path}\n\n要从记录中删除它吗？",
-            title="路径已失效", yes_label="删除", no_label="保留",
+            f"{WARN} "
+            + L("这条路径已失效：", "This path no longer exists:")
+            + f"\n\n{path}\n\n"
+            + L("要从记录中删除它吗？", "Remove it from the records?"),
+            title=L("路径已失效", "Path missing"),
+            yes_label=L("删除", "Delete"), no_label=L("保留", "Keep"),
         )
         try:
             answer = dialog.ShowModal()
@@ -1717,7 +1796,7 @@ class FileTracker(wx.Frame):
         `wx.MessageBox`——后者是系统对话框，深色主题下永远是浅色面板。
         """
         dialog = ThemedDialog(self, self.theme, f"{WARN} {message}",
-                              title=title, yes_label="好", no_label=None)
+                              title=title, yes_label=L("好", "OK"), no_label=None)
         dialog.ShowModal()
         dialog.Destroy()
         self.Refresh()
@@ -1738,8 +1817,8 @@ class FileTracker(wx.Frame):
         # 深色下永远是浅色面板——用户反馈"警告弹窗的深色主题适配失败"。
         # 系统对话框没有受支持的换肤接口，**只能换成自己画的**。
         dialog = ThemedDialog(self, self.theme,
-                              f"{WARN} 确定要删除这条记录吗？",
-                              title="确认删除")
+                              f"{WARN} " + L("确定要删除这条记录吗？", "Delete this record?"),
+                              title=L("确认删除", "Confirm delete"))
         if dialog.ShowModal() == wx.ID_YES:
             self.store.remove(path)
             if path in self.pinned_paths:
@@ -1750,8 +1829,8 @@ class FileTracker(wx.Frame):
 
     def on_clear(self, event) -> None:
         dialog = ThemedDialog(self, self.theme,
-                              f"{WARN} 确定要清空所有记录吗？",
-                              title="确认清空")
+                              f"{WARN} " + L("确定要清空所有记录吗？", "Clear all records?"),
+                              title=L("确认清空", "Confirm clear"))
         if dialog.ShowModal() == wx.ID_YES:
             self.store.clear()
             self.list_ctrl.DeleteAllItems()
@@ -1784,12 +1863,12 @@ class FileTracker(wx.Frame):
 
         menu = wx.Menu()
         entries = [
-            ("复制路径", self.on_copy),
+            (L("复制路径", "Copy path"), self.on_copy),
             # 顶置与取消顶置共用一格，按当前状态决定绑哪个处理函数
-            ("取消顶置" if is_pinned else "顶置",
+            (L("取消顶置", "Unpin") if is_pinned else L("顶置", "Pin"),
              self.on_unpin if is_pinned else self.on_pin),
-            ("打开", self.on_open_selected),
-            ("删除", self.on_delete_selected),
+            (L("打开", "Open"), self.on_open_selected),
+            (L("删除", "Delete"), self.on_delete_selected),
         ]
         for label, handler in entries:
             item = menu.Append(wx.ID_ANY, label)
@@ -1807,7 +1886,10 @@ class FileTracker(wx.Frame):
             bitmap_name = "pin_red.png"
 
         if getattr(self, "_pin_is_text_button", False):
-            self.pin_btn.SetLabel("取消顶置" if self.GetWindowStyle() & wx.STAY_ON_TOP else "顶置")
+            self.pin_btn.SetLabel(
+                L("取消顶置", "Unpin")
+                if self.GetWindowStyle() & wx.STAY_ON_TOP
+                else L("顶置", "Pin"))
             return
 
         bitmap = self.load_bitmap(bitmap_name)
@@ -1879,6 +1961,84 @@ class FileTracker(wx.Frame):
         # 所以这里再摆一次（幂等，代价是两次 SetSize）
         self._position_pane_border()
 
+    def on_settings(self, event) -> None:
+        """打开设置窗口；用户点确定且语言变了就**立刻**生效并持久化。
+
+        ## 为什么"立刻生效"值得做
+
+        让用户"改完重启才看到英文"是最省事的做法，但那等于没验证——
+        他看不到自己选的东西，也就无从判断选对没有。
+        Roboc 切换语言时是即时重画的（`SettingsWindow` 里改完
+        `Lang.Apply` 直接 `Invalidate`），这里跟随同样的做法。
+        """
+        # 当前生效值：配置里存过就用存的，没存过就是系统检测出来的那个。
+        before = self.config.get_language() or (
+            PREFERENCE_CHINESE if is_chinese() else PREFERENCE_ENGLISH)
+        dialog = SettingsDialog(self, self.theme, before)
+        try:
+            if dialog.ShowModal() != wx.ID_YES:
+                return
+            chosen = dialog.selected_preference()
+        finally:
+            dialog.Destroy()
+
+        self.config.set_language(chosen)
+        try:
+            self.config.save()
+        except OSError as error:
+            self._report_resource_error(L(f"无法保存语言偏好: {error}", f"Could not save the language: {error}"))
+
+        # 生效 + 重画。`apply_language` 要在 retranslate 之前——
+        # retranslate 里每一次 `L(...)` 读的都是它刚设下的那个值。
+        apply_language(chosen)
+        self.retranslate()
+
+    def retranslate(self) -> None:
+        """把界面上所有文案按**当前语言**重取一遍。
+
+        ## 只改文字，不动尺寸
+
+        按钮宽度是按文字算的不是写死的（`RoundedButton` 会 `SetMinSize`），
+        所以换语言后 `Layout()` 一次就够，不需要重建控件。
+        重建会丢掉选中行、滚动位置和目录树的展开状态——
+        为了几个字付这个代价不值得。
+
+        **原生 `wx.ListCtrl` 的列标题改不了**（`SetColumn` 的 `LVCOLUMN`
+        只支持改文字，但 wx 的 `InsertColumn` 是追加语义，原地改要靠
+        `SetColumnText`）——所以列表那四列直接调它，表头是自绘的、
+        改 `titles` 再 `Refresh` 即可。
+        """
+        labels = column_labels()
+        for index, title in enumerate(labels):
+            # **`wx.ListCtrl` 没有 `SetColumnText`**（实测 `hasattr` 为 False）。
+            # 早先写了个 `try: SetColumnText ... except: pass`，于是
+            # `AttributeError` 被静默吞掉、原生列标题**永远不变**——
+            # 看上去像"改语言没生效"。正确写法是取回列表项、改文字、再写回。
+            column = self.list_ctrl.GetColumn(index)
+            if column is None:
+                continue
+            column.SetText(title)
+            self.list_ctrl.SetColumn(index, column)
+        self.header.set_titles(labels)
+
+        self.open_btn.SetLabel(L("打开", "Open"))
+        self.clear_btn.SetLabel(L("清空", "Clear"))
+        self.path_bar.SetHint(L("输入或粘贴路径", "Type or paste a path"))
+        self._refresh_pin_label()
+        self.Layout()
+        self.Refresh()
+
+    def _refresh_pin_label(self) -> None:
+        """顶置按钮的两种形态都要跟着语言走。
+
+        图标形态没有可见文字（`IconButton` 只画位图），但**文字兜底形态**
+        有——图片缺失时那个按钮就是靠文字表达的，不刷新它就会中英混排。
+        """
+        pinned = bool(self.GetWindowStyle() & wx.STAY_ON_TOP)
+        if getattr(self, "_pin_is_text_button", False):
+            self.pin_btn.SetLabel(
+                L("取消顶置", "Unpin") if pinned else L("顶置", "Pin"))
+
     def on_show(self, event) -> None:
         if event.IsShown():
             # 每次显示窗口都要重藏原生表头——`Show()` 会把它翻出来
@@ -1901,12 +2061,12 @@ class FileTracker(wx.Frame):
             self.save_scroll_position()
             self.config.save()
         except OSError as error:
-            wx.LogError(f"无法保存配置: {error}")
+            wx.LogError(L(f"无法保存配置: {error}", f"Could not save the config: {error}"))
 
         try:
             self.store.close()
         except Exception as error:
-            wx.LogError(f"关闭数据库时出错: {error}")
+            wx.LogError(L(f"关闭数据库时出错: {error}", f"Error while closing the database: {error}"))
 
         event.Skip()
 
@@ -1994,7 +2154,9 @@ def _emit_or_log(text: str) -> None:
         log_path = None
 
     if log_path:
-        _show_message_safely(f"{text}\n\n（已写入 {log_path}）")
+        _show_message_safely(
+            f"{text}\n\n"
+            + L(f"（已写入 {log_path}）", f"(written to {log_path})"))
 
 
 def _show_message_safely(text: str) -> None:
@@ -2011,8 +2173,8 @@ def _show_message_safely(text: str) -> None:
 
         app = _wx.App(redirect=False)
         dialog = ThemedDialog(None, theme_from_system(), text,
-                              title=f"{APP_NAME} 版本",
-                              yes_label="好", no_label=None)
+                              title=L(f"{APP_NAME} 版本", f"{APP_NAME} version"),
+                              yes_label=L("好", "OK"), no_label=None)
         dialog.CentreOnScreen()
         dialog.ShowModal()
         dialog.Destroy()
@@ -2056,11 +2218,14 @@ def _run_selftest() -> int:
 
     icon = resource_path("images/shell32_star.ico")
     if not os.path.exists(icon):
-        problems.append(f"图标缺失: {icon}")
-    for name in ("pin_grey.png", "pin_red.png"):
+        problems.append(L(f"图标缺失: {icon}", f"Icon missing: {icon}"))
+    # **每一个图标按钮用到的图都要在这里。**
+    # 漏掉一个，`_build_icon_button` 就会静默退化成文字按钮——
+    # 构建仍然全绿，用户看到的是"设置按钮没有图标"。
+    for name in ("pin_grey.png", "pin_red.png", "settings.png"):
         path = resource_path(os.path.join("images", name))
         if not os.path.exists(path):
-            problems.append(f"图片缺失: {path}")
+            problems.append(L(f"图片缺失: {path}", f"Image missing: {path}"))
 
     with tempfile.TemporaryDirectory() as scratch:
         store = PathStore(os.path.join(scratch, "selftest.db"))
@@ -2068,7 +2233,7 @@ def _run_selftest() -> int:
         store.record_access("C:\\selftest")
         record = store.get("C:\\selftest")
         if record is None or record.access_count != 2:
-            problems.append(f"频次自增不正确: {record}")
+            problems.append(L(f"频次自增不正确: {record}", f"Access count did not increment: {record}"))
         store.close()
 
     status = "OK" if not problems else "FAIL"

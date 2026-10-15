@@ -19,7 +19,17 @@ from __future__ import annotations
 import wx
 
 from . import win32
+from .lang import CHOICES, DISPLAY_NAMES, L
 from .theme import METRICS, Theme, scale_for_dpi
+
+
+def _measure_probe() -> str:
+    """量行高用的样本字。**不是文案，不要翻译。**
+
+    用一个有两三个字的样本顶到最高字形；换成英文单词量不到中文的
+    字体高度，行距会算小。
+    """
+    return "频次"
 
 
 def dpi_of(window) -> int:
@@ -511,8 +521,14 @@ class ThemedDialog(wx.Dialog):
     """
 
     def __init__(self, parent, theme: Theme, message: str, *,
-                 title: str = "", yes_label: str = "是(Y)",
-                 no_label: str | None = "否(N)"):
+                 title: str = "", yes_label: str | None = None,
+                 no_label: str | None = None):
+        # **默认值不能在签名里写 `L(...)`。** 默认参数在**函数定义时**求值一次，
+        # 而那时语言可能还没定下来。所以在体内取。
+        if yes_label is None:
+            yes_label = L("是(Y)", "Yes")
+        if no_label is None:
+            no_label = L("否(N)", "No")
         # **必须给弹窗一个真正的标题栏。**
         #
         # 我原来用的是 `wx.BORDER_NONE` —— 结果是"一个没有标题栏、也没有
@@ -756,7 +772,7 @@ class ThemedDialog(wx.Dialog):
         """正文折行后的总高度。"""
         dc = wx.ClientDC(self)
         dc.SetFont(self.GetFont())
-        line_height = dc.GetTextExtent("频次").height or 1
+        line_height = dc.GetTextExtent(_measure_probe()).height or 1
         self._lines = self._wrap_lines(max_text_width)
         return line_height * len(self._lines)
 
@@ -792,7 +808,7 @@ class ThemedDialog(wx.Dialog):
         left, top, right, _bottom = self._body_rect
         dc.SetFont(self.GetFont())
         dc.SetTextForeground(wx.Colour(self.theme.text))
-        line_height = dc.GetTextExtent("频次").height or 1
+        line_height = dc.GetTextExtent(_measure_probe()).height or 1
         lines = getattr(self, "_lines", None) or [self._message]
         # 用 `_body_rect` 的中点当轴——左右各留了 margin，所以居中后
         # 两边到窗口边缘的距离相等。
@@ -849,6 +865,146 @@ class ThemedDialog(wx.Dialog):
         # 标题栏颜色也跟着主题走
         self._apply_window_chrome()
         self.Refresh()
+
+
+class SettingsDialog(ThemedDialog):
+    """设置窗口：目前只有一项——**界面语言**。
+
+    ## 为什么继承 `ThemedDialog` 而不是另起一个 `wx.Dialog`
+
+    `ThemedDialog` 已经把四件容易出错的事做完了，而且**都有验证脚本守着**：
+
+    * 固定公式的布局（不 `Fit()`，瓦高比始终正常）
+    * 标题栏：`CAPTION | SYSTEM_MENU` + 深色 + 程序图标 + 圆角
+    * `BG_STYLE_PAINT`（漏了它正文一个字都画不出来）
+    * 单子控件被 `wx.Dialog` 拉满客户区的那个坑
+
+    另起一个就等于把这四条重做一遍，而它们每一条都是踩出来的。
+    这里只做两件增量的事：**加一行语言选择**、**把这一行摆进正文里**。
+
+    ## 语言行照 Roboc `SettingsWindow.DrawLanguageRow` 的组织方式
+
+    左边一个标签、右边两个分段选项（当前项用强调色填充）。
+    Roboc 是自绘的；这里用 (:class:`RoundedButton`) 拼出来，
+    视觉沿用本项目自己的按钮，不引入第二套画法。
+    """
+
+    def __init__(self, parent, theme, current_preference: str):
+        # 正文留空——设置窗口的内容是控件，不是一句话。
+        super().__init__(parent, theme, "",
+                         title=L("设置", "Settings"),
+                         yes_label=L("确定", "OK"),
+                         no_label=L("取消", "Cancel"))
+        self._choice = current_preference
+        self._language_buttons: list[RoundedButton] = []
+        self._build_language_row()
+        self._layout()
+
+    # -- 构造 -------------------------------------------------------------
+
+    def _build_language_row(self) -> None:
+        # **标签用 `wx.StaticText` 而不是自绘。** 它是纯静态文字，
+        # 原生控件在这里足够，也天然跟随系统字体。
+        self._label = wx.StaticText(self, label=L("界面语言", "Language"))
+        self._label.SetForegroundColour(wx.Colour(self.theme.text))
+        self._label.SetBackgroundColour(wx.Colour(self.theme.background))
+
+        # 选项与显示名都从 `lang` 取——**不要在界面里再抄一份语言清单**，
+        # 那样加一种语言就要改两处，而漏改的那一处不会有任何提示。
+        for value in CHOICES:
+            caption = DISPLAY_NAMES[value]
+            button = RoundedButton(
+                self, caption, self.theme,
+                # 选中的那个用强调色——**"当前是哪一项"必须一眼看出来**，
+                # 这正是 Roboc 用 accent 填充活动分段的原因。
+                variant="accent" if value == self._choice else "secondary",
+                height=METRICS.dialog_button_height,
+                min_width=METRICS.dialog_button_width,
+                on_click=(lambda _event, v=value: self._choose(v)),
+            )
+            button._language_value = value
+            self._language_buttons.append(button)
+
+    def _choose(self, value: str) -> None:
+        """点一下**立刻**换色，不等点确定。"""
+        self._choice = value
+        for button in self._language_buttons:
+            button.variant = ("accent"
+                              if button._language_value == value
+                              else "secondary")
+            button.Refresh()
+
+    def selected_preference(self) -> str:
+        return self._choice
+
+    # -- 布局 -------------------------------------------------------------
+
+    def _layout(self) -> None:
+        """先按基类算好，再把语言行插进正文区。
+
+        基线：正文区在 `_body_rect`，按钮组在 `_buttons_top`。
+        这里把正文区**留给语言行**（它比一行文字高），
+        再把整体高度加上这一行的高度。
+
+        **基类 `__init__` 会先调一次 `_layout()`**，那时语言行还没建出来。
+        所以要先判断它是否存在——否则会 `AttributeError`
+        （实测：`'SettingsDialog' object has no attribute '_label'`）。
+        基类那一次只需要把按钮位置算好；真正的尺寸由我们随后这次定。
+        """
+        super()._layout()
+        if not hasattr(self, "_label"):
+            return
+        dpi = dpi_of(self)
+        row_height = scale_for_dpi(METRICS.dialog_button_height, dpi)
+        gap = scale_for_dpi(METRICS.padding_gap, dpi)
+        margin = scale_for_dpi(METRICS.dialog_margin, dpi)
+
+        # 正文区改为容纳这一行
+        label_width = self._label.GetBestSize().width
+        buttons_width = sum(b.GetBestSize().width
+                            for b in self._language_buttons) + gap
+        content_width = max(label_width + gap + buttons_width,
+                            METRICS.dialog_button_width * 2)
+        client_width = max(content_width + margin * 2,
+                           len(self._labels)
+                           * scale_for_dpi(METRICS.dialog_button_width, dpi)
+                           + scale_for_dpi(METRICS.dialog_button_gap, dpi)
+                           + margin * 2)
+
+        self._body_rect = (margin, margin,
+                           client_width - margin, margin + row_height)
+        self._buttons_top = margin + row_height + scale_for_dpi(
+            METRICS.dialog_body_to_buttons, dpi)
+        client_height = (self._buttons_top + row_height
+                         + scale_for_dpi(METRICS.dialog_bottom, dpi))
+        self.SetClientSize((client_width, client_height))
+        self._place_buttons()
+        self._place_language_row()
+        self._center_on_parent()
+
+    def _place_language_row(self) -> None:
+        """语言行：标签靠左、两个分段靠右。**手工定位置**，与按钮一致。"""
+        left, top, right, bottom = self._body_rect
+        dpi = dpi_of(self)
+        gap = scale_for_dpi(METRICS.padding_gap, dpi)
+        row_height = scale_for_dpi(METRICS.dialog_button_height, dpi)
+
+        self._label.SetPosition((left, top + (row_height
+                                               - self._label.GetBestSize().height) // 2))
+
+        width = self._language_buttons[0].GetBestSize().width
+        total = width * len(self._language_buttons) + gap * (
+            len(self._language_buttons) - 1)
+        x = right - total
+        for button in self._language_buttons:
+            button.SetSize(x, top, width, row_height)
+            x += width + gap
+
+    def _on_paint(self, event) -> None:
+        """基类会把 `_message` 画出来；设置窗口没有正文，所以只铺底色。"""
+        dc = wx.AutoBufferedPaintDC(self)
+        dc.SetBackground(wx.Brush(wx.Colour(self.theme.background)))
+        dc.Clear()
 
 
 class IconButton(BufferedPanel):
@@ -947,7 +1103,9 @@ class PathBar(BufferedPanel):
     """
 
     #: 提示语。**短到不会在窄输入框里被截断**——改长之前先量宽度。
-    HINT = "输入或粘贴路径"
+    #: 提示文字。**用 L() 包起来**——这是运行时读取的（`self.HINT`），
+    #: 不是模块级求值后就被冻结的常量。
+    HINT = L("输入或粘贴路径", "Type or paste a path")
 
     def __init__(self, parent, theme: Theme, on_submit):
         super().__init__(parent, theme)
@@ -1061,6 +1219,18 @@ class PathBar(BufferedPanel):
             dc.SetBrush(wx.TRANSPARENT_BRUSH)
             dc.SetPen(wx.Pen(colour))
             dc.DrawRoundedRectangle(x, y, w, h, METRICS.radius_field)
+
+    def SetHint(self, text: str) -> None:
+        """换提示文字（**换语言时用**）。
+
+        名字故意与 `wx.TextCtrl.SetHint` 一致，这样"设置提示"只有一种叫法；
+        真正的实现是把提示转交给内部的文本框。
+        """
+        self.HINT = text
+        self.text_ctrl.SetHint(text)
+        # 提示文字换了、字体没换，所以行高不用重算；
+        # 这里只要重画一遍，让自绘的那一层跟上。
+        self.Refresh()
 
     def set_value(self, value: str) -> None:
         self.text_ctrl.SetValue(value or "")

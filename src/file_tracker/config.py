@@ -15,7 +15,13 @@ from __future__ import annotations
 import json
 import os
 
+from .lang import PREFERENCE_CHINESE, PREFERENCE_ENGLISH
+
 DEFAULT_DIRECTORY = "C:\\"
+
+#: 语言键的合法取值，**从 `lang` 取**——不在这里另抄一份字面量，
+#: 否则两边迟早不一致（那正是本项目修过的"两份实现"类缺陷）。
+LANGUAGES = (PREFERENCE_CHINESE, PREFERENCE_ENGLISH)
 
 
 class Config:
@@ -49,6 +55,24 @@ class Config:
 
     def set_last_directory(self, directory: str) -> None:
         self._data["last_directory"] = directory
+
+    def get_language(self) -> str | None:
+        """界面语言偏好：``"zh"`` / ``"en"``；**没设过就返回 ``None``**。
+
+        ``None`` 与 ``"en"`` 是两件事：前者表示"问系统"，
+        后者表示"用户明确选了英文"。中文系统上特意选了英文的人，
+        不该每次启动都被切回中文。
+
+        认不出的值一律当成 ``None``（问系统）——配置文件是可以手改的，
+        写错一个字符串不该让界面变成空白或崩溃。
+        """
+        value = self._data.get("language")
+        return str(value) if value in LANGUAGES else None
+
+    def set_language(self, preference: str) -> None:
+        """写入语言偏好。**只接受已知取值**，其余忽略。"""
+        if preference in LANGUAGES:
+            self._data["language"] = preference
 
     def get_scroll_position(self) -> float:
         """目录树的纵向滚动位置，存的是 0..1 的相对值。

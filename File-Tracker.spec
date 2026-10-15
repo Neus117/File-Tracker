@@ -19,6 +19,7 @@
 
 import os
 import subprocess
+import sys
 
 # --------------------------------------------------------------------------
 # 构建期信息：让产物能自报"是哪个提交构建的"
@@ -68,6 +69,11 @@ def resolve_version() -> str:
 REVISION = resolve_revision()
 VERSION = resolve_version()
 WINDOWED = os.environ.get("FILE_TRACKER_CONSOLE", "") != "1"
+
+# 版本资源（Explorer 属性页）。实现与理由都在 tools/version_info.py，
+# 这里只把它拿进来——spec 不该塞下第二份"每个字段是什么意思"的说明。
+sys.path.insert(0, os.path.join(SPECPATH, "tools"))  # noqa: F821
+from version_info import build_version_info as _build_version_info  # noqa: E402
 
 # 构建期模块：core.build_revision() 会优先读它。
 # 单文件 exe 里既没有 .git 也没有构建脚本，这是唯一可靠的来源。
@@ -147,6 +153,15 @@ exe = EXE(  # noqa: F821
     codesign_identity=None,
     entitlements_file=None,
     icon=os.path.join(SPECPATH, "images", "shell32_star.ico"),  # noqa: F821
+    # **版本资源**：Explorer「属性 → 详细信息」那一页。
+    #
+    # 没有它的时候那一页几乎是空的——文件说明、版权都没写，
+    # 用户报障时也没法从属性里读出装的是哪一版。
+    # 字段与取值对照 Roboc 的 `Directory.Build.props`，见 tools/version_info.py。
+    #
+    # 注意 `ProductVersion` 里**不带提交哈希**：哈希留在
+    # `--version` 的输出里，属性页只显示干净的 1.2.2。
+    version=_build_version_info(VERSION),  # noqa: F821
 )
 
 # 清理构建期临时模块，免得被误提交（.gitignore 里也有一条）

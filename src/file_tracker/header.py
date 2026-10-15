@@ -38,6 +38,16 @@ from .theme import METRICS, Theme, scale_for_dpi
 from .widgets import dpi_of
 
 
+def _measure_probe() -> str:
+    """量行高用的样本字。
+
+    **这不是文案，不要翻译它。** 它只是"一个有两三个字、足以顶到
+    最高字形"的样本；换成英文单词反而量不到中文的字体高度，
+    表头内边距会算小。所以固定用中文字。
+    """
+    return "频次"
+
+
 class ColumnHeader(wx.Control):
     """自绘的列表表头。"""
 
@@ -131,6 +141,15 @@ class ColumnHeader(wx.Control):
 
     # -- 绘制 ---------------------------------------------------------------
 
+    def set_titles(self, titles) -> None:
+        """换一批列标题（**换语言时用**）并重画。
+
+        表头是自绘的，所以改标题只是换一份字、再 `Refresh`——
+        不涉及重建控件，也不会丢掉列宽。
+        """
+        self.titles = list(titles)
+        self.Refresh()
+
     def separator_positions(self) -> list[int]:
         """列间竖线的 x 坐标（**唯一**的位置来源）。
 
@@ -178,7 +197,7 @@ class ColumnHeader(wx.Control):
 
         font = self.GetFont()
         dc.SetFont(font)
-        text_height = dc.GetTextExtent("频次").height
+        text_height = dc.GetTextExtent(_measure_probe()).height
         inset = scale_for_dpi(METRICS.header_text_inset, dpi_of(self))
         # 竖线的位置与粗细**只在这里取一次**，循环里直接用
         positions = self.separator_positions()

@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 
 from .core import normalize_path, path_is_within
+from .lang import L
 
 _DRIVE_RE = re.compile(r"^[A-Za-z]:$")
 #: ``wx.GenericDirCtrl`` 把驱动器节点显示成 ``SYSTEM (C:)`` / ``本地磁盘 (D:)``
@@ -303,7 +304,8 @@ def build_walk_plan(path: str, last_directory: str = "", *, exists=None,
             "folder": None,
             "names": [],
             "fallback_dir": last_directory or "",
-            "hint": "请输入或粘贴一个文件夹路径。",
+            "hint": L("请输入或粘贴一个文件夹路径。",
+                     "Type or paste a folder path."),
         }
 
     if exists is None or is_file is None:
@@ -318,7 +320,7 @@ def build_walk_plan(path: str, last_directory: str = "", *, exists=None,
             "folder": None,
             "names": [],
             "fallback_dir": last_directory or "",
-            "hint": f"路径不存在：{text}",
+            "hint": L(f"路径不存在：{text}", f"Path not found: {text}"),
         }
 
     if is_file(text):

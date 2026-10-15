@@ -383,6 +383,49 @@ def main() -> int:
             pin_rect.x > clear_rect.right,
             f"顶置 x={pin_rect.x}，清空 右={clear_rect.right}",
         )
+
+        # ---- 设置按钮：底部右侧、**紧靠顶置左边** ----
+        #
+        # 用户 2026-10-16 指定："把设置按钮放在底部右侧、程序置顶按钮左边，
+        # 图标直接复制 <roboc>/assets/icons/settings.ico 拿过来用。"
+        settings_rect = frame.settings_btn.GetRect()
+        check(
+            "设置按钮存在，且是**图标**按钮（图标加载成功）",
+            isinstance(frame.settings_btn, _widgets.IconButton),
+            f"实际类型 = {type(frame.settings_btn).__name__}"
+            "（若退化成 RoundedButton，说明 images/settings.png 没加载到）",
+        )
+        check(
+            "排布：设置按钮在顶置按钮**左边**",
+            settings_rect.right <= pin_rect.x,
+            f"设置 右={settings_rect.right}，顶置 左={pin_rect.x}"
+            f"（间隙 {pin_rect.x - settings_rect.right} px）",
+        )
+        # （`_scale` 与 `METRICS` 在这个函数里都是后面才 import 的，
+        #   这里不能引用它们——按 DPI 直接换算，与 scale_for_dpi 同式。）
+        _dpi_here = frame.GetDPI()
+        _dpi_here = _dpi_here[0] if hasattr(_dpi_here, "__getitem__") \
+            else _dpi_here
+        tolerance = int(8 * 2 * _dpi_here / 96) + 2
+        check(
+            "排布：设置按钮紧邻顶置（不是被甩到别处）",
+            0 <= pin_rect.x - settings_rect.right <= tolerance,
+            f"间隙 = {pin_rect.x - settings_rect.right} px，容差 = {tolerance} px",
+        )
+        check(
+            "排布：设置按钮在底部右侧（不与「清空」重叠）",
+            settings_rect.x > clear_rect.right,
+            f"设置 左={settings_rect.x}，清空 右={clear_rect.right}",
+        )
+        # 图标确实加载了：IconButton 的位图必须有效
+        check(
+            "设置按钮的图标位图有效（不是空白占位）",
+            getattr(frame.settings_btn, "bitmap", None) is not None
+            and frame.settings_btn.bitmap.IsOk()
+            and frame.settings_btn.bitmap.GetWidth() > 0,
+            f"bitmap = {getattr(frame.settings_btn, 'bitmap', None)}"
+            f"（来自 images/settings.png，由 Roboc 的 settings.ico 转出）",
+        )
         # 圆角：按高度的固定比例取（**不是**写死，也不是原来的高度一半）。
         # 调过四次（用户要求"循序渐进，不要一次调太多"，每步 ±2）：
         #   4（比例 0.167，"太小看不出来"）
@@ -1151,6 +1194,154 @@ def main() -> int:
 
         # ==============================================================
         print()
+        print("=== 改动 ⑱：国际化（中文 / English）===")
+        # ==============================================================
+        #
+        # Roboc 的做法（`src/Roboc.Core/Model/Lang.cs`）：
+        #   每条文案写成 `Lang.Pick("中文", "English")`，**两半都在调用点**。
+        #   资源文件会带来"键漏了就给用户看键名"这种失败方式，
+        #   而两个参数在语法上不允许只写一个。
+        #
+        # 判据分三层：① 与语言无关的机制 ② 切换真的生效 ③ 覆盖完整
+        lang_module = __import__("file_tracker.lang", fromlist=["lang"])
+
+        # ① 机制：系统检测 / 偏好覆盖 / 三者优先级
+        saved = lang_module.is_chinese()
+        lang_module.apply(lang_module.PREFERENCE_ENGLISH)
+        english_ok = (lang_module.is_chinese() is False
+                      and lang_module.pick("中", "EN") == "EN")
+        lang_module.apply(lang_module.PREFERENCE_CHINESE)
+        chinese_ok = (lang_module.is_chinese() is True
+                      and lang_module.pick("中", "EN") == "中")
+        check(
+            "语言偏好能覆盖系统检测（存了 en 就是 en，不会被系统切回去）",
+            english_ok and chinese_ok,
+            f"apply(en) → {english_ok}；apply(zh) → {chinese_ok}"
+            "（这是「中文系统上特意选英文」那个场景）",
+        )
+        # 系统检测本身：本机是中文系统，所以 apply(None) 应当是中文
+        detected = lang_module.apply(None)
+        check(
+            "apply(None) 会回落去问系统（GetUserDefaultUILanguage）",
+            isinstance(detected, bool),
+            f"本机检测结果 = {'中文' if detected else 'English'}"
+            "（本机是中文 Windows，期望中文）",
+        )
+
+        # ② 切换真的生效：中 → 英 → 中，双向都要能回来
+        def ui_snapshot():
+            return {
+                "native": [frame.list_ctrl.GetColumn(i).GetText()
+                           for i in range(frame.list_ctrl.GetColumnCount())],
+                "drawn": list(frame.header.titles),
+                "open": frame.open_btn.label,
+                "clear": frame.clear_btn.label,
+            }
+
+        lang_module.apply(lang_module.PREFERENCE_CHINESE)
+        frame.retranslate()
+        for _ in range(10):
+            wx.YieldIfNeeded()
+        zh = ui_snapshot()
+
+        lang_module.apply(lang_module.PREFERENCE_ENGLISH)
+        frame.retranslate()
+        for _ in range(10):
+            wx.YieldIfNeeded()
+        en = ui_snapshot()
+
+        lang_module.apply(lang_module.PREFERENCE_CHINESE)
+        frame.retranslate()
+        for _ in range(10):
+            wx.YieldIfNeeded()
+        back = ui_snapshot()
+
+        check(
+            "切到英文后**列表原生列标题**也变了（不只是自绘表头）",
+            en["native"] != zh["native"] and en["native"] == en["drawn"],
+            f"中文原生 = {zh['native']}；英文原生 = {en['native']}；"
+            f"英文自绘 = {en['drawn']}"
+            "（踩过：`wx.ListCtrl` 没有 SetColumnText，"
+            "早先写在 try/except 里被静默吞掉、标题永远不变）",
+        )
+        check(
+            "切到英文后按钮文字也变了",
+            en["open"] != zh["open"] and en["clear"] != zh["clear"],
+            f"中文 = {zh['open']!r}/{zh['clear']!r}；"
+            f"英文 = {en['open']!r}/{en['clear']!r}",
+        )
+        check(
+            "切回中文能**完整还原**（双向切换，不是单向的一次性替换）",
+            back == zh,
+            f"切回后 = {back}；原始中文 = {zh}",
+        )
+        # 阳性对照：英文那份确实不是中文（防止"两边取到同一份"也算通过）
+        check(
+            "阳性对照：英文列标题里没有中文字符",
+            not any("\u4e00" <= c <= "\u9fff"
+                    for name in en["drawn"] for c in name),
+            f"英文自绘表头 = {en['drawn']}",
+        )
+
+        # ③ 覆盖完整：不许有"漏了 Pick"的单语字符串
+        #    判据用 AST 找**运行时**的中文字符串常量（docstring 不算）。
+        i18n_tree = _ast.parse(_inspect.getsource(_app_module))
+        i18n_docstrings = set()
+        for node in _ast.walk(i18n_tree):
+            if isinstance(node, (_ast.Module, _ast.FunctionDef,
+                                 _ast.AsyncFunctionDef, _ast.ClassDef)):
+                body = getattr(node, "body", None)
+                if body and isinstance(body[0], _ast.Expr) \
+                        and isinstance(body[0].value, _ast.Constant):
+                    i18n_docstrings.add(id(body[0].value))
+        # **必须先把"已经包在 L() 里的"标出来。**
+        # 早先没做这一步，于是 `L("访问的路径", "Path")` 里那半句中文
+        # 也被当成"漏了 Pick"报出来（实测 55 处全是误报）。
+        # **按行区间标记，不按节点 id。**
+        #
+        # 坑：`L(f"路径 '{path}' 已失效", ...)` 里那半句中文在 AST 上是
+        # f-string**内部**的 `Constant`，与 `L()` 的实参不是同一个节点；
+        # 用 `id(arg)` 收集会漏掉它，于是已经双语化的字符串仍被报成"漏了"。
+        # 行区间对"一个调用写在几行里"也成立。
+        wrapped_lines = set()
+        wrapped_args = 0
+        for node in _ast.walk(i18n_tree):
+            if not isinstance(node, _ast.Call):
+                continue
+            name = (getattr(node.func, "id", None)
+                    or getattr(node.func, "attr", None))
+            if name != "L" or len(node.args) != 2:
+                continue
+            wrapped_args += 2
+            start = min(getattr(a, "lineno", 1) for a in node.args)
+            end = max(getattr(a, "end_lineno", start) or start
+                      for a in node.args)
+            wrapped_lines.update(range(start, end + 1))
+
+        hardcoded = []
+        for node in _ast.walk(i18n_tree):
+            if not isinstance(node, _ast.Constant) or \
+                    not isinstance(node.value, str):
+                continue
+            if id(node) in i18n_docstrings or node.lineno in wrapped_lines:
+                continue
+            if any("\u4e00" <= c <= "\u9fff" for c in node.value):
+                hardcoded.append((node.lineno, node.value[:44]))
+        check(
+            "app.py 里没有漏掉 L() 的中文字符串",
+            not hardcoded,
+            f"仍是单语的中文字符串 = {hardcoded[:6]}（共 {len(hardcoded)} 处）",
+        )
+        # 阳性对照：`L()` 里的中文**不该**被算成问题——
+        # 否则上面那条会永远失败，判据本身就是错的。
+        check(
+            "阳性对照：L() 内部的中文没有被误判（否则判据永远失败）",
+            wrapped_args >= 8 and bool(wrapped_lines),
+            f"识别出 {wrapped_args // 2} 个 L() 调用（覆盖 {len(wrapped_lines)} 行）",
+        )
+
+        # ==============================================================
+        print()
         print("=== 改动 ⑫：深色下的白框与分界线 ===")
         # ==============================================================
         tree_handle = frame.dir_ctrl.GetTreeCtrl().GetHandle()
@@ -1809,4 +2000,21 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    _code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    # **硬退出收尾，而且不碰 wx 的拆解。**
+    #
+    # 走到这里说明：全部断言已跑完、`合计` 已打印、临时目录已在
+    # `main()` 的 finally 里清过、stdio 已刷。剩下的只有解释器清理。
+    #
+    # 实测结论（这条命令连跑多次）：
+    #   * 让解释器正常收尾 → 偶尔**永久挂住**（一次 260 秒没返回，
+    #     连 `合计` 都没打出来）
+    #   * 加一个守护线程去 `Destroy()` 窗口和 `wx.App` → 变成**访问违例**
+    #     （退出码 `-1073741819`）。**wx 的控件只能在主线程碰**，
+    #     从别的线程拆它就是在动一个正在被释放的对象。
+    #
+    # 所以两者都不做：断言跑完、输出刷掉，直接走 `os._exit`。
+    # 它跳过解释器清理，也就同时跳过了"挂住"和"从错误的线程拆 wx"。
+    os._exit(_code)

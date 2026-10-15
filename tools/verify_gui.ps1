@@ -25,6 +25,19 @@
        所以改成**重定向到文件**：文件没有容量限制，写端永远不阻塞。
        "先等、后读"这条纪律保留（读之前进程已经结束）。
 
+    ③ **开跑前清理上一次的残留进程。** wxPython 的收尾在这台机器上
+       偶发访问违例（退出码 ``-1073741819``），残留下来的 python
+       会毒害下一次运行——表现成随机的段错误或无声消失，
+       看起来像"新代码有 bug"，其实上一次的僵尸。
+
+    **已知残留问题**：即使清了前置进程，验证脚本本身仍有大约
+    1/6 的概率在**打印完 ``合计`` 之后**以访问违例退出。
+    也就是说**断言全部跑完了**（看输出里的``合计``即可），
+    崩的是 wxPython 的解释器收尾。脚本里已经用 ``os._exit`` 跳过
+    解释器清理，仍无法根治；试过在主线程拆窗口（偶发永久挂住）
+    和用守护线程拆（访问违例更频繁——**wx 控件只能在主线程碰**）。
+    判断一次运行是否有效，**看 ``合计`` 那一行，不要只看退出码**。
+
     注：本文件必须是 UTF-8 **带 BOM**。Windows PowerShell 5.1 读没有 BOM 的
     UTF-8 会按 ANSI 解码，中文变乱码甚至语法错误。用 ``tools/add_bom.py`` 修。
 
@@ -53,6 +66,25 @@ if (-not (Test-Path -LiteralPath $Script)) { throw "找不到验证脚本: $Scri
 Write-Host "会开一个名为 'FileTracker GUI Verify' 的窗口，约 3-5 秒后自动关闭。" -ForegroundColor Yellow
 Write-Host "不需要你点任何东西。最长等待 $TimeoutSeconds 秒，超时会强制结束。" -ForegroundColor Yellow
 Write-Host ''
+
+# **开跑之前先清掉上一次残留的进程。**
+#
+# 这是踩了很久才定位到的：上一次运行如果没干净退出（wxPython 的清理偶尔会卡住），
+# 残留的 python 会**毒害下一次运行**——表现为随机的
+# `exit=139`（段错误）或跑十几秒后无声消失，还会弹出
+# "python has stopped working / Error launching CrashSender.exe"。
+#
+# 现象很像是"新代码有 bug"，实际是上一次的僵尸。带上前置清理之后连跑 4 次全绿。
+#
+# **只清自己人，不碰用户其它 python 进程**：`File Tracker.exe` 是本项目的产物，
+# 命令行里带 `verify_gui.py` 的 python 是本脚本起的。按名字无差别杀 python
+# 会误伤用户正在跑的东西。
+Get-Process -Name 'File Tracker' -ErrorAction SilentlyContinue |
+    ForEach-Object { try { $_.Kill() } catch { } }
+Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine -like '*verify_gui.py*' } |
+    ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
+Start-Sleep -Milliseconds 500
 
 $outFile = Join-Path $env:TEMP "filetracker-verify-$PID.out.txt"
 $errFile = Join-Path $env:TEMP "filetracker-verify-$PID.err.txt"
