@@ -1,0 +1,72 @@
+# 行尾由**仓库**定义，不靠每台机器的全局配置。
+#
+# ## 为什么加这个
+#
+# 审计发现：仓库里**没有** `.gitattributes`，而开发机的
+# `core.autocrlf=true` —— 于是"文件里到底是 LF 还是 CRLF"只由
+# **每台机器的全局配置**决定。实测后果：
+#
+#   * `git diff` 会为"只改了行尾"的文件报出改动
+#     （`build.ps1`、`File-Tracker.spec` 都因此被误判成"已改动"）
+#   * `archive/File Tracker_v1.0.3.py` 工作区 12775 B、索引里 12474 B
+#     —— 相差的 301 字节就是行尾
+#   * 不同机器上 clone 出来的文件字节不同，构建产物也就可能不同
+#
+# ## 规则
+#
+# `text=auto`：git 自己判断文本，仓库里一律存 LF。
+# 检出时按平台转换（所以 Windows 上工作区仍是 CRLF，对用户无感）。
+#
+# **二进制文件必须显式声明。** 不声明的话，git 可能把图片/可执行文件
+# 当文本处理并"规范化"行尾——那会**损坏文件本体**。
+# 下面每一类都是按扩展名显式排除的。
+
+# 默认：按内容自动判断，仓库内统一 LF
+* text=auto
+
+# ── 二进制：绝不做行尾转换 ─────────────────────────────────────────────
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.bmp   binary
+*.exe   binary
+*.dll   binary
+*.pyd   binary
+*.zip   binary
+*.db    binary
+*.pyz   binary
+*.pkg   binary
+*.whl   binary
+
+# ── PowerShell 脚本必须保留 BOM ────────────────────────────────────────
+#
+# Windows PowerShell 5.1 读**不带 BOM** 的 UTF-8 会按 ANSI(GBK) 解码，
+# 脚本里的中文变乱码甚至语法错误。本项目为此踩过两次：
+# 一次让检查器把 78 处正常代码报成死代码，一次让 `build.ps1` 直接跑不起来
+# （`throw "找不到 Python: ..."` 那句被解码坏了）。
+#
+# `working-tree-encoding=UTF-8` 会让 git 在检出时写成**带 BOM** 的 UTF-8，
+# 这样即使有人用不带 BOM 的编辑器改过、或某个工具把 BOM 去掉，
+# 检出回来仍是安全的形态。`tools/add_bom.py --check` 是第二道防线。
+*.ps1   text eol=crlf working-tree-encoding=UTF-8
+
+# ── 明确的文本类型（统一 LF，避免不同平台 clone 出不同字节）────────────
+#
+# `LICENSE` **不做任何转换**：那是许可证原文，一个字节都不该被工具改写。
+# 审稿人比对许可证时看到行尾不同，是个不必要的麻烦。
+LICENSE -text
+
+*.py    text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.json  text eol=lf
+*.spec  text eol=lf
+*.ini   text eol=lf
+*.cfg   text eol=lf
+*.toml  text eol=lf
+.gitignore      text eol=lf
+.gitattributes  text eol=lf

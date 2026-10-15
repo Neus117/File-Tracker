@@ -166,7 +166,6 @@ The path logger (Logger) on the right supports:
 ```
 src/
 ├── main.py                     入口：python src/main.py
-├── File Tracker_v1.1.py        兼容垫片（旧文件名，无实现），下一轮可删
 └── file_tracker/
     ├── core.py        ─┐
     ├── store.py        │  不依赖 wx —— 可以在没有桌面会话的环境里测试
@@ -174,9 +173,14 @@ src/
     ├── tree_nav.py     │
     ├── theme.py        │
     ├── win32.py       ─┘
+    ├── lang.py           双语（L("中文","English") 写在调用点）
     ├── widgets.py        自绘控件
+    ├── header.py         自绘列头
     └── app.py            主窗口
 ```
+
+> 旧的 `src/File Tracker_v1.1.py` 兼容垫片已在 v1.2.5 删除。
+> 它的文件名**带空格所以不可能被 import**，这也正是当初换掉它的原因。
 
 **分层的目的是让判断可以自动验证。** 窗口尺寸的计算、路径规范化、目录树的
 路径匹配这些以前埋在窗口类里、只能靠人眼看的逻辑，现在都在不依赖 wx 的模块里，

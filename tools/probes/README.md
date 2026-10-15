@@ -209,6 +209,19 @@ user32.SendMessageW.restype = ctypes.c_void_p
    实测探针挂死 240 秒、临时目录被锁。
    正确做法是把所有出口都堵上，并加线程超时。
 
+## ⚠️ `probe_multi_select.py` 与 `probe_multiselect.py` 是**两个**探针，别合并
+
+名字只差一个下划线，很容易以为其中一个过时了。**不是**——它们查的是
+**两个不同的控件**，而且回答的是不同的问题：
+
+| 探针 | 查什么 | 结论 |
+|---|---|---|
+| `probe_multi_select.py` | **记录窗格**（`wx.ListCtrl`）能不能多选 | `LVS_SINGLESEL` 开着 ⇒ 单击只能选中一行 |
+| `probe_multiselect.py` | **导航窗格**的树（`GenericDirCtrl`）上 `SelectItem` 的语义 | 多选树上它是"追加"，所以必须先 `UnselectAll` |
+
+合并它们只会让"哪一个说的是哪个控件"变模糊。留下这个说明是为了让下一个人
+不去做那次合并。
+
 ## `probe_multi_select.py` — 列表到底能不能多选
 
 用户的反问："我有没有骗你，你查代码里是否支持多选就知道了。"
