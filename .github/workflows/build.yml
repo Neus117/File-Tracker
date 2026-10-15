@@ -1,0 +1,116 @@
+# File Tracker — 构建与验证
+#
+# 骨架来自 Roboc 的 .github/workflows/build.yml。值得每次推送自动跑一遍的，
+# 都是那些"编译通过、运行无异常、只是不生效"的缺陷——本项目最难查的一类。
+#
+# 具体跑四件事：
+#   1. 单元测试（117 条，不依赖 GUI）
+#   2. 接线检查 + 它的阳性对照
+#   3. .ps1 的 UTF-8 BOM 检查
+#   4. 打包并让产物自报版本（--version / --selftest）
+#
+# 最后一项是唯一能证明"打包配置真的能用"的手段。仓库里此前**没有任何打包配置**，
+# v1.1.0 那个 exe 怎么打出来的只存在于作者记忆里。
+
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Python 版本**不能随便升**：wxPython==4.2.2 在 PyPI 上最高只提供到
+      # cp313 的 wheel，3.14 装不上。项目钉的是 3.11.9。
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11.9'
+
+      - name: 显示 Python 版本
+        run: python -V
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      # 排在最前：项目加载失败时什么都构建不了，而"0 失败"和"测试没跑"
+      # 在输出里长得一模一样。所以下面每一条都会断言"收集到了多少条测试"。
+      - name: 单元测试
+        run: python -X utf8 -m pytest -v
+
+      # 接线检查：找出"定义了却从来没有人读取"的东西。
+      # 本项目的 set_icon / load_last_directory 被各定义两次，后一个静默生效，
+      # 前一个成了死代码——就是这一类。
+      - name: 接线检查
+        run: python -X utf8 tools/check_wiring.py
+
+      # **门禁必须自己验证它真的会拦。**
+      # 曾开过一个代码检查门禁，它返回"干净"，而它其实根本没运行。
+      # 阴性的结果必须先证明检测器跑了。
+      - name: 接线检查的阳性对照
+        run: python -X utf8 tools/check_wiring_negative.py
+
+      # Windows PowerShell 5.1 读没有 BOM 的 UTF-8 文件会按 ANSI 解码，
+      # 脚本里的中文变成乱码甚至语法错误。踩过一次——一个检查器因此
+      # 把 78 处正常代码报成了死代码。
+      - name: PowerShell 脚本 BOM 检查
+        run: python -X utf8 tools/add_bom.py --check
+
+      - name: 打包
+        run: python -m PyInstaller File-Tracker.spec --noconfirm --log-level WARN
+
+      # 产物必须能自报"是哪个提交构建的"：用户报障时，
+      # 这一行决定你能不能判断他装的是哪一个。
+      #
+      # 用 PowerShell 抓 windowed 程序的标准输出，而不是直接 `& exe --version`——
+      # 后者在本机实测拿到空字符串，而当时没有断言输出非空，
+      # 于是一次"成功"的构建掩盖了"产物不会自报版本"。
+      - name: 产物自检
+        shell: pwsh
+        run: |
+          Get-ChildItem dist | Format-Table Name, Length
+
+          $outFile = Join-Path $env:TEMP 'ft-version.txt'
+          $errFile = Join-Path $env:TEMP 'ft-version-err.txt'
+
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = (Resolve-Path 'dist\File Tracker.exe').Path
+          $psi.Arguments = '--version'
+          $psi.UseShellExecute = $false
+          $psi.RedirectStandardOutput = $true
+          $psi.RedirectStandardError = $true
+          $psi.CreateNoWindow = $true
+          $p = New-Object System.Diagnostics.Process
+          $p.StartInfo = $psi
+          [void]$p.Start()
+          if (-not $p.WaitForExit(60000)) { $p.Kill(); throw '--version 超时' }
+          $reported = $p.StandardOutput.ReadToEnd().Trim()
+
+          if ($p.ExitCode -ne 0) { throw "--version 退出码 $($p.ExitCode)" }
+          if ([string]::IsNullOrWhiteSpace($reported)) {
+            throw '--version 没有输出——产物无法自报版本'
+          }
+          Write-Host "自报: $reported"
+
+          $session = (Get-Content env:GITHUB_SHA).Substring(0, 7)
+          if ($reported -notmatch $session) {
+            # CI 上产物是在这个提交上构建的，哈希必须对得上
+            Write-Error "自报版本 '$reported' 里没有本次提交 $session"
+            exit 1
+          }
+
+      - name: 保留产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: File-Tracker-portable
+          path: dist/
+          retention-days: 14

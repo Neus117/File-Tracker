@@ -1,3 +1,21 @@
+# File Tracker — wxPython 环境（v1.1+）
+#
+# ⚠️ Python 版本不能随便升。wxPython==4.2.2 在 PyPI 上最高只提供到 cp313 的
+#    wheel（实测查询结果：cp38–cp313），本机 conda base 是 3.14，装不上。
+#    所以下面的 python=3.11.9 是硬约束，不是偏好。
+#
+# ⚠️ 两个环境文件里的环境名都是 ft_env，**不能同时装**。
+#    换版本前先 conda env remove -n ft_env。
+#
+# 用法：
+#   conda env create -f environment_v1.1+.yml
+#   conda activate ft_env
+#   pip install -r requirements-dev.txt     # 测试与验证工具另需这些
+#
+# 注：pywin32 已从**运行时**依赖移除。它原来钉在这里和 requirements_v1.1+.txt 里，
+#     但源码从来没有 import win32*——列对齐改成用 ctypes 直接发消息了。
+#     它现在只在 requirements-dev.txt 里，供 tools/verify_gui.py 做 EnumWindows。
+
 name: ft_env
 channels:
   - https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main/
@@ -9,4 +27,3 @@ dependencies:
   - pip:
     - wxpython==4.2.2
     - pyinstaller==6.10.0
-    - pywin32==306

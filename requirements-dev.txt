@@ -1,0 +1,15 @@
+# 开发与测试依赖（运行时依赖见 requirements_v1.1+.txt）
+#
+# 这三项此前**哪里都没声明**：仓库里没有任何测试依赖文件，
+# 声明的环境也跑不了 tests/。
+-r requirements_v1.1+.txt
+pytest==9.1.1
+pytest-timeout==2.4.0
+
+# pywin32 从**运行时**依赖移到了这里。
+#
+# 原来 requirements_v1.1+.txt 与 environment_v1.1+.yml 都钉了 pywin32==306，
+# 但源码里从来没有 import win32*——列对齐改成用 ctypes 直接发消息了。
+# 它现在只有一个用途：`tools/verify_gui.py` 用它做 EnumWindows，
+# 好让"判断界面状态"有真实窗口作为判据，而不是靠进程状态推断。
+pywin32==306

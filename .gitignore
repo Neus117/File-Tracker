@@ -36,3 +36,21 @@ ft_env/
 # PyInstaller
 /dist/
 /build/
+# 打包时由 File-Tracker.spec 生成、用完即删；万一残留也不要提交
+/_build_info.py
+
+# 测试与工具
+.pytest_cache/
+.coverage
+htmlcov/
+/render/
+
+# 用户数据 —— **绝不能提交**
+#
+# 数据库默认写在 C:\Users\<用户>\ 下，但带着仓库跑或调试时可能落到仓库里。
+# 它含有用户真实的访问记录。
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+accessed_paths.json
