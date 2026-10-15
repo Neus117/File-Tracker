@@ -1475,16 +1475,64 @@ def main() -> int:
             f"有意不加的 {len(exempt)} 处（`--version` 信息框）",
         )
         # **阳性对照：标题里不能再出现 ⚠️。**
+        #
         # 这条守的是"⚠️ 从标题栏搬走了"——只查正文有 ⚠️ 是不够的，
         # 那样标题里留着一个也测不出来。
-        title_marks = [
-            t for t in warn_titles
-            if 'title=f"{WARN}' in t or 'title=f"{_app_module.WARN}' in t
-        ]
+        #
+        # ## 第一版有漏洞，被用户抓到了
+        #
+        # 原来只做字符串匹配：`'title=f"{WARN}' in statement`。
+        # **硬编码的 emoji 溜得过去**——`title=f"{WARN}路径不存在"` 能被抓到，
+        # 但 `title="⚠️路径不存在"` 不会（语句里没有 `WARN` 这个词）。
+        #
+        # 用户正是在扫描弹窗时看到探针造出的那个标题带 ⚠️ 的窗口。
+        #
+        # 现在改成**从 AST 取 `title=` 那个实参本身**，
+        # 再检查它里面有没有 WARN 或任何警示类字符——
+        # 不管写成 f-string、字符串拼接还是字面量，都跑不掉。
+        MARKS = ("\u26a0", "\u2757", "\u2755", "\u2753", "\U0001f6a8")
+
+        # **标题参数在第几个位置，各调用不同——必须逐一声明。**
+        #
+        # 踩过两次，都是"只查了 `title=` 关键字"：
+        #   ① `_notify(正文, 标题)` 的标题是**第 2 个位置参数**
+        #   ② `MessageBox(正文, 标题, 样式)` 也是第 2 个位置参数
+        # 埋一个 `self._notify(plan["hint"], "⚠️路径不存在")` 进去，
+        # 守卫照样 PASS —— 那就是个假守卫。
+        TITLE_POSITION = {
+            "ThemedDialog": "title",   # 关键字
+            "MessageBox": 1,           # 位置
+            "MessageDialog": 1,        # 位置
+            "_notify": 1,              # 位置
+        }
+        title_marks = []
+
+        def looks_tainted(chunk: str) -> bool:
+            return bool(chunk) and (
+                "WARN" in chunk or any(m in chunk for m in MARKS))
+
+        for node in _ast.walk(tree):
+            if not isinstance(node, _ast.Call):
+                continue
+            name = (getattr(node.func, "id", None)
+                    or getattr(node.func, "attr", None))
+            if name not in TITLE_POSITION:
+                continue
+            slot = TITLE_POSITION[name]
+            candidates = []
+            if isinstance(slot, int) and len(node.args) > slot:
+                candidates.append(node.args[slot])
+            for keyword in node.keywords:
+                if keyword.arg == "title":
+                    candidates.append(keyword.value)
+            for value in candidates:
+                chunk = _ast.get_source_segment(source, value) or ""
+                if looks_tainted(chunk):
+                    title_marks.append(f"L{value.lineno}: {name} 标题={chunk}")
         check(
-            "阳性对照：没有任何弹窗把 ⚠️ 留在标题里",
+            "阳性对照：没有任何弹窗把 ⚠️ 留在标题里（AST 取实参，不是字符串匹配）",
             not title_marks,
-            "；".join(t[:56] for t in title_marks) or "标题全部是纯文字",
+            "；".join(t[:72] for t in title_marks) or "标题全部是纯文字",
         )
         # 阳性对照：必须真的找到了警告弹窗，否则上面那条是空转
         check(
@@ -1605,9 +1653,15 @@ def main() -> int:
             f"{_scale(_DLG.dialog_button_height, dpi_value)}",
         )
         # **单按钮弹窗**曾经被 wx 拉满整个客户区（实测 819×210）
+        # 文案与标题照**应用里的约定**写：⚠️ 在正文开头，标题纯文字。
+        #
+        # 踩过（用户扫弹窗时发现的）：这里原先写成
+        # `title=f"{WARN}路径不存在"`，于是探针自己造了一个
+        # 标题带 ⚠️ 的弹窗，与应用约定不符，扫描时看着像应用的 bug。
+        # **探针也是代码，它造出来的东西必须符合被验证的约定。**
         single = _widgets.ThemedDialog(
-            frame, frame.theme, "路径不存在，请检查后重新输入。",
-            title=f"{_app_module.WARN}路径不存在",
+            frame, frame.theme, f"{_app_module.WARN} 路径不存在，请检查后重新输入。",
+            title="路径不存在",
             yes_label="好", no_label=None,
         )
         single.Show()

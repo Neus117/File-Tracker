@@ -124,3 +124,63 @@ gh api repos/Neus117/File-Tracker/git/ref/heads/main --jq '.object.sha'
 [ ] 下载回来核对 SHA256
 [ ] GitHub 的 main == 本地 HEAD
 ```
+
+---
+
+## 六、v1.2.0 发版事故：**"产物自报哈希"这条纪律从未真正成立**
+
+### 现象
+
+v1.2.0 发出后，下载产物执行 `--version`：
+
+```
+File Tracker 1.2.0+unknown
+```
+
+而**构建是全绿的**。
+
+### 两个叠加的缺陷
+
+**缺陷一：`_build_info.py` 生成在了错误的目录。**
+
+`File-Tracker.spec` 把它写在**仓库根**，于是它是一个**顶层模块**
+`_build_info`；而 `core.build_revision()` 读的是
+`from ._build_info import ...` —— **包内相对导入**。
+路径对不上，`ImportError` 被 `except` 吞掉，于是永远回落到 `"unknown"`。
+
+（spec 里那句注释"只给 `src/` 的话 `_build_info` 可能找不到"，
+把因果关系写反了：正因为它是顶层模块才找不到。）
+
+**缺陷二（更严重）：自检是假阳性。**
+
+`build.ps1` 把 `FILE_TRACKER_BUILD_REV` 设进了**自己的进程环境**——
+那是 `build_revision()` 的**第 2 号来源**。第 4 步跑 exe 自检时，
+exe 从环境变量里读到了哈希，于是
+
+```powershell
+if ($reported -notmatch [regex]::Escape($revision)) { throw ... }
+```
+
+**恒不触发**。校验看起来在守规则二，实际上什么都没守。
+
+### 修法
+
+1. `_build_info.py` 写进 **`src/file_tracker/`**（包内），
+   `hiddenimports` 改成 `file_tracker._build_info`，
+   `pathex` 里的 `SPECPATH` 随之删掉。
+2. **自检前把 `FILE_TRACKER_BUILD_REV` 从环境里摘掉**，
+   跑完再放回（`try/finally`）。测"它自己能不能说清楚自己是谁"，
+   就必须在**没有外援**的条件下测。
+3. `.gitignore` 补上 `/src/file_tracker/_build_info.py`。
+
+### 教训（比缺陷本身更重要）
+
+> **一个从不失败的校验，等于没有校验。**
+
+改完之后第 4 步立刻**真的失败了**（`+unknown` 被拦下），
+这才证明它开始工作。**改完校验，要故意让它失败一次。**
+
+> 顺带：`$psi.EnvironmentVariables` / `$psi.Environment` 这两个属性
+> 在 Windows PowerShell 5.1 与 PowerShell 7 上不通用，
+> 实测其中一边是 `$null`，会报"不能对 Null 值表达式调用方法"。
+> 用 `Remove-Item Env:\<名字>` 更稳。

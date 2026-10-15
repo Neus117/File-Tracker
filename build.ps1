@@ -182,6 +182,15 @@ function Get-ExeOutput {
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $env:ComSpec
+    # **把 `FILE_TRACKER_BUILD_REV` 从子进程环境里删掉。**
+    #
+    # 这个变量是本脚本自己设的（见前面 `$env:FILE_TRACKER_BUILD_REV`），
+    # 而它是 `core.build_revision()` 的**第 2 号来源**。
+    # 不清掉的话，自检时 exe 会从环境变量读到哈希——
+    # **即使包里根本没写进去，校验也会通过**。
+    #
+    # v1.2.0 就是这么发出去的：产物自报 `unknown`，而构建全绿。
+    # 测"它自己能不能说清楚自己是谁"，就必须在**没有外援**的条件下测。
     $psi.Arguments = "/c `"`"$Exe`" $($Arguments -join ' ') > `"$outFile`" 2> `"$errFile`"`""
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $false
@@ -218,7 +227,26 @@ function Get-ExeOutput {
 
 # **直接跑 exe，而不是相信 spec 里的变量。**
 # 这一步问的是"它真的把哈希写进自己了吗"，答案是它自己说出来的才算。
-$versionRun = Get-ExeOutput -Exe $exe -Arguments @('--version')
+#
+# **必须先把这个变量从环境里摘掉。**
+#
+# `$env:FILE_TRACKER_BUILD_REV` 是本脚本自己设的（见前面），而它是
+# `core.build_revision()` 的**第 2 号来源**。挂着它跑自检，exe 会从
+# 环境变量读到哈希 —— **即使包里根本没写进去，校验也会通过**。
+#
+# v1.2.0 就是这么发出去的：产物自报 `unknown`，构建却全绿。
+# 测"它自己能不能说清楚自己是谁"，就必须在**没有外援**的条件下测。
+#
+# 用"从当前进程摘掉再放回"而不是 `$psi.Environment*.Remove(...)`：
+# 那个属性在 Windows PowerShell 5.1 与 PowerShell 7 上不通用，
+# 实测其中一边会得到 `$null`，报"不能对 Null 值表达式调用方法"。
+$savedRevisionVar = $env:FILE_TRACKER_BUILD_REV
+try {
+    Remove-Item Env:\FILE_TRACKER_BUILD_REV -ErrorAction SilentlyContinue
+    $versionRun = Get-ExeOutput -Exe $exe -Arguments @('--version')
+} finally {
+    if ($savedRevisionVar) { $env:FILE_TRACKER_BUILD_REV = $savedRevisionVar }
+}
 $reported = $versionRun.StdOut
 
 if ($versionRun.ExitCode -ne 0) {

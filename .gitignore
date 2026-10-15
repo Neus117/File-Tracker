@@ -36,8 +36,13 @@ ft_env/
 # PyInstaller
 /dist/
 /build/
-# 打包时由 File-Tracker.spec 生成、用完即删；万一残留也不要提交
+# 打包时由 File-Tracker.spec 生成、用完即删；万一残留也不要提交。
+#
+# **`src/file_tracker/_build_info.py` 是真正生效的那一份**——
+# `core.build_revision()` 用的是包内相对导入 `from ._build_info import ...`，
+# 所以它必须生成在包里。根目录那条是历史遗留，保留以防手工误放。
 /_build_info.py
+/src/file_tracker/_build_info.py
 
 # 测试与工具
 .pytest_cache/

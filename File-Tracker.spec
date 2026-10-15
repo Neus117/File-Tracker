@@ -71,7 +71,20 @@ WINDOWED = os.environ.get("FILE_TRACKER_CONSOLE", "") != "1"
 
 # 构建期模块：core.build_revision() 会优先读它。
 # 单文件 exe 里既没有 .git 也没有构建脚本，这是唯一可靠的来源。
-build_info = os.path.join(SPECPATH, "_build_info.py")  # noqa: F821
+#
+# **必须写进 `file_tracker/` 包内。**
+#
+# 踩过（v1.2.0 发版时才发现）：原来写在仓库根，于是它是一个**顶层模块**
+# `_build_info`；而 `core.py` 读的是 `from ._build_info import ...`
+# —— **包内相对导入**。路径对不上，导入永远 ImportError 被吞掉，
+# 产物一律自报 `File Tracker 1.2.0+unknown`。
+#
+# 更糟的是它**测不出来**：`build.ps1` 把 `FILE_TRACKER_BUILD_REV`
+# 设进了自己的进程环境，而那是 `build_revision()` 的**第 2 号来源**。
+# 自检时跑 exe，exe 从环境变量里读到了哈希 —— 校验因此恒过。
+# 也就是说「产物必须能自报哈希」这条纪律**从未真正成立**。
+package_dir = os.path.join(SPECPATH, "src", "file_tracker")  # noqa: F821
+build_info = os.path.join(package_dir, "_build_info.py")
 with open(build_info, "w", encoding="utf-8") as handle:
     handle.write(
         "# 由 File-Tracker.spec 在打包时生成，请勿手工编辑，也不要提交。\n"
@@ -85,15 +98,19 @@ with open(build_info, "w", encoding="utf-8") as handle:
 
 a = Analysis(  # noqa: F821
     [os.path.join(SPECPATH, "src", "main.py")],  # noqa: F821
-    # 两个都要在路径上：
-    #   src/        —— file_tracker 包
-    #   SPECPATH    —— 构建期生成的 _build_info（core.build_revision 优先读它）
-    # 只给 src/ 的话 _build_info 可能找不到，产物就会自报 "unknown"
-    pathex=[os.path.join(SPECPATH, "src"), SPECPATH],  # noqa: F821
+    # `src/` 必须在路径上，`file_tracker` 包从这里解析。
+    #
+    # 早先还加了 `SPECPATH`，理由是"让构建期生成的 `_build_info` 找得到"——
+    # **那个理由本身是错的**：`core.py` 用的是包内相对导入
+    # `from ._build_info import ...`，它只会去 `file_tracker/` 里找。
+    # 所以现在 `_build_info.py` 就写在包内（见上），`SPECPATH` 不再需要。
+    pathex=[os.path.join(SPECPATH, "src")],  # noqa: F821
     binaries=[],
     # 显式声明 images/ → _MEIPASS/images，不再依赖"目录结构碰巧同构"
     datas=[(os.path.join(SPECPATH, "images"), "images")],  # noqa: F821
-    hiddenimports=["_build_info"],
+    # `file_tracker._build_info` 是**运行时才有**的模块（打包时刚生成），
+    # 静态分析看不到它被 import，所以要显式声明，否则会被漏掉。
+    hiddenimports=["file_tracker._build_info"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
