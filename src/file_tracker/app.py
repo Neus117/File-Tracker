@@ -137,8 +137,25 @@ class FileTracker(wx.Frame):
         # 一旦 `SetAppName` 与 `APP_NAME` 不一致，配置与日志就会分到两个目录。
         # 现在只有一处定义（`core.app_data_dir`）。
         self.app_data_dir = app_data_dir()
-        if not os.path.exists(self.app_data_dir):
-            os.makedirs(self.app_data_dir, exist_ok=True)
+        # **建目录失败要报清楚，不能抛一个裸回溯。**
+        #
+        # 审计查出的问题：这是文件里**四处 `makedirs` 中唯一没有保护**的一处
+        # （另外三处见 `_report_resource_error` / `--selftest`）。
+        # `%APPDATA%` 写不了是真实场景（漫游配置损坏、组策略限制、
+        # 磁盘满），而那时用户看到的是一个 Python 回溯对话框，
+        # 而不是下面那句"打不开数据库"的说明。
+        try:
+            if not os.path.exists(self.app_data_dir):
+                os.makedirs(self.app_data_dir, exist_ok=True)
+        except OSError as error:
+            wx.MessageBox(
+                f"{L('无法创建数据目录', 'Could not create the data folder')}: "
+                f"{self.app_data_dir}\n\n{error}\n\n"
+                + L("程序会继续运行，但设置与记录可能无法保存。",
+                    "The app will continue, but settings and records may not "
+                    "be saved."),
+                L("数据目录错误", "Data folder error"),
+                wx.OK | wx.ICON_WARNING)
         # 走 `default_config_path()` 而不是在这里拼路径——
         # 测试与验证脚本要能把它换掉，否则会写进用户真实的配置。
         self.config = Config(default_config_path())
@@ -220,7 +237,7 @@ class FileTracker(wx.Frame):
         self.Bind(wx.EVT_ACTIVATE, self.on_activate)
         self.Bind(wx.EVT_SHOW, self.on_show)
 
-        wx.CallAfter(self.restore_scroll_position)
+        self._call_after(self.restore_scroll_position)
 
     # ------------------------------------------------------------------
     # 资源
@@ -303,12 +320,46 @@ class FileTracker(wx.Frame):
             # 那个错位的毛病。
             log_dir = app_data_dir()
             os.makedirs(log_dir, exist_ok=True)
-            with open(os.path.join(log_dir, "resource-errors.log"), "a",
-                      encoding="utf-8") as handle:
-                handle.write(line + "\n")
+            log_path = os.path.join(log_dir, "resource-errors.log")
+            FileTracker._append_capped(log_path, line)
         except OSError:
             # 连日志都写不了时不再抛异常——否则会盖掉真正的原始问题
             pass
+
+    #: 日志文件的上限。超过就把它截到最近的一半。
+    #:
+    #: 审计查出的问题：这个文件**只增不减、没有轮转**。而它的写入点里有
+    #: 一些是重复路径（窗口每次显示、主题每次应用）——虽然最吵的那一处
+    #: （鼠标移动）已经改成静默了，但"某个失败每帧重试"这类情形迟早会再出现，
+    #: 而日志把用户磁盘写满是最难查的一种故障。
+    #:
+    #: 256 KB 够存几千行，对排查足够；超出时留最近的一半而不是清空——
+    #: **刚发生的那次失败才是有用的那次**，把历史全丢掉等于下次还得再复现一遍。
+    MAX_LOG_BYTES = 256 * 1024
+
+    @staticmethod
+    def _append_capped(path: str, line: str) -> None:
+        """追加一行；文件超过上限时**只留最近的一半**。"""
+        limit = FileTracker.MAX_LOG_BYTES
+        try:
+            if os.path.exists(path) and os.path.getsize(path) > limit:
+                with open(path, "r", encoding="utf-8",
+                          errors="replace") as handle:
+                    kept = handle.read()[-(limit // 2):]
+                # 截断处可能落在半行中间——丢掉第一段（它不完整）
+                newline = kept.find("\n")
+                if newline != -1:
+                    kept = kept[newline + 1:]
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(L("[日志超过上限，已保留最近的部分]",
+                                   "[log exceeded its cap; kept the recent part]")
+                                 + "\n")
+                    handle.write(kept)
+        except OSError:
+            # 轮转失败不该阻止写日志（宁可文件大一点，也别丢信息）
+            pass
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
 
     def calculate_icon_size(self, original_size, target_size):
         """按原始宽高比等比缩放到目标长边。"""
@@ -468,6 +519,9 @@ class FileTracker(wx.Frame):
         # 焦点反而是可靠的信号，见 `on_tree_selection_made` ——那里记着
         # 用户为这个 bug 报过两次的完整原因。
         self._focus_pane = "tree"
+        # 关闭时用来停掉挂起回调（见 `on_close` / `_call_later`）
+        self._closing = False
+        self._pending_timers: list = []
         # 点了列表（含点已选中的那一行，此时 `ITEM_SELECTED` 不发）
         for list_event in (wx.EVT_LIST_ITEM_SELECTED, wx.EVT_SET_FOCUS):
             self.list_ctrl.Bind(list_event, self.on_list_selection_made)
@@ -475,6 +529,9 @@ class FileTracker(wx.Frame):
         # `_apply_selection_highlight`）。这几个事件都要接：
         # 点选、键盘上下、全选、以及"点空白处取消选中"。
         self._highlighted_row = -1
+        # 列宽重入标志（见 `adjust_column_widths`）：`SetColumnWidth` 会触发
+        # `EVT_SIZE` 打回自己，靠它只让最外层那一次做完。
+        self._adjusting_columns = False
         for event in (wx.EVT_LIST_ITEM_SELECTED, wx.EVT_LIST_ITEM_DESELECTED,
                       wx.EVT_LIST_KEY_DOWN):
             self.list_ctrl.Bind(event, self.on_selection_changed)
@@ -547,9 +604,18 @@ class FileTracker(wx.Frame):
         splitter.SetMinimumPaneSize(METRICS.tree_min_width)
         splitter.SetSashPosition(METRICS.sash_position)
 
-        # **自己画的分隔线。** sash 已被隐藏（见上），那条线改由
-        # :class:`~file_tracker.widgets.BorderLine` 画，颜色取
-        # ``theme.border``——这样深浅两套主题都跟着走。
+        # **这一行是用户要求注释掉的，不要"顺手恢复"。**
+        #
+        # 原文写着"自己画的分隔线，改由 BorderLine 画" —— 读起来像"它正在生效"，
+        # 但下面那行是**注释掉的**，所以 `self.pane_border` **根本不存在**。
+        #
+        # 三处读取点都用 ``getattr(self, "pane_border", None)`` 兜着，
+        # 所以不会崩；`tools/verify_gui.py` 还**专门断言**了它不存在
+        # （"sash 与分隔线都不画"是当时定下的外观）。
+        #
+        # 之所以把这段说明补上：审计发现注释与实际行为相反，
+        # 而下一个人看到"改由 BorderLine 画"会以为线是在的——
+        # 于是要么去删一段没生效的代码，要么去"修"一个本来就没画的东西。
         # self.pane_border = BorderLine(splitter, self.theme, vertical=True)
 
         main_sizer.Add(splitter, 1, wx.EXPAND | wx.ALL, 0)
@@ -848,7 +914,7 @@ class FileTracker(wx.Frame):
             return
         if self._header_reserves_space():
             win32.hide_child_window(handle, "SysHeader32")
-            wx.CallLater(60, self._hide_native_header_now)
+            self._call_later(60, self._hide_native_header_now)
 
     def _header_reserves_space(self) -> bool:
         """原生表头是否还在占用列表顶部的空间。
@@ -1047,7 +1113,7 @@ class FileTracker(wx.Frame):
         在 ``EVT_PAINT`` 里画会被系统随后覆盖。
         所以排在本次绘制**之后**再画（``CallAfter``），并且只画可见区域。
         """
-        wx.CallAfter(self._paint_column_separators)
+        self._call_after(self._paint_column_separators)
 
     def _paint_column_separators(self) -> None:
         """真正落笔：按当前列宽在可见行区域画竖线（**只画竖线，不画横线**）。"""
@@ -1125,18 +1191,66 @@ class FileTracker(wx.Frame):
             return True
         return True
 
+    #: 量列宽时**最多采样多少行**。
+    #:
+    #: 审计查出的性能问题：`fitted()` 对**每一行**调
+    #: `GetItemText` + `GetTextExtent`（3 列 × N 行 = 3N 次跨语言原生调用），
+    #: 而它**每次打开路径都要跑两遍**。记录数只增不减，几千条就是每点一下
+    #: 上万次原生调用。
+    #:
+    #: 取前 N 行的最大值就够了：日期/时间的格式是固定的，宽度不会变；
+    #: 频次列顶多位数不同，而"最宽的那一行"在前 200 行里几乎必然出现
+    #: （列表本身按频次降序，最常访问的就在最前面）。
+    #: 采样上限让这一步从 O(N) 变成 O(1)，代价是极端情况下列宽少几个像素
+    #: ——列宽只是观感，不影响任何数据。
+    COLUMN_WIDTH_SAMPLE = 200
+
     def adjust_column_widths(self) -> None:
-        """按内容与可用宽度重算各列宽度（原版逻辑，列数从 3 增到 4）。"""
+        """按内容与可用宽度重算各列宽度（原版逻辑，列数从 3 增到 4）。
+
+        ## 为什么要防重入
+
+        审计实测：一次"打开一条记录"里这个方法被调 **5 次**，
+        调用链是
+
+            adjust_column_widths
+              → SetColumnWidth
+                → EVT_SIZE（列表内容宽度变了）
+                  → _on_list_resized
+                    → adjust_column_widths      ← 回到自己
+
+        也就是说它**自己触发自己**，来回几轮直到宽度收敛。
+
+        采样上限（见 `COLUMN_WIDTH_SAMPLE`）让每一轮都便宜，
+        所以这不是性能问题；**问题是正确性**：内层那几轮是在
+        列宽还没设完的状态下量出来的，量了也会被外层覆盖。
+
+        加一个标志位，内层直接返回，只让最外层那一次做完。
+        用 `try/finally` 而不是"设了记得还原"——中途抛异常时标志位
+        要是留着的，这个方法就再也不会生效了，而且不会有任何报错。
+        """
+        if self._adjusting_columns:
+            return
+        self._adjusting_columns = True
+        try:
+            self._adjust_column_widths()
+        finally:
+            self._adjusting_columns = False
+
+    def _adjust_column_widths(self) -> None:
+        """真正做事的那个（**不要直接调它**，走 `adjust_column_widths`）。"""
         list_width = self.list_ctrl.GetSize().width
         if list_width <= 0:
             return
 
         extent = self.list_ctrl.GetTextExtent
+        row_count = self.list_ctrl.GetItemCount()
+        sample = min(row_count, self.COLUMN_WIDTH_SAMPLE)
 
         def fitted(column: int, header: str, extra: int = 40) -> int:
-            """列宽 = max(表头宽, 各单元格宽) + 边距。"""
+            """列宽 = max(表头宽, 采样到的单元格宽) + 边距。"""
             widths = [extent(header).width]
-            for row in range(self.list_ctrl.GetItemCount()):
+            for row in range(sample):
                 widths.append(extent(self.list_ctrl.GetItemText(row, column)).width)
             return max(widths) + extra
 
@@ -1289,7 +1403,7 @@ class FileTracker(wx.Frame):
             self.initial_scroll_position = v_pos
             tree.SetScrollPos(wx.VERTICAL, v_pos)
             tree.Refresh()
-            wx.CallLater(50, self.finalize_scroll_restore)
+            self._call_later(50, self.finalize_scroll_restore)
         except Exception as error:
             self._report_resource_error(L(f"恢复滚动位置时出错: {error}",
                               f"Could not restore the scroll position: {error}"))
@@ -1312,7 +1426,7 @@ class FileTracker(wx.Frame):
             return
         if self.scroll_timer:
             self.scroll_timer.Stop()
-        self.scroll_timer = wx.CallLater(200, self.save_scroll_position)
+        self.scroll_timer = self._call_later(200, self.save_scroll_position)
         event.Skip()
 
     def on_list_scroll(self, event) -> None:
@@ -1331,7 +1445,7 @@ class FileTracker(wx.Frame):
 
     def reset_dir_ctrl_scroll(self) -> None:
         tree = self.dir_ctrl.GetTreeCtrl()
-        wx.CallAfter(self._do_reset_horizontal_scroll, tree)
+        self._call_after(lambda: self._do_reset_horizontal_scroll(tree))
 
     def _do_reset_horizontal_scroll(self, tree) -> None:
         tree.SetScrollPos(wx.HORIZONTAL, 0)
@@ -1456,7 +1570,7 @@ class FileTracker(wx.Frame):
             if os.path.exists(folder_to_open):
                 self.open_folder(folder_to_open)
                 self.record_accessed_path(folder_to_open)
-                wx.CallLater(100, self.reset_dir_ctrl_scroll)
+                self._call_later(100, self.reset_dir_ctrl_scroll)
             else:
                 # **先问用户**（见 confirm_remove_invalid_path）
                 self.confirm_remove_invalid_path(folder_to_open)
@@ -1469,16 +1583,55 @@ class FileTracker(wx.Frame):
     # ------------------------------------------------------------------
 
     def record_accessed_path(self, path: str) -> None:
-        """记一次访问，并刷新界面。"""
+        """记一次访问，并刷新界面。
+
+        ## 为什么是"读一次、排序一次"
+
+        审计查出的性能问题：原来是
+
+            self.load_accessed_paths()          # 读库 + 渲染 + 量列宽
+            self.sort_list_items(self.sort_column)  # 再渲染一遍 + 再量一遍
+
+        —— `sort_list_items` 内部已经会重新读库、重排、重画、重量列宽，
+        所以第一句是**纯粹的多余工作**：整个列表被清空重建两次。
+        每次双击/回车都要付这份代价，而记录数只增不减。
+
+        `sort_list_items` 就是"读库 → 排序 → 渲染 → 量列宽"的完整入口，
+        所以这里只要调用它一次（`reload_from_store=True` 让它先重读数据库）。
+        """
         self.store.record_access(path)
-        self.load_accessed_paths()
-        self.sort_list_items(self.sort_column)
+        self.sort_list_items(self.sort_column, reload_from_store=True)
 
     def load_accessed_paths(self) -> None:
-        """从数据库重建列表：先顶置项，再按频次降序的其余项。"""
-        self._rows = self._ordered_records()
-        self._render_rows()
-        self.adjust_column_widths()
+        """从数据库重建列表：先顶置项，再按所选列排序的其余项。
+
+        ## 为什么它只是"转调" `sort_list_items`
+
+        审计查出的性能问题：这个方法原来做的是
+
+            self._rows = self._ordered_records()
+            self._render_rows()
+            self.adjust_column_widths()
+
+        而 `sort_list_items` 做的是
+
+            self._rows = ...排序...
+            self._render_rows()
+            self.adjust_column_widths()
+            self.center_frequency_column()
+            self._sync_header()
+
+        —— **后者是前者的超集**。于是"记一次访问"那段代码连续调两个，
+        整个列表被**清空重建两遍**、列宽被量两遍。实测每次 500 行时
+        约 12N 次跨语言原生调用，而记录数只增不减。
+
+        现在只留一条路：`sort_list_items(reload_from_store=True)`。
+        它做的比原来多出的两步（频次列居中、表头同步）本来就是
+        重建之后该做的事——原来只有"点列头"那条路会做，
+        "记一次访问"那条路漏了，于是**新记录上屏后频次列没有居中**。
+        合并顺带修掉了这个不一致。
+        """
+        self.sort_list_items(self.sort_column, reload_from_store=True)
 
     def _render_rows(self) -> None:
         """把 :attr:`_rows` 画到列表上。
@@ -1537,6 +1690,15 @@ class FileTracker(wx.Frame):
         # 不作废的话，下一次选中会去"恢复"一个已经不存在（或已换成
         # 另一条记录）的行号——用户看到的就是"某一行莫名其妙一直变色"。
         self._highlighted_row = -1
+        # **`_paint_key` 也必须一起作废。**
+        #
+        # 审计查出的问题：`_apply_selection_highlight` 用
+        # ``(selected, hovered)`` 做记忆，两者都没变就**整段跳过**
+        # （那是性能优化，见那里的注释）。而重建之后
+        # **行号相同、内容却换了一条**——于是那个"没变"的判断是假的，
+        # 高亮会被跳过，直到鼠标移动才补上。
+        # 用户看到的是"某一行的底色不对，动一下鼠标才好"。
+        self._paint_key = None
         self.list_ctrl.Refresh()
         # 重建后可能有残留选中，重新套一次高亮
         self._apply_selection_highlight()
@@ -1678,9 +1840,20 @@ class FileTracker(wx.Frame):
             self._highlighted_row = selected
             self._hover_painted = hovered
             self.list_ctrl.Refresh()
-        except Exception as error:
-            self._report_resource_error(L(f"设置行高亮失败：{error}",
-                              f"Could not apply the row highlight: {error}"))
+        except Exception:
+            # **这里必须静默，不能写日志。**
+            #
+            # 审计查出的问题：这个方法挂在**鼠标移动**路径上
+            # （`on_list_motion` → `_apply_selection_highlight`），
+            # 于是"每次换一个悬停行"就可能往
+            # `%APPDATA%\File Tracker\resource-errors.log` 写一行。
+            # 鼠标在列表上来回划几下就能刷出几百行，而那个文件只增不减。
+            #
+            # 行高亮是**纯外观**：失败时退化成"没有悬停高亮"，
+            # 不影响任何数据与操作。同一个调用在 `_render_rows` 里
+            # 本来就是静默处理的（那里注释写着"退化成无层级，而不是让整个
+            # 列表画不出来"）——两处判断不一致本身就是个缺陷。
+            pass
 
     def _center_text(self, text: str) -> str:
         # 把公式改成按真实列宽算
@@ -1717,14 +1890,36 @@ class FileTracker(wx.Frame):
         return -1
 
     def remove_invalid_path(self, path: str) -> None:
-        """把一条失效路径从记录里删掉（**不询问**，调用方负责先征得同意）。"""
+        """把一条失效路径从记录里删掉（**不询问**，调用方负责先征得同意）。
+
+        ## 只有**真的删到了**才说"已删除"
+
+        审计查出的缺陷：这里原来无条件弹"已从记录中删除"，
+        而 `store.remove` 返回什么都无所谓——**改到 0 行与改成功看起来一样**。
+
+        可达路径：导航窗格里留着一个失效选中（比如拔掉的 U 盘 `E:\\Backup`），
+        它**从来就不是一条记录**。用户点「打开」→ 弹确认 → 点「删除」→
+        程序说"已从记录中删除"，**而实际什么都没删**。
+
+        现在按 `store.remove` 的返回值分两种说法。删不到不是错误
+        （那条记录本来就不在），所以用**告知**而不是报错。
+        """
         index = self.find_path(path)
         if index != -1:
             self.list_ctrl.DeleteItem(index)
-        self.store.remove(path)
+        removed_a_row = self.store.remove(path)
         if path in self.pinned_paths:
             self.pinned_paths.remove(path)
         self._rows = [r for r in self._rows if r.path != path]
+
+        if not removed_a_row and index == -1:
+            # 界面上没有这一行、数据库里也没有 —— 它从来就不是一条记录。
+            # 说"已删除"是错的，用户会以为自己刚删掉了什么东西。
+            self._notify(
+                L(f"'{path}' 不在记录里，无需删除。",
+                  f"'{path}' is not in the records; nothing to remove."),
+                L("路径失效", "Path missing"))
+            return
         # **走 `_notify`（单按钮），不要自己建两按钮的确认框。**
         #
         # 用户报的："失效删除确认弹窗有两个按钮，功能完全一致——关闭窗口，
@@ -1861,10 +2056,16 @@ class FileTracker(wx.Frame):
                 L(f"无法保存排序偏好: {error}",
                   f"Could not save the sort preference: {error}"))
 
-    def sort_list_items(self, column: int) -> None:
+    def sort_list_items(self, column: int, reload_from_store: bool = False) -> None:
         """排序：顶置项始终在最前（按顶置顺序），其余按所选列排序。
 
-        **排序的入口只有列头点击**（`on_column_click`）。
+        :param reload_from_store: 先从数据库重新读一遍再排。
+            **刚改过数据库的调用方必须传 True**——否则排的是内存里那份
+            过期的 `_rows`，新记录不会出现。列头点击不需要重读
+            （那一列的数据没变），所以默认 False。
+
+        排序的入口有两个：列头点击（`on_column_click` / `on_header_clicked`）
+        与"记一次访问之后"（`record_accessed_path`）。
         原来还有一个「切换排序」按钮（`on_toggle_sort`），
         用户 2026-10-15 要求删掉："没什么用"。已删。
 
@@ -1872,6 +2073,9 @@ class FileTracker(wx.Frame):
         "交换两行"的接口，而记录量级是几十到几百条，重建比增量维护简单可靠得多。
         """
         from datetime import datetime
+
+        if reload_from_store:
+            self._rows = self._ordered_records()
 
         pinned_set = set(self.pinned_paths)
         records = list(self._rows)
@@ -1895,7 +2099,17 @@ class FileTracker(wx.Frame):
         pinned.sort(key=lambda r: self.pinned_paths.index(r.path))
         self._rows = pinned + unpinned
         self._render_rows()
-        self.adjust_column_widths()
+        # **不在这里再调 `adjust_column_widths()`。**
+        #
+        # 探针实测：`_render_rows()` 里 `DeleteAllItems()` + 逐行插入会改变
+        # 列表的内容宽度，于是**同步**触发 `EVT_SIZE` → `_on_list_resized`
+        # → `adjust_column_widths()`。也就是说这一步**已经做过了**，
+        # 返回之后紧跟着再调一次是纯粹的重复（一次 500 行要多付
+        # 约 3N 次跨语言原生调用，而记录数只增不减）。
+        #
+        # 保留 `_on_list_resized` 那条路是有意的：它同时也服务
+        # "用户拖动窗口改变列表宽度"，那条路上没有别人会量列宽。
+        #
         # 排序会重建全部行，列属性随之重置——重新确认一次居中
         self.center_frequency_column()
         # 排序列变了，自绘表头要更新那个小三角
@@ -2002,24 +2216,45 @@ class FileTracker(wx.Frame):
             else:
                 # **先问用户**，不再直接删（见 confirm_remove_invalid_path）
                 self.confirm_remove_invalid_path(path)
-        wx.CallLater(100, self.reset_dir_ctrl_scroll)
+        self._call_later(100, self.reset_dir_ctrl_scroll)
 
     def open_folder(self, path: str) -> None:
         folder_to_open = os.path.dirname(path) if os.path.isfile(path) else path
         self._open_in_explorer(folder_to_open)
 
     @staticmethod
-    def _open_in_explorer(folder: str) -> None:
-        """用资源管理器打开一个文件夹。
+    def _open_in_explorer(folder: str) -> bool:
+        """用资源管理器打开一个文件夹。返回是否成功。
 
         取 ``os.startfile`` 而不是 ``subprocess.Popen(f'explorer "{folder}"')``：
         后者经过 shell 解析，**路径里含 ``&`` 或引号时会被当成命令分隔符**，
         而在 Windows 上走 ``ShellExecute`` 既能正确传参，也能复用已打开的窗口。
+
+        ## 回退路径必须**报错**，不能静默
+
+        审计查出的问题：原来是
+
+            except (OSError, AttributeError):
+                subprocess.Popen(["explorer", folder])
+
+        —— `Popen` 在**路径不存在时并不抛异常**（它只是启动一个 explorer
+        进程，由 explorer 自己去报错），所以失败了也没人知道。
+        用户看到的是"点了打开，什么都没发生"，而程序认为成功了。
+
+        现在两条路都如实回报。
         """
         try:
             os.startfile(folder)  # noqa: S606 - Windows 专用，且这正是期望行为
+            return True
         except (OSError, AttributeError):
-            subprocess.Popen(["explorer", folder])
+            # 回退：`explorer` 对不存在的路径不抛异常，所以只能**先自己检查**
+            if not os.path.isdir(folder):
+                return False
+            try:
+                subprocess.Popen(["explorer", folder])
+                return True
+            except OSError:
+                return False
 
     def on_item_activated(self, event) -> None:
         path = self.selected_path()
@@ -2028,7 +2263,7 @@ class FileTracker(wx.Frame):
         if os.path.exists(path):
             self.open_folder(path)
             self.record_accessed_path(path)
-            wx.CallLater(100, self.reset_dir_ctrl_scroll)
+            self._call_later(100, self.reset_dir_ctrl_scroll)
         else:
             # **先问用户**（见 confirm_remove_invalid_path）
             self.confirm_remove_invalid_path(path)
@@ -2040,7 +2275,7 @@ class FileTracker(wx.Frame):
         if os.path.exists(path):
             self.open_folder(path)
             self.record_accessed_path(path)
-            wx.CallLater(100, self.reset_dir_ctrl_scroll)
+            self._call_later(100, self.reset_dir_ctrl_scroll)
         else:
             # **先问用户**（见 confirm_remove_invalid_path）
             self.confirm_remove_invalid_path(path)
@@ -2063,15 +2298,50 @@ class FileTracker(wx.Frame):
         dialog = ThemedDialog(self, self.theme, f"{WARN} {message}",
                               title=title, yes_label=L("好", "OK"),
                               no_label=NO_BUTTON)
-        dialog.ShowModal()
-        dialog.Destroy()
+        try:
+            dialog.ShowModal()
+        finally:
+            dialog.Destroy()
         self.Refresh()
 
     def on_copy(self, event) -> None:
+        """复制选中行的路径到剪贴板。
+
+        ## 为什么需要 `try/finally` 与返回值检查
+
+        审计查出两个问题：
+
+        ① 原来是 ``if ... Open(): SetData(...); Close()``——中间任何一步
+           抛异常，`Close()` 就不会执行，**剪贴板会一直开着**。
+           `wx.TheClipboard` 是**整个桌面共享**的资源：不关掉的话，
+           别的程序读写剪贴板都会失败，而用户完全不知道是本程序干的。
+        ② `SetData` 的返回值被丢掉了。它失败时返回 `False`（不抛异常），
+           于是"复制成功"与"复制失败"在用户看来完全一样——
+           他去别处粘贴，什么也贴不出来，也不知道为什么。
+        """
         path = self.selected_path()
-        if path and wx.TheClipboard.Open():
-            wx.TheClipboard.SetData(wx.TextDataObject(path))
-            wx.TheClipboard.Close()
+        if not path:
+            return
+        copied = False
+        try:
+            if wx.TheClipboard.Open():
+                try:
+                    copied = bool(
+                        wx.TheClipboard.SetData(wx.TextDataObject(path)))
+                finally:
+                    # **必须在 finally 里**：上面任何一步抛异常都要关掉，
+                    # 否则剪贴板会被本程序占住直到退出。
+                    wx.TheClipboard.Close()
+        except Exception as error:
+            self._notify(
+                L(f"复制失败：{error}", f"Could not copy: {error}"),
+                L("复制", "Copy"))
+            return
+        if not copied:
+            self._notify(
+                L("复制失败：剪贴板被别的程序占用。",
+                  "Could not copy: the clipboard is held by another program."),
+                L("复制", "Copy"))
 
     def on_delete_selected(self, event) -> None:
         path = self.selected_path()
@@ -2085,40 +2355,91 @@ class FileTracker(wx.Frame):
         dialog = ThemedDialog(self, self.theme,
                               f"{WARN} " + L("确定要删除这条记录吗？", "Delete this record?"),
                               title=L("确认删除", "Confirm delete"))
-        if dialog.ShowModal() == wx.ID_YES:
-            self.store.remove(path)
-            if path in self.pinned_paths:
-                self.pinned_paths.remove(path)
-            self.load_accessed_paths()
-        dialog.Destroy()
+        # **`try/finally` 保证弹窗一定会被销毁。**
+        # `ShowModal()` 抛异常时（少见但不是不可能）原来的写法会把
+        # 弹窗留在屏幕上，而且后面的 `Refresh()` 也不会执行。
+        try:
+            confirmed = dialog.ShowModal() == wx.ID_YES
+        finally:
+            dialog.Destroy()
+        if confirmed:
+            # **只有真的删到了才刷新**：`store.remove` 返回 False 说明
+            # 那一行早就不在库里（例如另一个实例删过），
+            # 此时刷新只会让界面闪一下，数据没有任何变化。
+            if self.store.remove(path):
+                if path in self.pinned_paths:
+                    self.pinned_paths.remove(path)
+                self.load_accessed_paths()
         self.Refresh()
 
     def on_clear(self, event) -> None:
         dialog = ThemedDialog(self, self.theme,
                               f"{WARN} " + L("确定要清空所有记录吗？", "Clear all records?"),
                               title=L("确认清空", "Confirm clear"))
-        if dialog.ShowModal() == wx.ID_YES:
+        try:
+            confirmed = dialog.ShowModal() == wx.ID_YES
+        finally:
+            dialog.Destroy()
+        if confirmed:
             self.store.clear()
             self.list_ctrl.DeleteAllItems()
             self._rows = []
             self.pinned_paths.clear()
+            # 账本一起清：列表空了，"上一次高亮的行号"与
+            # `(selected, hovered)` 记忆都不再有任何意义。
+            self._highlighted_row = -1
+            self._paint_key = None
             self.adjust_column_widths()
-        dialog.Destroy()
         self.Refresh()
 
     def on_pin(self, event) -> None:
+        """顶置当前行。**新顶置的排在顶置组最后。**
+
+        ## 为什么是"最后"而不是"最前"
+
+        审计查出的缺陷：这里原来是 ``insert(0, path)``（新顶置的排最前），
+        而启动时 `store.load_pinned()` 是 ``ORDER BY id`` ——
+        也就是**首次访问的先后**。两者不一致，于是**重启后顺序会变**：
+        用户刚顶置的那条会从最前跳到它原本的位置。
+
+        两个选择：加一列记住顶置时间（要迁移老数据），
+        或者让内存里的顺序与数据库**本来就是同一个**。
+
+        选了后者：`append` 与 `ORDER BY id` 天然一致，**不需要迁移**，
+        也不会再多出一处"两份状态要同步"的地方——
+        本项目已经因为那类同步缺陷修过好几次了。
+
+        :meth:`load_accessed_paths` 重建列表时读的是同一个顺序，
+        所以界面上看到的与重启后看到的必然相同。
+        """
         path = self.selected_path()
-        if path and path not in self.pinned_paths:
-            self.pinned_paths.insert(0, path)
-            self.store.set_pinned(path, True)
-            self.sort_list_items(self.sort_column)
+        if not path or path in self.pinned_paths:
+            return
+        # **先写库再改内存**：写不进去就不该在界面上显示成已顶置
+        # （否则重启后它会消失，而中间没有任何提示——审计里的 M4）。
+        if not self.store.set_pinned(path, True):
+            self._notify(
+                L(f"'{path}' 不在记录里，无法顶置。",
+                  f"'{path}' is not in the records; cannot pin it."),
+                L("顶置失败", "Pin failed"))
+            return
+        if path not in self.pinned_paths:
+            self.pinned_paths.append(path)
+        self.sort_list_items(self.sort_column)
 
     def on_unpin(self, event) -> None:
         path = self.selected_path()
-        if path and path in self.pinned_paths:
-            self.pinned_paths.remove(path)
-            self.store.set_pinned(path, False)
-            self.sort_list_items(self.sort_column)
+        if not path or path not in self.pinned_paths:
+            return
+        if not self.store.set_pinned(path, False):
+            # 行已经不在库里了（例如另一个实例删过它）。
+            # 内存里也不该再留着，否则它会一直在顶置组里显示。
+            self._notify(
+                L(f"'{path}' 已不在记录里，已从顶置列表移除。",
+                  f"'{path}' is no longer in the records; removed from pins."),
+                L("取消顶置", "Unpin"))
+        self.pinned_paths.remove(path)
+        self.sort_list_items(self.sort_column)
 
     def on_right_click(self, event) -> None:
         # 右键点在某一行上时，控件会先把它选中；没有选中就不弹菜单
@@ -2206,7 +2527,7 @@ class FileTracker(wx.Frame):
         for button in (self.open_btn, self.clear_btn, self.path_bar):
             if hasattr(button, "Refresh"):
                 button.Refresh()
-        wx.CallAfter(self.reset_dir_ctrl_scroll)
+        self._call_after(self.reset_dir_ctrl_scroll)
         event.Skip()
 
     def _retheme(self) -> None:
@@ -2331,16 +2652,39 @@ class FileTracker(wx.Frame):
             # 每次显示窗口都要重藏原生表头——`Show()` 会把它翻出来
             # （实测，见 _hide_native_header）
             self._hide_native_header()
-            wx.CallAfter(self.reset_dir_ctrl_scroll)
+            self._call_after(self.reset_dir_ctrl_scroll)
         event.Skip()
 
     def on_close(self, event) -> None:
-        """退出：保存配置、提交数据库、关闭连接。
+        """退出：**先取消挂起的回调**，再保存配置、提交数据库、关闭连接。
 
         **顺序有讲究**：先落配置与数据库，最后才 ``Skip()`` 真正销毁窗口。
         旧实现在这里调 ``save_accessed_paths`` 整表重写（先 ``DELETE FROM paths``
         再从界面把所有行插回去），现在不需要了——数据库本身就是真相来源。
+
+        ## 为什么要先取消挂起的回调
+
+        审计查出的问题：窗口里散着十几处 `wx.CallLater` / `wx.CallAfter`
+        （延迟量列宽、复位滚动、`_hide_native_header_now` 等），
+        而**没有任何一处在关闭时取消**。
+
+        它们排队等着执行，而窗口正在被销毁——回调一旦跑到，
+        碰的就是已经释放的 wx 对象（`self.dir_ctrl.GetTreeCtrl()` 之类）。
+        后果通常只是退出时冒一段回溯，但那是**碰运气**：
+        同一段代码在别的时机可能就崩在退出路径上，而"退出时崩溃"
+        会把本该保存的数据一起带走，是最难查的一类。
+
+        取消是廉价的：`wx.CallLater` 有 `Stop()`；`CallAfter` 没法取消，
+        所以用 `_closing` 标志让那些回调**自己检查后直接返回**。
         """
+        self._closing = True
+        for timer in list(self._pending_timers):
+            try:
+                timer.Stop()
+            except Exception:
+                pass
+        self._pending_timers.clear()
+
         try:
             current_dir = self.dir_ctrl.GetPath()
             if current_dir and os.path.exists(current_dir):
@@ -2356,6 +2700,45 @@ class FileTracker(wx.Frame):
             wx.LogError(L(f"关闭数据库时出错: {error}", f"Error while closing the database: {error}"))
 
         event.Skip()
+
+    def _call_later(self, delay_ms: int, callback):
+        """`wx.CallLater` 的包装：**登记下来，好在关闭时取消**。
+
+        两重保护，缺一不可：
+
+        * 登记进 `_pending_timers`，`on_close` 会依次 `Stop()`——
+          这是主要手段。
+        * **回调自己也检查 `_closing`**：`Stop()` 只能拦住"还没到期"的；
+          如果定时器**已经到期、事件已经排进队列**，`Stop()` 就无效了，
+          回调照样会跑。而它跑的时候窗口可能已经销毁。
+
+        只用 `wx.CallLater` 就没法在 `on_close` 里统一停掉——
+        那正是审计查出的问题（十几个挂起回调，一个都没取消）。
+        **新代码一律走这里。**
+        """
+
+        def guarded():
+            if self._closing:
+                return
+            callback()
+
+        timer = wx.CallLater(delay_ms, guarded)
+        self._pending_timers.append(timer)
+        return timer
+
+    def _call_after(self, callback) -> None:
+        """`wx.CallAfter` 的包装：**窗口关闭后不再执行**。
+
+        `wx.CallAfter` 没有取消接口，所以只能让回调自己检查 `_closing`。
+        包一层，调用方就不必每次记得写那个判断。
+        """
+
+        def guarded():
+            if self._closing:
+                return
+            callback()
+
+        wx.CallAfter(guarded)
 
 
 class FileTrackerApp(wx.App):

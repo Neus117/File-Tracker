@@ -115,18 +115,34 @@ class PathStore:
         self.conn.commit()
         return self.get(path) or PathRecord(path, 1, timestamp, False)
 
-    def set_pinned(self, path: str, pinned: bool) -> None:
-        """设置/取消顶置。``pinned_paths`` 的顺序由调用方维护（``id`` 序）。"""
+    def set_pinned(self, path: str, pinned: bool) -> bool:
+        """设置/取消顶置。``pinned_paths`` 的顺序由调用方维护（``id`` 序）。
+
+        :return: **是否真的改到了一行**。
+
+        审计查出的缺陷：原来返回 ``None``，于是"改到了 0 行"与"改成功了"
+        在调用方看来完全一样。可达路径：这条记录在别处（另一个实例）已被删掉，
+        用户点顶置 → 界面显示已顶置 → **重启后没了**，而中间没有任何提示。
+
+        `cursor.rowcount` 是这里唯一的真话来源：``UPDATE`` 没匹配到行时它返回 0。
+        """
         self.cursor.execute(
             "UPDATE paths SET is_pinned = ? WHERE path = ?",
             (1 if pinned else 0, path),
         )
+        changed = self.cursor.rowcount
         self.conn.commit()
+        return changed > 0
 
-    def remove(self, path: str) -> None:
-        """删除一条记录（路径失效或用户主动删除时调用）。"""
+    def remove(self, path: str) -> bool:
+        """删除一条记录（路径失效或用户主动删除时调用）。
+
+        :return: **是否真的删掉了一行**（见 :meth:`set_pinned` 的说明）。
+        """
         self.cursor.execute("DELETE FROM paths WHERE path = ?", (path,))
+        changed = self.cursor.rowcount
         self.conn.commit()
+        return changed > 0
 
     def clear(self) -> None:
         """清空全部记录。"""

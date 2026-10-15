@@ -115,12 +115,14 @@ a = Analysis(  # noqa: F821
     # **只打运行时真正用的那几个资源，不再整目录塞进去。**
     #
     # 原来是 `(images 目录, "images")` —— 整目录复制。于是**文档用的截图
-    # 也被打进了 exe**：`FileTracker_v1.0-Overview.jpg`（148 KB）与
-    # `FileTracker_v1.1-Overview.jpg`（259 KB），合计 358 KB（约产物的 2%）。
+    # 也被打进了 exe**（两张 Overview 共 358 KB，约产物的 2%）。
     #
-    # 那两张图是 **README 的展示图**（`README.md` 用 raw.githubusercontent
+    # 那些图是 **README 的展示图**（`README.md` 用 raw.githubusercontent
     # 链接引用 `v1.1` 那张），**程序运行时一个字节都不读**。
     # 它们该留在仓库里，但不该进产物。
+    #
+    # 另一张 `FileTracker_v1.0-Overview.jpg` 在仓库里**任何地方都没有引用**
+    # （README 只用了 v1.1 那张），已删除。
     #
     # 逐个列出而不是"排除两个"：这样**新增资源必须显式登记**，
     # 不会因为"放进 images/ 就自动进产物"而再次混进文档文件。

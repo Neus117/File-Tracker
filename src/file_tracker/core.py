@@ -18,7 +18,7 @@ import sys
 from dataclasses import dataclass
 
 APP_NAME = "File Tracker"
-APP_VERSION = "1.2.5"
+APP_VERSION = "1.2.4"
 
 #: 用户指定的初始窗口增量：**累计** 32.25%
 #

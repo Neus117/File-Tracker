@@ -264,15 +264,58 @@ def remove_client_edge(hwnd: int) -> bool:
     SWP_NOSIZE = 0x0001
     SWP_NOZORDER = 0x0004
     user32 = ctypes.windll.user32
-    style = user32.GetWindowLongW(ctypes.c_void_p(hwnd), GWL_EXSTYLE)
+
+    # **`GetWindowLongW` 返回 0 有两种含义，必须分开。**
+    #
+    # 审计查出的缺陷：原来是
+    #
+    #     style = user32.GetWindowLongW(...)
+    #     if not (style & WS_EX_CLIENTEDGE):
+    #         return True          # "本来就没有，算成功"
+    #
+    # 而**调用失败时它也返回 0**。于是句柄失效时这里会
+    # ``return True`` —— 报告"已经去掉了边框"，而实际什么都没做。
+    # 调用方（`app._draw_pane_border`）会据此认为边框归自己画，
+    # 结果就是**既没有系统边框、也没有自绘边框**（一片空白），
+    # 而且没有任何报错。
+    #
+    # ## 怎么区分（两条一起用）
+    #
+    # ① **句柄必须先有效。** `IsWindow` 是最直接的判据，不依赖任何
+    #    错误码机制。
+    # ② 读样式用 `GetWindowLongPtrW`：64 位下 `GWL_EXSTYLE` 的**正确**
+    #    入口是它，`GetWindowLongW` 在 64 位是遗留接口。
+    #
+    # ⚠️ **不要试图用 `SetLastError`/`GetLastError` 来判。**
+    # 踩过：`ctypes.windll.user32.SetLastError` 根本不存在
+    # （`AttributeError: function 'SetLastError' not found`）——
+    # 它是 `ctypes.SetLastError`，而且需要 `use_last_error=True`
+    # 加载 DLL 才会被 ctypes 捕获。为一个"判失败"引入这套机制不值得。
+    if not user32.IsWindow(ctypes.c_void_p(hwnd)):
+        return False                    # 句柄无效，如实说"没做成"
+
+    def read_ex_style() -> int:
+        """读扩展样式；优先用 64 位安全的 `GetWindowLongPtrW`。"""
+        getter = getattr(user32, "GetWindowLongPtrW", None)
+        if getter is not None:
+            return int(getter(ctypes.c_void_p(hwnd), GWL_EXSTYLE))
+        return int(user32.GetWindowLongW(ctypes.c_void_p(hwnd), GWL_EXSTYLE))
+
+    style = read_ex_style()
     if not (style & WS_EX_CLIENTEDGE):
-        return True                      # 本来就没有，算成功
-    user32.SetWindowLongW(ctypes.c_void_p(hwnd), GWL_EXSTYLE,
-                          style & ~WS_EX_CLIENTEDGE)
+        return True                     # 真的本来就没有，算成功
+
+    setter = getattr(user32, "SetWindowLongPtrW", None)
+    if setter is not None:
+        setter(ctypes.c_void_p(hwnd), GWL_EXSTYLE,
+               style & ~WS_EX_CLIENTEDGE)
+    else:
+        user32.SetWindowLongW(ctypes.c_void_p(hwnd), GWL_EXSTYLE,
+                              style & ~WS_EX_CLIENTEDGE)
     user32.SetWindowPos(ctypes.c_void_p(hwnd), None, 0, 0, 0, 0,
                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED)
-    current = user32.GetWindowLongW(ctypes.c_void_p(hwnd), GWL_EXSTYLE)
-    return not (current & WS_EX_CLIENTEDGE)
+
+    return not (read_ex_style() & WS_EX_CLIENTEDGE)
 
 
 def strip_column_header_style(hwnd: int) -> bool:
@@ -577,24 +620,42 @@ def is_window_topmost(hwnd: int) -> bool:
 
 
 def set_window_topmost(hwnd: int, topmost: bool) -> bool:
-    """置顶 / 取消置顶窗口。
-
-    **必须用 ``SetWindowPos``，不能用 ``wx.Frame.SetWindowStyle``。**
-    实测（`tools/probes/probe_topmost.py`）：
-
-    ===========================================  ==========================
-    做法                                         ``WS_EX_TOPMOST`` 真的变了吗
-    ===========================================  ==========================
-    ``SetWindowStyle(style | wx.STAY_ON_TOP)``   **没有**（但 ``GetWindowStyle()``
-                                                 会骗你说变了）
-    再补一次 ``Hide()`` + ``Show()``             没有
-    ``SetWindowPos(HWND_TOPMOST)``               **有**
-    ===========================================  ==========================
-
-    所以原实现的表现正是用户报的"功能本身都失效了"：
-    **代码看起来完全正确，`GetWindowStyle()` 也返回 True，窗口就是不理你。**
+    """置顶 / 取消置顶窗口（直接改 ``WS_EX_TOPMOST``）。
 
     :return: 操作后窗口的实际置顶状态
+
+    ## ⚠️ 这里原来有一段**已过期**的说明，别再照着它改代码
+
+    原文写着"**必须用 `SetWindowPos`，不能用 `wx.Frame.SetWindowStyle`**"，
+    还附了一张表格说 `SetWindowStyle` 改不动 `WS_EX_TOPMOST`
+    （"`GetWindowStyle()` 会骗你说变了"）。
+
+    **那份结论和现在实测不符。**
+    `tools/probes/probe_setwindowstyle_topmost.py` 三层读数一起验：
+
+    ==============================================  ==================
+    做法                                            ``WS_EX_TOPMOST``
+    ==============================================  ==================
+    ``SetWindowStyle(style | wx.STAY_ON_TOP)``      **真的变成 True**
+    ``SetWindowStyle(style & ~wx.STAY_ON_TOP)``     **真的变回 False**
+    ``win32.set_window_topmost(True/False)``        同样有效
+    ==============================================  ==================
+
+    wx 自己的 ``STAY_ON_TOP`` 位与 ``WS_EX_TOPMOST`` 是**同步**的，
+    所以 `app.on_always_on_top` 用 `SetWindowStyle` 是**对的**。
+    那张表格的结论当年也许是真（不同 wx 版本行为不同），
+    但留着它只会让下一个人去"修"一个没坏的东西。
+
+    ## 那这个函数为什么还留着
+
+    两个理由，都不是"给 `on_always_on_top` 用"：
+
+    * 它**不依赖 wx 的样式位**：`SetWindowPos` 直接置顶时
+      ``GetWindowStyle()`` 不会跟着变（见上面探针的对照行），
+      所以要"强制置顶但不动 wx 的记账"时只有它能做到。
+    * `tools/verify_gui.py` 用它**读取**实际状态
+      （`:func:`is_window_topmost`），那是判断"置顶真的生效了吗"的
+      唯一可靠依据——不能用 wx 自己的说法去验 wx 自己的行为。
     """
     if not IS_WINDOWS or not hwnd:
         return False

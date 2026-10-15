@@ -74,12 +74,31 @@ class ColumnHeader(wx.Control):
     # -- 与列表同步 ---------------------------------------------------------
 
     def sync_from_list(self, list_ctrl: wx.ListCtrl) -> None:
-        """从列表读列标题与列宽。列表改过列宽之后必须调一次。"""
+        """从列表读列标题与列宽。列表改过列宽之后必须调一次。
+
+        ## 失败时**不能**静默返回
+
+        审计查出的问题：原来 ``except Exception: return``——什么也不说。
+        后果是 ``self.titles`` / ``self.widths`` **停在旧值**，
+        而自绘表头就再也不与下面的列对齐了。
+
+        这正是本文件存在的理由（原生表头在深色主题下不可控，
+        所以自己画一个），而"自己画的"与"控件里的"一旦不同步，
+        症状是**列标题与内容错位**——用户看到"表头串位了"，
+        却没有任何报错，也查不出是哪一步失败。
+
+        这里不能直接调 `app._report_resource_error`（会造成
+        header → app 的循环依赖），所以走 `wx.LogWarning`。
+        """
         try:
             count = list_ctrl.GetColumnCount()
             self.titles = [list_ctrl.GetColumn(i).GetText() for i in range(count)]
             self.widths = [list_ctrl.GetColumnWidth(i) for i in range(count)]
-        except Exception:
+        except Exception as error:
+            # **报出来**，别让表头悄悄与列错位
+            wx.LogWarning(
+                f"自绘表头同步失败，表头可能与列错位: "
+                f"{type(error).__name__}: {error}")
             return
         self._sync_height()
         self.Refresh()

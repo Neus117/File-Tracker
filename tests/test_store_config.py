@@ -399,3 +399,71 @@ def test_save_creates_missing_directory(tmp_path):
     config.set_scroll_position(0.5)
     config.save()
     assert os.path.exists(nested)
+
+
+# --------------------------------------------------------------------------
+# 零行写入不能当成成功（审计 M4）
+# --------------------------------------------------------------------------
+
+def test_set_pinned_reports_whether_a_row_changed(store):
+    """`set_pinned` 必须告诉调用方**有没有真的改到一行**。
+
+    原来返回 `None`，于是"改到 0 行"与"改成功"在调用方看来一样。
+    可达路径：这条记录在别处（另一个实例）已被删掉，
+    用户点顶置 → 界面显示已顶置 → **重启后没了**，中间没有任何提示。
+    """
+    store.record_access(r"C:\Exists")
+    assert store.set_pinned(r"C:\Exists", True) is True
+
+    # 库里没有这一条 —— 必须如实回报 False，而不是默默"成功"
+    assert store.set_pinned(r"C:\Never-recorded", True) is False
+
+
+def test_remove_reports_whether_a_row_was_deleted(store):
+    """`remove` 同理：删到 0 行时调用方不该说"已删除"。
+
+    用户报过这个现象：导航窗格停在一个失效路径上（比如拔掉的 U 盘），
+    那个路径**从来就不是一条记录**；点删除后程序说"已从记录中删除"，
+    而实际什么都没删。
+    """
+    store.record_access(r"C:\Real")
+    assert store.remove(r"C:\Real") is True
+    assert store.remove(r"C:\Real") is False        # 第二次已经没有可删的了
+    assert store.remove(r"C:\Never-recorded") is False
+
+
+def test_pin_order_is_the_same_in_memory_and_in_the_store(tmp_path):
+    """顶置顺序**跨重启保持一致**（审计 M5）。
+
+    缺陷原来是：`on_pin` 用 ``insert(0, ...)``（新的排最前），
+    而启动时读的是 ``ORDER BY id``（首次访问的顺序）。
+    两者不一致 ⇒ 用户刚顶置的那条会在重启后跳到别的位置。
+
+    修法是让两处**本来就是同一个顺序**（追加 + `ORDER BY id`），
+    而不是新增一列"顶置时间"——那要多一次数据迁移，
+    也多一处"两份状态要同步"的地方（本项目为那类缺陷修过好几次）。
+
+    **必须用真实文件**：`store` fixture 是 ``:memory:``，一关就没了，
+    验不了"重启后顺序不变"。
+    """
+    path = str(tmp_path / "pins.db")
+    store = PathStore(path)
+    try:
+        for name in (r"C:\First", r"C:\Second", r"C:\Third"):
+            store.record_access(name)
+        for name in (r"C:\First", r"C:\Second", r"C:\Third"):
+            assert store.set_pinned(name, True) is True
+
+        # 记录访问的顺序就是 id 的顺序；顶置组必须按同一个顺序出来
+        assert [r.path for r in store.load_pinned()] == [
+            r"C:\First", r"C:\Second", r"C:\Third"]
+    finally:
+        store.close()
+
+    # 重新打开（模拟重启）之后顺序不变
+    reopened = PathStore(path)
+    try:
+        assert [r.path for r in reopened.load_pinned()] == [
+            r"C:\First", r"C:\Second", r"C:\Third"]
+    finally:
+        reopened.close()

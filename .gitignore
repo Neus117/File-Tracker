@@ -11,22 +11,28 @@ __pycache__/
 build/
 develop-eggs/
 dist/
-downloads/
 eggs/
-lib/
-lib64/
-parts/
 sdist/
-var/
 *.egg-info/
 .installed.cfg
 *.egg
 
+# ⚠️ 下面这些**故意去掉了**：`downloads/`、`lib/`、`lib64/`、`parts/`、`var/`
+#
+# 它们是 setuptools 模板留下的通用条目，而且是**不带锚点**的目录名——
+# 意思是**仓库里任何一层**叫这个名字的目录都会被忽略。
+# 实测现在没有这样的目录，所以还没出过事；但哪天有人加一个
+# `src/file_tracker/lib/`，git 会**静默地不跟踪它**：
+# 文件在本地好好的、测试也过，只有别人 clone 下来才发现少东西。
+#
+# 这类"静默忽略"最难查，而它们挡掉的东西（构建产物）上面已经有了。
+
 # Virtual environments
+#
+# 同样去掉不带的 `env/` / `ENV/`：那两个名字太通用，容易误伤。
+# 本项目的环境叫 `ft_env` / `.ft_env`，显式列出来就够。
 .venv/
 venv/
-env/
-ENV/
 .ft_env/
 ft_env/
 
@@ -46,9 +52,30 @@ ft_env/
 
 # 测试与工具
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .coverage
 htmlcov/
 /render/
+
+# 编辑器与操作系统垃圾
+#
+# 审计提的"缺口"：这些模式原来一条都没有。实测现在**没有任何工作区文件
+# 命中它们**，所以还没出过事——但这属于"迟早会有人用 VS Code 打开这个仓库，
+# 然后 `git add -A` 把 `.vscode/` 一起提交"的那类问题。
+# 加模式的成本是零，漏掉一次的代价是一次误提交。
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 临时文件与日志
+*.log
+*.bak
+*.tmp
 
 # 用户数据 —— **绝不能提交**
 #

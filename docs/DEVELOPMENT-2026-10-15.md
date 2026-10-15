@@ -851,3 +851,172 @@ frame.list_ctrl.GetItemRect(0).y <= 2      # 第一行贴近客户区顶部
 
 GUI 验证 **57 项**（含"没有双重顶栏：第一行 y ≈ 0"）；
 `tests/` **122 条**；TEMP 零残留；构建产物 16.05 MB。
+
+---
+
+# 审计之后的一轮（v1.2.4）
+
+这一轮的输入不是用户反馈，而是**一次系统性审计**：功能、健壮性、体积、
+仓库卫生四个方面各查一遍。下面只记那些"值得写下来"的结论，
+尤其是**我自己的判断错在哪**。
+
+## 一、`--version` 会卡死，而构建门禁测不到
+
+`build.ps1` 与 CI 都验过 `--version`，`docs/RELEASING.md` 还教用户拿它判断版本
+——但那两处**都把 stdout 重定向到文件**，所以**永远测不到真实情况**。
+
+真实情况是：windowed 产物没有控制台 ⇒ `sys.stdout is None` ⇒ 代码转去
+`wx.StandardPaths.Get()` 记日志，而那条路径**没有 `wx.App`**：
+
+```python
+except (OSError, ValueError):        # ← 接不住：这句不抛异常，它挂住
+```
+
+**wx 断言失败不是抛异常，而是弹一个模态框等人点。**
+命令行场景没有人点 ⇒ 进程停死。
+
+### 怎么查出来的
+
+`tools/probes/probe_standardpaths_hang.py` 用三种情形对照：
+
+| 情形 | 结果 |
+|---|---|
+| 不开 App 直接调 | **15 秒未退出**（断言框在等） |
+| 不开 App + `wx.DisableAsserts()` | 正常返回 |
+| 先建 `wx.App` | 正常返回 |
+
+第二行是关键：**禁用断言 == 假装有人点了「继续」**，于是它顺利返回
+——证明**失败的从来不是那次调用，而是 wx 的断言处理**。
+所以修法是"让这条路不依赖 wx"，不是"再加一层 try/except"。
+
+⚠️ 用户当时**手动点掉**了那个断言框。这一点必须说清楚：
+判据是"15 秒没退出"（一个下界），他点了之后进程才可能返回，
+所以**结论不变**——反而更确凿，因为框上的字直接写着
+``wxStandardPathsBase::Get(): create wxApp before calling this``。
+
+## 二、修完第一层才看见第二层
+
+`StandardPaths` 改掉之后 `--version` **仍然卡 6 秒以上**——那是我自己的
+提示框 `ShowModal()` **一直等**。修完第一层才暴露出来。
+
+现在挂一个 `wx.Timer`（6 秒）自动关闭。取值权衡：够看清一行版本号，
+又不至于像卡死。
+
+## 三、`GetWindowLongW` 返回 0 有两种含义
+
+审计 m10：`win32.remove_client_edge` 把"读失败"当成了"本来就没有边框"，
+于是句柄失效时**报告成功**，调用方以为边框归自己画，
+结果是既没有系统边框、也没有自绘边框（一片空白），没有任何报错。
+
+**修的时候我自己踩了一个坑**：想用 `SetLastError`/`GetLastError` 判失败，
+结果
+
+```
+AttributeError: function 'SetLastError' not found
+```
+
+——它是 `ctypes.SetLastError`，而且需要 `use_last_error=True` 加载 DLL
+才会被 ctypes 捕获。**为一个"判失败"引入这套机制不值得。**
+
+现在用两条都不依赖错误码的判据：`IsWindow` 判句柄有效、
+`GetWindowLongPtrW` 读样式（64 位下 `GWL_EXSTYLE` 的**正确**入口）。
+
+## 四、我在这轮里判断错的三件事
+
+### ① 把"README 的展示图"当成了无用文件
+
+审计里我写了"两张 `FileTracker_v1.*-Overview.jpg` **全代码库零引用**"。
+**错了**：`FileTracker_v1.1-Overview.jpg` 是 README 的展示图
+（`![...](raw.githubusercontent.com/.../FileTracker_v1.1-Overview.jpg)`）。
+
+我的扫描只看了 **Python 字符串字面量**（AST），**漏了 Markdown 图片链接**。
+
+结果反而更好：改成**逐个列出运行时资源**（而不是"整目录打进去"），
+图留在仓库、不进 exe。但结论错误的性质要说清楚——
+**"零引用"这种判断必须搜全部文件类型，不能只搜代码。**
+
+### ② 量错了进程，以为窗口起不来
+
+我给一个 PyInstaller 产物做验证时，`MainWindowHandle` 一直是 0、
+内存只有 8.6 MB，于是判断"窗口起不来"。
+
+**真因**：PyInstaller **onefile 会再 spawn 一个子进程**：
+
+| 进程 | 内存 | 窗口 |
+|---|---|---|
+| bootloader 父进程 | 8.6 MB | **没有** |
+| 真正的应用子进程 | 59.7 MB | `handle=3345016` |
+
+我一直量的是父进程。
+
+**对照实验**（用未改动的 HEAD 版 spec 构建）行为完全一样 ⇒ 不是我的改动引起的。
+代价：为此跑了十几轮。**根因是"量错了对象"，不是"代码有 bug"。**
+
+⚠️ 连带影响：更早那次"排除 `socket` 导致窗口起不来"的结论**也因此不可靠**
+（可能同样是量错进程）。做体积实验时**必须同时确认子进程与它的窗口**。
+
+### ③ 改 `build.ps1` 时把 BOM 弄丢了
+
+`edit` 工具**不保留 UTF-8 BOM**。丢了之后 PowerShell 5.1 按 GBK 解码，
+`throw "找不到 Python: ..."` 里的中文被解坏，**整个脚本语法错误**。
+
+`tools/add_bom.py` 抓到了它——那正是它存在的理由。
+**改完任何 `.ps1` 都要跑一次 `python tools/add_bom.py`。**
+
+## 五、性能：数值要量，不能猜
+
+审计 M3 说"每次打开重建两遍"。修的过程中用
+`tools/probes/probe_rebuild_cost.py` 数**调用次数**（不是秒表——
+本机负载让时间不可靠）：
+
+| 指标 | 修前 | 修后 |
+|---|---|---|
+| `_render_rows`（整表清空重建） | 2 | **1** |
+| `adjust_column_widths`（真正做事） | 5 | **1** |
+| `GetItemText` 原生调用 | 738 | 69 |
+| 列表行数 | 500 | 500 |
+
+三个改动：
+
+1. **`record_accessed_path` 不再调两次**——`load_accessed_paths` 与
+   `sort_list_items` 做的是同一件事（后者是前者的超集），合并成一条路。
+2. **量列宽加采样上限**（`COLUMN_WIDTH_SAMPLE = 200`）：把 O(N) 变成 O(1)。
+   日期/时间格式固定，宽度不会变；最宽的那一行在前 200 行里几乎必然出现
+   （列表本来就按频次降序）。
+3. **`adjust_column_widths` 加防重入**：`SetColumnWidth` 会触发
+   `EVT_SIZE` 打回自己（探针抓到调用链：
+   `adjust_column_widths → SetColumnWidth → _on_list_resized → adjust_column_widths`）。
+
+⚠️ 数"被调用次数"会骗人：加了重入护栏之后它**仍会被进入 5 次**，
+只是内层立刻返回。探针一开始就是这么骗我的——**要数"真正做了事的次数"**。
+
+## 六、探针不能弹窗（用户已经被打扰过）
+
+用户原话：
+
+> 我帮你点掉了这些窗口，对测试结论有没有影响？以后你可以自动关闭吗？
+> 我生怕你思考卡住又多等几十分钟
+
+三类框，都不是我有意弹的：
+
+| 框 | 谁弹的 | 根治 |
+|---|---|---|
+| `wxWidgets Debug Alert` | **wx 断言**不抛异常，弹框等人点 | `wx.DisableAsserts()` |
+| `Unhandled exception in script` | PyInstaller 运行时钩子 | 别造坏产物 + 先杀进程 |
+| 探针自己的窗口没关 | 探针 | `finally` 里 `Destroy()` |
+
+**第一类真正危险**：断言框会**一直等**，而探针是无人值守的。
+
+现在有 `tools/probes/_probe_guard.py`：
+
+```python
+install_excepthook()   # 崩溃 → 打清楚 + 非零退出，而不是弹框
+harden_wx()            # wx.DisableAsserts() ← 关键
+```
+
+外加 `run_probe()` 把探针当子进程跑并硬限时——**卡住的是子进程，不是整场会话**。
+
+## 本轮的验证
+
+GUI **155 项**（含三组阳性对照）；`tests/` **186 条**；
+八道门禁全绿；产物 **13.30 MB**（原 16.12）。

@@ -1324,15 +1324,6 @@ class SettingsDialog(ThemedDialog):
                     x += width + gap
             y += row_pitch * len(chunks)
 
-    def _place_language_row(self) -> None:
-        """兼容旧调用点：只摆语言那一行。"""
-        if not hasattr(self, "_label"):
-            return
-        left, _top, right, _bottom = self._body_rect
-        self._place_rows(right - left,
-                         scale_for_dpi(METRICS.dialog_button_height,
-                                       dpi_of(self)))
-
     def _on_paint(self, event) -> None:
         """基类会把 `_message` 画出来；设置窗口没有正文，所以只铺底色。"""
         dc = wx.AutoBufferedPaintDC(self)

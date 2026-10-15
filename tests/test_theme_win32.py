@@ -286,3 +286,47 @@ def test_point_size_for_dpi_returns_negative_height():
     """``wx.Font`` 用负高度表示"按字高而非行高"解释这个值。"""
     assert theme.point_size_for_dpi(10, 96) == -13
     assert theme.point_size_for_dpi(10, 168) == -23
+
+
+# --------------------------------------------------------------------------
+# remove_client_edge：无效句柄不能报告"成功"
+# --------------------------------------------------------------------------
+
+def test_remove_client_edge_rejects_invalid_handles():
+    """句柄无效时必须返回 False，**不能**报告"已经处理好了"。
+
+    审计查出的缺陷（m10）：原来是
+
+        style = user32.GetWindowLongW(...)
+        if not (style & WS_EX_CLIENTEDGE):
+            return True          # "本来就没有，算成功"
+
+    而 ``GetWindowLongW`` **失败时也返回 0**。于是句柄失效时这里会
+    ``return True`` —— 报告"边框已经去掉了"，而**实际什么都没做**。
+
+    调用方 `app._remove_tree_client_edge` 会据此不再管那圈边框，
+    结果是**既没有系统边框、也没有自绘边框**（一片空白），
+    而且没有任何报错。用户看到的是"导航窗格边框莫名消失"。
+
+    ⚠️ **不要用 `SetLastError`/`GetLastError` 去判。**
+    踩过：`ctypes.windll.user32.SetLastError` 根本不存在
+    （`AttributeError: function 'SetLastError' not found`）。
+    现在用 `IsWindow` + `GetWindowLongPtrW`，两条都不依赖错误码。
+    """
+    from file_tracker import win32
+
+    assert win32.remove_client_edge(0) is False
+    assert win32.remove_client_edge(0xDEADBEEF) is False
+    # 一个**真实存在**的窗口应当能被正常处理（否则上面两条可能只是"永远返回 False"）
+    assert win32.remove_client_edge(
+        ctypes.windll.user32.GetDesktopWindow()) is True
+
+
+def test_remove_client_edge_is_idempotent():
+    """对同一个窗口调两次都要成功——第二次是"本来就没有边框"。"""
+    from file_tracker import win32
+
+    desktop = ctypes.windll.user32.GetDesktopWindow()
+    first = win32.remove_client_edge(desktop)
+    second = win32.remove_client_edge(desktop)
+    assert first is True and second is True

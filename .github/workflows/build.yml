@@ -92,6 +92,11 @@ jobs:
       - name: 重复方法检查的阳性对照
         run: python -X utf8 tools/check_duplicate_methods_negative.py
 
+      # 审计 18 个条目逐项清账（功能/健壮性/体积/仓库卫生）。
+      # 每一条都是可执行判据 —— "我记得都改完了"不是证据。
+      - name: 审计条目清账
+        run: python -X utf8 tools/check_audit_items.py
+
       # Windows PowerShell 5.1 读没有 BOM 的 UTF-8 文件会按 ANSI 解码，
       # 脚本里的中文变成乱码甚至语法错误。踩过一次——一个检查器因此
       # 把 78 处正常代码报成了死代码。
