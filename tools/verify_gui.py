@@ -1257,6 +1257,113 @@ def main() -> int:
             f"列表 {len(chosen_from_list)} 个，导航 {len(chosen_from_tree)} 个",
         )
 
+        # ---- 程序改树选中**不得**顶掉用户的列表选择 ----
+        #
+        # 用户**第二次**报的就是这个："打开按钮还是不能正确执行记录窗格内
+        # 最后一次选中条目，依然优先响应上次使用的导航窗格条目。"
+        #
+        # 根因：`EVT_TREE_SEL_CHANGED` 分不清"用户点的"和"代码改的"，
+        # 而 `reveal_in_tree` 会调 `tree.SelectItem()`（地址栏回车、
+        # 启动定位上次目录）。于是用户的列表选择被悄悄改成 tree。
+        #
+        # 所以现在只绑**程序不可能产生**的事件：
+        # `EVT_SET_FOCUS` 与 `EVT_TREE_KEY_DOWN`。
+        frame._focus_pane = "list"
+        tree_ctrl = frame.dir_ctrl.GetTreeCtrl()
+        # **不能选根项**：`GenericDirCtrl` 把根藏起来了，`SelectItem` 会抛
+        # `wxAssertionError: can't select hidden root item`（实测）。
+        # 取根的第一个子项——那是一个真实的、可选的目录节点。
+        probe_item = tree_ctrl.GetFirstChild(tree_ctrl.GetRootItem())[0]
+        check(
+            "阳性对照：拿到了一个可选的树节点（否则下面那两条测不出东西）",
+            probe_item.IsOk(),
+            f"节点 = {tree_ctrl.GetItemText(probe_item)!r}"
+            if probe_item.IsOk() else "拿不到子项",
+        )
+        if probe_item.IsOk():
+            tree_ctrl.SelectItem(probe_item)     # ← 程序改选中
+        for _ in range(20):
+            wx.YieldIfNeeded()
+        check(
+            "程序改树选中（`SelectItem`）**不会**顶掉列表的选择",
+            frame._focus_pane == "list",
+            f"`SelectItem()` 之后 _focus_pane = {frame._focus_pane!r}"
+            + ("（正确：程序化选中不该改它）" if frame._focus_pane == "list"
+               else "（**它被改回 tree 了**，用户报的就是这个）"),
+        )
+        # **真实鼠标点击**（`wx.UIActionSimulator` 走的是系统输入队列，
+        # 与用户手动点击经过同一条路）。
+        #
+        # 为什么不用 `win.GetEventHandler().GetConnected()` 去查绑定：
+        # 实测那个方法**不存在**（`'TreeCtrl' object has no attribute
+        # 'GetConnected'`）。而"点一下看行为"本来就比"查绑定表"更接近
+        # 要验的东西——绑定对了但事件不达，查表是看不出来的。
+        # ---- 事件确实接在**用户输入事件**上，而且真的会改 `_focus_pane` ----
+        #
+        # 直接派发事件到真实的处理器上（`ProcessEvent`），而不是合成鼠标：
+        # 合成鼠标（`wx.UIActionSimulator`）在这个验证脚本里**不可靠**——
+        # 单独跑能触发，跑在整串检查中间时一个事件都收不到（窗口位置、
+        # 焦点、遮挡都会影响）。**不稳定的检查比没有检查更糟**：
+        # 它会让整道门禁的结论不可信。
+        #
+        # 这里验的是"接到用户输入 → 改 `_focus_pane`"这一环，
+        # 不依赖窗口在屏幕上的位置。
+        def fire(win, event) -> bool:
+            event.SetEventObject(win)
+            return win.GetEventHandler().ProcessEvent(event)
+
+        frame._focus_pane = "tree"
+        fire(frame.list_ctrl, wx.ListEvent(wx.wxEVT_LIST_ITEM_SELECTED,
+                                           frame.list_ctrl.GetId()))
+        check(
+            "列表的选中事件会把目标切到 list",
+            frame._focus_pane == "list",
+            f"_focus_pane = {frame._focus_pane!r}",
+        )
+
+        frame._focus_pane = "list"
+        fire(frame.list_ctrl, wx.FocusEvent(wx.wxEVT_SET_FOCUS,
+                                            frame.list_ctrl.GetId()))
+        check(
+            "列表的**焦点**事件也会切到 list（点已选中的行时只有它会来）",
+            frame._focus_pane == "list",
+            f"_focus_pane = {frame._focus_pane!r}"
+            "（`ITEM_SELECTED` 在选中没变时不发，所以焦点这条必要）",
+        )
+
+        # 用 `wx.CommandEvent` 而不是 `wx.TreeEvent`：后者的构造函数要一个
+        # `wx.TreeItemId`，直接传 id（int）会 TypeError
+        # （`TreeEvent(): arguments did not match any overloaded call`）。
+        # 处理器只读 `event.Skip()`，不关心事件的具体类型。
+        frame._focus_pane = "list"
+        fire(tree_ctrl, wx.CommandEvent(wx.wxEVT_TREE_KEY_DOWN,
+                                        tree_ctrl.GetId()))
+        check(
+            "树的方向键事件会把目标切到 tree（用户操作导航窗格）",
+            frame._focus_pane == "tree",
+            f"_focus_pane = {frame._focus_pane!r}",
+        )
+
+        frame._focus_pane = "list"
+        fire(tree_ctrl, wx.FocusEvent(wx.wxEVT_SET_FOCUS, tree_ctrl.GetId()))
+        check(
+            "树的**焦点**事件会把目标切到 tree（用户点进导航窗格）",
+            frame._focus_pane == "tree",
+            f"_focus_pane = {frame._focus_pane!r}",
+        )
+
+        # **`EVT_TREE_SEL_CHANGED` 绝不能再接上去。**
+        # 这是那个 bug 的根：它分不清"用户点的"与"代码改的"，
+        # 于是 `reveal_in_tree` 的 `SelectItem()` 会把用户的列表选择顶掉。
+        source = _inspect.getsource(_app_module.FileTracker)
+        check(
+            "树**没有**绑 `EVT_TREE_SEL_CHANGED`（那个事件分不清用户与程序）",
+            "EVT_TREE_SEL_CHANGED, self.on_tree_selection_made" not in source,
+            "已改用 `EVT_SET_FOCUS` + `EVT_TREE_KEY_DOWN`"
+            + ("；但仍检测到旧绑法" if "EVT_TREE_SEL_CHANGED, self."
+               in source else ""),
+        )
+
         # ==============================================================
         print()
         print("=== 改动 ㉑：不需要回答的提示只给一个按钮 ===")

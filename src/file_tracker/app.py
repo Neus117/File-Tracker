@@ -374,8 +374,24 @@ class FileTracker(wx.Frame):
         self._enable_tree_row_highlight(tree)
         tree.Bind(wx.EVT_TREE_ITEM_ACTIVATED, self.on_dir_item_activated)
         tree.Bind(wx.EVT_SCROLLWIN, self.on_scroll)
-        # 导航窗格里选了东西 → 之后的「打开」以它为准（见 `on_list_selection_made`）
-        tree.Bind(wx.EVT_TREE_SEL_CHANGED, self.on_tree_selection_made)
+        # 导航窗格里**用户操作**了 → 之后的「打开」以它为准。
+        #
+        # 只绑**程序不可能产生**的事件，不绑 `EVT_TREE_SEL_CHANGED`：
+        # 后者会被 `reveal_in_tree` 里的 `SelectItem()` 触发，
+        # 从而覆盖用户在记录窗格里的选择。完整理由见
+        # `on_tree_selection_made`。
+        #
+        # 两个事件的选择是有讲究的：
+        #   * `EVT_TREE_KEY_DOWN`      —— 方向键换选中。程序不会发键盘事件。
+        #   * `EVT_SET_FOCUS`          —— 用户点进这个控件。**焦点是最可靠的
+        #     "用户在这里"信号**：程序改选中不会给控件焦点。
+        #
+        # **不绑 `EVT_TREE_ITEM_ACTIVATED`**：`on_dir_item_activated`
+        # 已经绑了它（双击/回车展开），再绑一个会重复处理同一个事件。
+        # **也不绑 `EVT_TREE_ITEM_EXPANDING`**：`reveal_in_tree` 里的
+        # `tree.Expand()` 会触发它——那正是要躲开的"程序化事件"。
+        tree.Bind(wx.EVT_TREE_KEY_DOWN, self.on_tree_selection_made)
+        tree.Bind(wx.EVT_SET_FOCUS, self.on_tree_selection_made)
         left_sizer.Add(self.dir_ctrl, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM,
                        METRICS.padding_gap)
         left_panel.SetSizer(left_sizer)
@@ -431,12 +447,19 @@ class FileTracker(wx.Frame):
         # 所以在记录窗格里选哪一条都没用——用户报的就是这个：
         # "记录窗格中无论选中哪条记录，「打开」按钮都只会响应左侧导航窗格的选中项。"
         #
-        # 判据按**选中事件**而不是 `EVT_SET_FOCUS`：
-        # 焦点会撒谎（点空白处、Tab 键、`Show()` 都会改焦点，
-        # 而用户的"选中"没变）。选中事件只在选择真的变了时候来。
+        # `_focus_pane` 记录"用户最后一次在哪一处操作"，`on_open` 按它取目标。
+        #
+        # 默认以导航窗格为准：刚启动时记录窗格里的选中是程序选的（或没有），
+        # 而导航窗格停在"上次浏览的目录"——那是用户上回的意图。
+        #
+        # **判据只认"用户输入事件"**（`SET_FOCUS` / `ITEM_SELECTED` /
+        # `TREE_KEY_DOWN`）。为什么不认 `EVT_TREE_SEL_CHANGED`、以及为什么
+        # 焦点反而是可靠的信号，见 `on_tree_selection_made` ——那里记着
+        # 用户为这个 bug 报过两次的完整原因。
         self._focus_pane = "tree"
-        self.list_ctrl.Bind(wx.EVT_LIST_ITEM_SELECTED,
-                            self.on_list_selection_made)
+        # 点了列表（含点已选中的那一行，此时 `ITEM_SELECTED` 不发）
+        for list_event in (wx.EVT_LIST_ITEM_SELECTED, wx.EVT_SET_FOCUS):
+            self.list_ctrl.Bind(list_event, self.on_list_selection_made)
         # **选中行整行高亮**（原生高亮被 item 底色压掉了，见
         # `_apply_selection_highlight`）。这几个事件都要接：
         # 点选、键盘上下、全选、以及"点空白处取消选中"。
@@ -1399,6 +1422,11 @@ class FileTracker(wx.Frame):
             # 于是"导航到某路径"之后有两项同时高亮。
             # 实测见 `tools/probes/probe_multiselect.py` 场景 C。
             tree.UnselectAll()
+            # 这一次选中是**程序改的**，不是用户点的。
+            # 它不再需要任何"闸门"：`_focus_pane` 只由**用户输入事件**
+            # （`EVT_SET_FOCUS` / `EVT_TREE_KEY_DOWN`）改写，而
+            # `SelectItem()` 一个都触发不了。完整理由见
+            # `on_tree_selection_made`。
             tree.SelectItem(item)
             tree.EnsureVisible(item)
             tree.Refresh()
@@ -1878,13 +1906,50 @@ class FileTracker(wx.Frame):
     # ------------------------------------------------------------------
 
     def on_list_selection_made(self, event) -> None:
-        """记录窗格里选中了某条 → 之后的「打开」以它为准。"""
+        """记录窗格里**用户操作**了 → 之后的「打开」以它为准。
+
+        绑了两个事件，各有各的必要：
+
+        * ``EVT_LIST_ITEM_SELECTED`` —— 换了选中行
+        * ``EVT_SET_FOCUS``          —— 用户点进了列表
+
+        只绑前者会漏掉一种很常见的情况：**点已经选中的那一行**。
+        选中没变，`ITEM_SELECTED` 就不发（wx 只在变化时发），
+        于是 `_focus_pane` 还停在上一次的 "tree"，按「打开」开的是导航窗格。
+        """
         self._focus_pane = "list"
-        # 这个控件还挂着整行高亮的处理，别把它吞掉
+        # 列表还挂着整行高亮的处理（`on_selection_changed`），
+        # 不 `Skip()` 会把那次事件吞掉，那一行根本选不上
         event.Skip()
 
     def on_tree_selection_made(self, event) -> None:
-        """导航窗格里选中了某项 → 之后的「打开」以它为准。"""
+        """导航窗格里选中了某项 → 之后的「打开」以它为准。
+
+        ## 为什么绑的是**用户输入事件**而不是 `EVT_TREE_SEL_CHANGED`
+
+        这是用户第二次报同一个问题之后找到的真正原因。
+
+        `EVT_TREE_SEL_CHANGED` **分不清"用户点的"和"代码改的"**。
+        而 :meth:`reveal_in_tree` 会调 ``tree.SelectItem()``
+        （地址栏回车、启动时定位上次目录都走那里）。于是：
+
+            ① 用户在记录窗格里选了一条 → `_focus_pane = "list"`   ✅
+            ② 程序改树选中 → `SEL_CHANGED` 触发（**可能是迟到的**）
+               → `_focus_pane = "tree"`   ❌ 用户的意图被悄悄覆盖
+            ③ 按「打开」→ 打开的是导航窗格那一项
+
+        **一个"忽略程序化选中"的布尔闸挡不住它**：wx 的事件可能被推迟到
+        闸门落下之后才派发（探针里就抓到过两条迟到的 `SEL_CHANGED`）。
+
+        所以改成绑**只可能由用户输入产生**的那些事件：
+
+        * ``EVT_TREE_ITEM_ACTIVATED`` —— 双击/回车展开
+        * ``EVT_TREE_KEY_DOWN``        —— 方向键换选中
+        * ``EVT_TREE_ITEM_EXPANDING``  —— 点展开箭头
+
+        ``SelectItem()`` **一个都触发不了**，所以不可能再把用户的意图顶掉。
+        这条判据是"事件来源"层面的，不依赖时序——而时序正是前面两次都错的地方。
+        """
         self._focus_pane = "tree"
         event.Skip()
 

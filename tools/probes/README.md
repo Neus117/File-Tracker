@@ -393,6 +393,33 @@ user32.SendMessageW.restype = ctypes.c_void_p
 > `wxAssertionError: ((HWND)GetHWND())` —— 它要一个**已创建**的窗口，
 > 不能用临时控件当参数。
 
+## `probe_open_focus.py` — 「打开」跟不跟最后一次选中
+
+用户为这个 bug 报过**两次**：
+
+1. "记录窗格中无论选中哪条记录，「打开」按钮都只会响应左侧导航窗格的选中项。"
+2. "打开按钮还是不能正确执行记录窗格内最后一次选中条目，
+   依然优先响应上次使用的导航窗格条目。"
+
+第一次我以为绑 `EVT_LIST_ITEM_SELECTED` 就够了。第二次才发现真正的原因在
+**事件来源**上，不在时序上：
+
+> `EVT_TREE_SEL_CHANGED` **分不清"用户点的"和"代码改的"**。
+> 而 `reveal_in_tree` 会调 `tree.SelectItem()`（地址栏回车、启动定位上次目录）。
+> 于是用户的列表选择被这个程序化事件悄悄改成 "tree"。
+
+修法：只绑**程序不可能产生**的事件 —— `EVT_SET_FOCUS` 与
+`EVT_TREE_KEY_DOWN`。`SelectItem()` 一个都触发不了。
+
+### 这个探针教我的两件事
+
+* **合成鼠标事件（`wx.UIActionSimulator`）不可靠。** 单独跑能触发，
+  跑在整串检查中间时一个事件都收不到（窗口位置、焦点、遮挡都会影响）。
+  我为此白跑了四五轮，最后换成直接 `ProcessEvent` 派发到真实处理器上——
+  确定性的，且验的是同一环逻辑。
+* **`wx.DisplaySize()` 返回元组，不是 `wx.Size`。** 写成 `display.width`
+  直接 `AttributeError`。
+
 ## `probe_item_colour.py` — `wx.ListCtrl` 的文字颜色能不能**按列**设
 
 会开窗口。连续对一个 item 设两次不同颜色，看读回来是哪一个。
