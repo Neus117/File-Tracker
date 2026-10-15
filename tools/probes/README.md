@@ -406,6 +406,96 @@ user32.SendMessageW.restype = ctypes.c_void_p
 > `wxAssertionError: ((HWND)GetHWND())` —— 它要一个**已创建**的窗口，
 > 不能用临时控件当参数。
 
+## 性能与置顶那三个（`probe_rebuild_cost.py` / `probe_adjust_reentry.py` / `probe_setwindowstyle_topmost.py`）
+
+| 探针 | 回答什么 |
+|---|---|
+| `probe_rebuild_cost.py` | 一次「打开」里 `_render_rows` / `adjust_column_widths` **真正做事**几次、原生调用多少次 |
+| `probe_adjust_reentry.py` | `adjust_column_widths` 被调 5 次是不是**重入**（打印调用链） |
+| `probe_setwindowstyle_topmost.py` | `SetWindowStyle(wx.STAY_ON_TOP)` 到底有没有真的改变 `WS_EX_TOPMOST` |
+
+### 量出来的结论
+
+**① 重建次数与原生调用**
+
+| 指标 | 修前 | 修后 |
+|---|---|---|
+| `_render_rows`（整表清空重建） | 2 | **1** |
+| `adjust_column_widths`（真正做事） | 5 | **1** |
+| `GetItemText` 原生调用 | 738 | 69 |
+
+**② `adjust_column_widths` 确实在重入**（探针打出的调用链）：
+
+```
+adjust_column_widths
+  → SetColumnWidth
+    → EVT_SIZE（列表内容宽度变了）
+      → _on_list_resized
+        → adjust_column_widths      ← 回到自己
+```
+
+⚠️ **数"被调用次数"会骗人。** 加了重入护栏之后它**仍会被进入 5 次**，
+只是内层立刻返回——探针第一版就是这么骗我的。
+**要数"真正做了事的次数"**（判据：这次调用有没有产生 `GetItemText`）。
+
+**③ `SetWindowStyle` 是有效的**，`win32.py` 里那张
+"SetWindowStyle 改不动 `WS_EX_TOPMOST`"的表格是**过期文档**：
+
+| 做法 | `WS_EX_TOPMOST` |
+|---|---|
+| `SetWindowStyle(style \| wx.STAY_ON_TOP)` | **真的变 True** |
+| `SetWindowStyle(style & ~wx.STAY_ON_TOP)` | **真的变回 False** |
+| `win32.set_window_topmost(True/False)` | 同样有效 |
+
+所以 `app.on_always_on_top` 用 `SetWindowStyle` 是**对的**，
+别照着那份旧文档去"修"它。
+
+## 列表规模那一组（`probe_scale_cost.py` / `probe_scale_profile.py`）
+
+审计 M3 说"**无上限、无裁剪、全量渲染**"。前两项（每次打开重建两遍、
+列宽量测 O(N)）已修；**"无上限"这一半还没有**——这两个探针就是用来
+决定"要不要动、怎么动"的。
+
+### 量出来的（本机，175% DPI）
+
+| 记录数 | 建窗口 | **一次「打开」重建** |
+|---|---|---|
+| 200 | 597 ms | 124 ms |
+| 1000 | 718 ms | 387 ms |
+| 3000 | 1171 ms | 994 ms |
+| 6000 | 2121 ms | **1906 ms** |
+
+**近线性增长，6000 行时每次双击/回车要等近 2 秒。**
+
+### 时间花在哪（6000 行，一次重建共 2092 ms）
+
+| 分段 | 耗时 | 调用次数 |
+|---|---|---|
+| **`InsertItem`** | **1533 ms** | **6000** |
+| `SetItem` | 104 ms | 18000 |
+| `SetItemBackgroundColour` | 80 ms | 6000 |
+| 量列宽 | 61 ms | 2 |
+| `SetItemTextColour` | 26 ms | 6000 |
+| 读库 `load_unpinned` | 13 ms | 1 |
+
+⚠️ 分段会**重叠**（`_render_rows` 里包含 `InsertItem`），不要相加——
+看的是"哪一项最贵"。
+
+### 结论
+
+瓶颈是 **`wx.ListCtrl` 的逐行 `InsertItem`**（约 0.26 ms/行），
+不是读库、不是量列宽、也不是排序。所以：
+
+* **"裁剪记录"治不了根**：5000 行仍要 1.3 秒。
+* 真正的解法是**虚拟列表**（`wx.LC_VIRTUAL` + `OnGetItemText`），
+  只渲染可见行。
+* **但那是一次有风险的改造**：虚拟列表**不支持**逐项
+  `SetItemBackgroundColour` / `SetItemTextColour`——而整行高亮、
+  预选跟随、顶置黄底全都依赖它们。`_render_rows` / `_apply_selection_highlight`
+  / `_paint_column_separators` 都要跟着改，属于"改完必须全面重验"的那一类。
+
+所以这一半**留作决策项**，不在这轮顺手做。
+
 ## 体积审计那一组（一轮审计留下的，六个）
 
 这一组是为"16.12 MB 里都是什么、能省多少"写的。**都没有弹窗**
