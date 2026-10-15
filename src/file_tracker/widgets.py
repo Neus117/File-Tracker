@@ -868,29 +868,106 @@ class ThemedDialog(wx.Dialog):
         self.Refresh()
 
 
-def _wrap_buttons(buttons, max_width: int, gap: int,
-                  row_height: int) -> list[list]:
-    """把一排分段按钮按 ``max_width`` 折成若干块（每块占一行）。
+def _row_lines(label, chunks, content_width: int, gap: int) -> int:
+    """这一行占几**行**：能同行是 1，放不下就是"标签一行 + 按钮块数"。
 
-    **宽度封顶靠它。** 四个排序列横排要 408 逻辑像素，加标签就逼近 600，
-    弹窗会变成又宽又扁的横带（实测 897 像素）。折成 2×2 之后就回到
-    与其它行相当的宽度。
-
-    至少保留两个一行——一行一个太散，反而不像"一组里选一个"。
+    **`_layout`（算高度）与 `_place_rows`（摆位置）都调它。**
+    这个判据原来在两处各写了一遍——而"两处实现迟早不一致"
+    正是本项目反复修过的那类缺陷（`set_icon`、`load_last_directory`、
+    分隔线几何都栽在这上面）。写成函数就不可能分叉。
     """
+    buttons_width = (sum(b.GetBestSize().width for b in chunks[0])
+                     + gap * (len(chunks[0]) - 1))
+    if len(chunks) == 1 and _label_width(label) + gap + buttons_width <= content_width:
+        return 1
+    return 1 + len(chunks)
+
+
+def _label_width(label) -> int:
+    """按标签**当前的字体**量出它真正占多宽（外加一点余量）。
+
+    ## 为什么不能用 `GetBestSize()`
+
+    实测踩到的：`app._apply_body_font()` 里有
+    ``wx.StaticText.SetFont(self, body)`` —— 那是**类级**调用，
+    会把之后创建的所有 StaticText 都换成 10pt 的 body 字体。
+
+    而 `GetBestSize()` 的尺寸是在控件创建时用**当时的字体**算好缓存的；
+    等字体被类级调用改大之后，这个缓存值就不再等于文字的真正宽度。
+
+    症状（用户截图）：设置窗口里「界面语言」「排序方式」「排序方向」
+    **每个标签的最后两三个字被右边的按钮压住** —— 我按 85 像素给它留位置，
+    而 10pt 下它要 100 像素。
+
+    ## 顺带一个真实的风险
+
+    中日韩字形在有些字体下会比拉丁字形**更高更宽**；把宽度交给缓存值，
+    等于把这个差异藏起来。现量现算没有这个问题。
+
+    余量按 DPI 走（2 逻辑像素），换字体或换 DPI 都不会贴边。
+    """
+    dc = wx.ClientDC(label)
+    dc.SetFont(label.GetFont())
+    text_width = dc.GetTextExtent(label.GetLabel()).width
+    margin = scale_for_dpi(2, dpi_of(label))
+    return text_width + margin
+
+
+def _wrap_buttons(buttons, content_width: int, gap: int,
+                  label_width: int = 0) -> list[list]:
+    """把一排分段按钮折成若干块（每块占一行）。
+
+    ## 第一行要给标签留位置
+
+    **第一块与标签同行**（标签靠左、按钮靠右），所以第一块的预算要**减去
+    标签宽度与间距**；后续块整条内容宽都能用。
+
+    这条差异最早没做，于是"平均折行"折出了 `[3, 1]` 这种参差不齐的结果：
+    第一行硬塞三个（挤掉标签的位置），第二行只剩一个。
+
+    ## 预算怎么算
+
+    * 第一行预算 = ``content_width - label_width - gap``
+    * 后续行预算 = ``content_width``
+    * **每块至少两个**——一行一个太散，不像"一组里选一个"。
+      所以首行预算不够放两个时，就退回用整条内容宽
+      （那时标签会独占一行，见 :func:`_row_lines`）。
+    """
+    if not buttons:
+        return [[]]
+
+    def width_of(chunk) -> int:
+        return (sum(b.GetBestSize().width for b in chunk)
+                + gap * (len(chunk) - 1))
+
+    # 首行预算：优先"与标签同行"，放不下两个就放弃同行
+    if label_width:
+        first_budget = content_width - label_width - gap
+        if width_of(buttons[:2]) > first_budget:
+            first_budget = content_width
+    else:
+        first_budget = content_width
+
+    # **首行至多两个。**
+    #
+    # 不封的话，`content_width` 稍宽一点，首行就塞进三个、次行孤零零剩一个
+    # （实测折成 `[3, 1]`）——既不对称，也让弹窗白宽出一大截。
+    # 两列一组与"标签 + 两个按钮"的自然形态一致，也最像"一组里选一个"。
+    if len(buttons) > 2:
+        two_buttons = width_of(buttons[:2])
+        first_budget = max(min(first_budget, two_buttons), 1)
+
     rows: list[list] = []
     current: list = []
-    width = 0
+    budget = first_budget
     for button in buttons:
-        button_width = button.GetBestSize().width
-        needed = button_width if not current else gap + button_width
-        if current and width + needed > max_width and len(current) >= 2:
+        candidate = current + [button]
+        if current and width_of(candidate) > budget and len(current) >= 2:
             rows.append(current)
             current = [button]
-            width = button_width
+            budget = content_width          # 后续行没有标签要避让
         else:
-            current.append(button)
-            width += needed
+            current = candidate
     if current:
         rows.append(current)
     return rows
@@ -1103,37 +1180,66 @@ class SettingsDialog(ThemedDialog):
         # 所以按 `dialog_row_width`（"标签 + 两个按钮"）封顶，放不下的**换行**。
         max_width = px(METRICS.dialog_row_width)
 
-        # 每一行 = 标签 + 一组（可能折成多行的）分段按钮
-        self._rows = (
-            (self._label, [list(self._language_buttons)]),
-            (self._sort_label, _wrap_buttons(self._sort_buttons, max_width,
-                                             gap, row_height)),
-            (self._direction_label,
-             [list(self._direction_buttons)]),
+        # 每行的按钮组，按**来源**分组；折行留到宽度定下来之后再做。
+        groups = (
+            (self._label, list(self._language_buttons)),
+            (self._sort_label, list(self._sort_buttons)),
+            (self._direction_label, list(self._direction_buttons)),
         )
-        # 每一块分段自己还要能横着放下
-        widest = 0
-        body_height = 0
-        for label, chunks in self._rows:
-            label_width = label.GetBestSize().width
-            for chunk in chunks:
-                buttons_width = (sum(b.GetBestSize().width for b in chunk)
-                                 + gap * (len(chunk) - 1))
-                widest = max(widest, label_width + gap + buttons_width)
-                body_height += row_height + row_gap
-            body_height += row_gap * (len(chunks) - 1)
-        body_height -= row_gap                     # 末尾那一次多加的
 
-        # 底部两个按钮那一排也要放得下。
-        # **它通常比设置行窄**（2×96+8 = 200 逻辑 < 240），
-        # 所以客户区宽度基本由设置行决定；只有按钮特别多时它才会顶上来。
+        def chunk_width(chunk) -> int:
+            return (sum(b.GetBestSize().width for b in chunk)
+                    + gap * (len(chunk) - 1))
+
+        # 底部两个按钮那一排也要放得下
         footer = (len(self._labels) * px(METRICS.dialog_button_width)
                   + max(len(self._labels) - 1, 0)
                   * px(METRICS.dialog_button_gap))
-        client_width = max(min(widest, max_width) + margin * 2,
-                           footer + margin * 2)
 
-        self._body_rect = (margin, margin, client_width - margin,
+        # **一、先把每行的"自然宽度"量出来（不折行）。**
+        natural = max(_label_width(label) + gap + chunk_width(buttons)
+                      for label, buttons in groups)
+        content_width = max(min(natural, max_width), footer)
+
+        # **二、再按已定的 `content_width` 折行。**
+        #
+        # 顺序很重要：先折行再定宽度的话，"宽度"要依赖"折成几块"、
+        # "折成几块"又要依赖"多宽"——循环。先量自然宽度、再封顶、
+        # 再折行，就没有这个环。
+        #
+        # **折行预算 = 内容宽 − 标签宽 − 间距。** 这个减法踩过两次：
+        #   ① 拿 `max_width`（封顶值）当预算 → 按钮按 420 排，
+        #      而标签还要从这 420 里占掉 88，于是压字；
+        #   ② `_place_rows` 又拿 `_body_rect` 的右边界（比内容宽多一个
+        #      margin）去右对齐，两处用的宽度不是同一个数。
+        # **放不下就"标签独占一行、按钮另起一行"。**
+        #
+        # 这是第三次修这个压字。前两次都想让"标签与按钮共用一行"，
+        # 于是要在 420 像素里既放标签（88）又放按钮（350）——**放不下**，
+        # 只能靠右对齐硬挤，结果就是标签被压住。
+        #
+        # 与其把宽度撑大到 600+（弹窗变成横带，已经否决过一次），
+        # 不如把这一行拆成两行：标签一行，按钮一行（右对齐）。
+        # 布局简单了，也不再依赖"标签到底多宽"这种字体相关的量。
+        # 折行这件事**只在 `_wrap_buttons` 里做**。
+        # 这里再判一次"放不放得下"就会有两套规则，两套迟早不一致。
+        self._rows = tuple(
+            (label, _wrap_buttons(buttons, content_width, gap,
+                                  label_width=_label_width(label)))
+            for label, buttons in groups
+        )
+
+        # 高度按"这一行占几行"算，判据与 `_place_rows` **共用**
+        # `_row_lines`，两处不可能分叉。
+        body_height = 0
+        for label, chunks in self._rows:
+            body_height += (row_height + row_gap) * _row_lines(
+                label, chunks, content_width, gap)
+        body_height -= row_gap                     # 末尾那一次多加的
+
+        client_width = content_width + margin * 2
+
+        self._body_rect = (margin, margin, margin + content_width,
                            margin + body_height)
         self._buttons_top = (margin + body_height
                              + px(METRICS.dialog_body_to_buttons))
@@ -1141,28 +1247,44 @@ class SettingsDialog(ThemedDialog):
                          + px(METRICS.dialog_bottom))
         self.SetClientSize((client_width, client_height))
         self._place_buttons()
-        self._place_rows(row_height + row_gap)
+        # **把内容宽度传进去，不要让 `_place_rows` 自己去读 `_body_rect`。**
+        #
+        # 踩过：`_body_rect` 的右边界是 `client_width - margin`，
+        # 而各行实际只分配到 `content_width`（可能因为封顶而更窄）。
+        # 两者差一个 margin（42 像素），于是按钮比"内容和标签共用的那片区域"
+        # 往左多占了 42，标签的最后两三个字被压住——正是用户截图里那样。
+        # 现在两边用**同一个数**，不可能再对不上。
+        self._place_rows(content_width, row_height + row_gap)
         self._center_on_parent()
 
-    def _place_rows(self, row_pitch: int) -> None:
+    def _place_rows(self, content_width: int, row_pitch: int) -> None:
         """标签靠左；分段按钮**右对齐**，放不下就换到下一行。
+
+        带宽由 :meth:`_layout` 传进来——**不要自己去读 `_body_rect`**，
+        两者差一个 margin（见 `_layout` 里那段说明）。
 
         （不用 sizer：基类已经把"手动摆放"这条路走通了，
         混用 sizer 会让 `wx.Dialog` 的尺寸计算插一脚。）
         """
-        left, top, right, _bottom = self._body_rect
+        left, top, _right, _bottom = self._body_rect
+        right = left + content_width
         gap = scale_for_dpi(METRICS.padding_gap, dpi_of(self))
         y = top
         for label, chunks in self._rows:
-            label_height = label.GetBestSize().height
-            label.SetPosition((left, y + (row_pitch - label_height) // 2))
-            # 第一块与标签同一行；后续块换到下面
-            first = True
-            for chunk in chunks:
-                row_top = y if first else y + row_pitch
-                if not first:
-                    y += row_pitch
-                first = False
+            # 标签**按实测宽度**定尺寸（`GetBestSize()` 是旧字体下的缓存值，
+            # 见 `_label_width` 的说明）。
+            label_height = label.GetSize().height
+            label_width = _label_width(label)
+            label.SetSize(left, y + max((row_pitch - label_height) // 2, 0),
+                          label_width, label_height)
+
+            # 与标签同一行，还是另起一行？判据与 `_layout` 共用
+            # `_row_lines`——两处用同一个函数，不会再分叉。
+            if _row_lines(label, chunks, content_width, gap) > len(chunks):
+                y += row_pitch          # 标签单独占一行
+
+            for index, chunk in enumerate(chunks):
+                row_top = y + index * row_pitch
                 width = chunk[0].GetBestSize().width
                 height = chunk[0].GetBestSize().height
                 total = width * len(chunk) + gap * (len(chunk) - 1)
@@ -1170,13 +1292,15 @@ class SettingsDialog(ThemedDialog):
                 for button in chunk:
                     button.SetSize(x, row_top, width, height)
                     x += width + gap
-            y += row_pitch
+            y += row_pitch * len(chunks)
 
     def _place_language_row(self) -> None:
         """兼容旧调用点：只摆语言那一行。"""
         if not hasattr(self, "_label"):
             return
-        self._place_rows(scale_for_dpi(METRICS.dialog_button_height,
+        left, _top, right, _bottom = self._body_rect
+        self._place_rows(right - left,
+                         scale_for_dpi(METRICS.dialog_button_height,
                                        dpi_of(self)))
 
     def _on_paint(self, event) -> None:

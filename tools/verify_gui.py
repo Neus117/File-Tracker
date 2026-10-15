@@ -1221,6 +1221,42 @@ def main() -> int:
             f"（应 {len(_core.SORT_SPECS)}），"
             f"方向按钮 {len(sort_probe._direction_buttons)} 个（应 2）",
         )
+        # **标签不被按钮压住。**
+        #
+        # 用户截图："题头和按钮挤在一起了" ——「界面语言」「排序方式」
+        # 「排序方向」三个标签的最后两三个字被右边的按钮盖住。
+        #
+        # 根因有两条，都踩过：
+        #   ① `GetBestSize()` 是**创建当时字体**下的缓存宽度，而
+        #      `app._apply_body_font()` 有一句**类级**的
+        #      `wx.StaticText.SetFont(self, body)` 会把之后创建的标签
+        #      换成 10pt —— 量出来的比实际窄。
+        #   ② `_place_rows` 拿 `_body_rect` 的右边界右对齐，而各行实际
+        #      只分配到 `content_width`，两者差一个 margin。
+        #
+        # 判据两种合格情况：按钮与标签**同行**时必须在标签右侧留出间距；
+        # 按钮在标签**下面一行**时水平方向不必避让。
+        label_clashes = []
+        for label, chunks in sort_probe._rows:
+            buttons = [b for chunk in chunks for b in chunk]
+            if not buttons:
+                continue
+            label_rect = label.GetRect()
+            need = _widgets._label_width(label)
+            overlap = [
+                b.label for b in buttons
+                if b.GetRect().y < label_rect.y + label_rect.height
+                and b.GetRect().x < label_rect.x + need
+            ]
+            if overlap:
+                label_clashes.append((label.GetLabel(), overlap))
+        check(
+            "设置窗口的标签没有被按钮压住（用户截图里的「挤在一起」）",
+            not label_clashes,
+            f"冲突 = {label_clashes}" if label_clashes
+            else "标签与按钮同行时留出间距，放不下则标签独占一行",
+        )
+
         check(
             "阳性对照：当前选中项被标成 accent（一眼看出选的是哪个）",
             [b.variant for b in sort_probe._sort_buttons].count("accent") == 1

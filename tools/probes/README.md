@@ -368,6 +368,31 @@ user32.SendMessageW.restype = ctypes.c_void_p
 > `%APPDATA%\File Tracker\config.json` 里写排序偏好。
 > 那个函数就是为此从"写死在 `__init__` 里的一行"提出来成为函数的。
 
+## `probe_settings_font.py` — 设置窗口的标签会不会被按钮压住
+
+用户截图："题头和按钮挤在一起了" ——「界面语言」「排序方式」「排序方向」
+三个标签的**最后两三个字被右边的按钮盖住**。
+
+**跑三种字体条件**（`wx 默认` / `10pt body` / `12pt` 压力测试），
+判据是"按钮与标签同行时必须留出间距；另起一行则不必避让"。
+
+### 为什么必须专门测字体
+
+我的探针一开始测**不出来**——它用 wx 默认字体（9pt），量出来标签 85 宽、
+按钮从 112 开始，看着完全正常。而真实程序里
+`app._apply_body_font()` 有一句**类级**的
+``wx.StaticText.SetFont(self, body)``，把之后创建的所有 StaticText
+换成 10pt。字体一换，文字的**实际宽度**就与 `GetBestSize()` 缓存的
+（创建当时的）宽度对不上了 —— 布局按旧宽度留位、文字按新字体绘制 → 压字。
+
+**教训：凡是"量出来再摆放"的布局，测量与绘制必须用同一套字体与同一个
+度量函数。** 缓存尺寸（`GetBestSize()`）在字体被类级改过之后就是错的。
+
+> 另一个坑：把这个类级调用写成
+> `wx.StaticText.SetFont(wx.StaticText(), body)` 会直接
+> `wxAssertionError: ((HWND)GetHWND())` —— 它要一个**已创建**的窗口，
+> 不能用临时控件当参数。
+
 ## `probe_item_colour.py` — `wx.ListCtrl` 的文字颜色能不能**按列**设
 
 会开窗口。连续对一个 item 设两次不同颜色，看读回来是哪一个。
