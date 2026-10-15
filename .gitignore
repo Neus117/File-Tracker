@@ -59,3 +59,10 @@ htmlcov/
 *.sqlite
 *.sqlite3
 accessed_paths.json
+
+# 探针的离屏渲染图 —— 诊断产物，不是源码
+#
+# 踩过：`probe_settings_render.py` 往这里写 PNG，而某次 `git add -A`
+# 把它们一起提交了（v1.2.3 那次）。它们只是"我当时看到的样子"，
+# 任何一次布局改动都会让它们过期，留在仓库里只会误导。
+/_shots/
