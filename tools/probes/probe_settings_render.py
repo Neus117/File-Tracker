@@ -34,11 +34,12 @@ def render(dialog, path: str) -> bool:
     dc.SetBackground(wx.Brush(wx.Colour(theme.background)))
     dc.Clear()
 
-    # 语言行标签（原生 StaticText，这里按它的矩形画字）
-    label = dialog._label
-    dc.SetFont(label.GetFont())
-    dc.SetTextForeground(wx.Colour(theme.text))
-    dc.DrawText(label.GetLabel(), label.GetPosition().x, label.GetPosition().y)
+    # 三个行的标签（都是原生 StaticText，按各自的矩形画字）
+    for label in (dialog._label, dialog._sort_label, dialog._direction_label):
+        dc.SetFont(label.GetFont())
+        dc.SetTextForeground(wx.Colour(theme.text))
+        dc.DrawText(label.GetLabel(), label.GetPosition().x,
+                    label.GetPosition().y)
 
     # 语言分段与底部按钮（都是自绘的 RoundedButton）
     #

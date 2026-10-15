@@ -301,6 +301,16 @@ class Metrics:
     dialog_button_gap: int = 8
     dialog_body_to_buttons: int = 28
     dialog_bottom: int = 20
+    # 设置窗口里"标签 + 分段按钮"一行能占多宽。
+    #
+    # **这不是 `dialog_max_text_width`。** 那个 420 是给**一句话**定的
+    # （正文折行的上限）；设置窗口的行是控件，宽度预算不同：
+    # 标签（"排序方式" / "Descending"）+ **两个**按钮正好排得下，
+    # 第三个就得换行。
+    #
+    # 实测：用 420 时"四个排序列"刚好挤进一行，弹窗被撑到 **897 像素宽**，
+    # 变成一条又宽又扁的横带。改成 240 之后排成 2×2，弹窗回到 ~420 宽。
+    dialog_row_width: int = 240
     icon_button_padding: int = 5
     icon_target_size: int = 20
     # 地址栏

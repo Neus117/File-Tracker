@@ -341,6 +341,33 @@ user32.SendMessageW.restype = ctypes.c_void_p
 于是误判成"按钮没画出来"，白查了一轮。
 取靠左靠上的位置（`rect.x + 12, rect.y + 8`）才是纯底色。
 
+## `probe_version_info.py` — Windows 版本资源怎么调
+
+对照 Roboc 的 `Directory.Build.props`（不是 csproj——那份元数据在一个
+`Directory.Build.props` 里），确认 PyInstaller 的
+`VSVersionInfo` / `StringStruct` 怎么用。実现在 `tools/version_info.py`。
+
+**关键约束**：`FILEVERSION` 是四个 16 位整数，**不能只有三段**。
+`1.2.2` 要补成 `(1, 2, 2, 0)`，少了写不进去。
+
+## `probe_sort_persistence.py` — 排序偏好是不是真的"下次启动也生效"
+
+用户要求："可以选择下次启动时的排序方式。"
+
+所以要验的是**跨启动**，不是"点一下当场变"：开窗口 → 换排序 → 关掉 →
+**新建一个** → 断言初始排序与首行都一致。
+
+**数据是特意造的**：`zeta` 访问 5 次、`alpha` 访问 1 次 ——
+按频次排序 `zeta` 在前，按路径排序 `alpha` 在前。
+**两者首行相同的话这个探针什么都验不出来**，所以频次与字母序必须相反。
+
+实测：默认频次降序 → 点"路径"自动带出该列的升序 → 再点翻成降序 →
+设成路径升序后重建窗口，排序与首行都保持。✅
+
+> 它还需要替换 `default_config_path`——否则会往用户真实的
+> `%APPDATA%\File Tracker\config.json` 里写排序偏好。
+> 那个函数就是为此从"写死在 `__init__` 里的一行"提出来成为函数的。
+
 ## `probe_item_colour.py` — `wx.ListCtrl` 的文字颜色能不能**按列**设
 
 会开窗口。连续对一个 item 设两次不同颜色，看读回来是哪一个。

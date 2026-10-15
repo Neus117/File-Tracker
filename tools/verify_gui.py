@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import wx  # noqa: E402
 
 import file_tracker.app as _app_module  # noqa: E402
+from file_tracker import core as _core  # noqa: E402
 from file_tracker import core, win32  # noqa: E402
 from file_tracker import widgets as _widgets  # noqa: E402
 from file_tracker.store import PathStore  # noqa: E402
@@ -151,6 +152,13 @@ def main() -> int:
 
         original_db = app_module.default_db_path
         app_module.default_db_path = lambda: os.path.join(scratch.name, "verify.db")
+        # **配置也要换掉。** 排序偏好那一节会往配置里写东西，
+        # 不隔离的话就往用户真实的 `%APPDATA%\File Tracker\config.json`
+        # 里写了一堆"验证用的"排序与语言——用户下次打开程序会发现
+        # 自己的设置被改了，而且不知道为什么。
+        original_config = app_module.default_config_path
+        app_module.default_config_path = lambda: os.path.join(
+            scratch.name, "verify-config.json")
 
         # -- 构建窗口 --------------------------------------------------
         frame = app_module.FileTracker()
@@ -1194,6 +1202,107 @@ def main() -> int:
 
         # ==============================================================
         print()
+        print("=== 改动 ⑲：排序偏好（下次启动生效）===")
+        # ==============================================================
+        #
+        # 用户要求："可以选择下次启动时的排序方式。目前是每次启动默认频次
+        # 排序，太死板，我希望用户能根据自己的习惯调节。"
+        sort_probe = _widgets.SettingsDialog(
+            frame, frame.theme, "zh", sort_key="count", sort_reverse=True)
+        sort_probe.Show()
+        for _ in range(20):
+            wx.YieldIfNeeded()
+
+        check(
+            "设置窗口有「排序方式」与「排序方向」两行",
+            len(sort_probe._sort_buttons) == len(_core.SORT_SPECS)
+            and len(sort_probe._direction_buttons) == 2,
+            f"排序列按钮 {len(sort_probe._sort_buttons)} 个"
+            f"（应 {len(_core.SORT_SPECS)}），"
+            f"方向按钮 {len(sort_probe._direction_buttons)} 个（应 2）",
+        )
+        check(
+            "阳性对照：当前选中项被标成 accent（一眼看出选的是哪个）",
+            [b.variant for b in sort_probe._sort_buttons].count("accent") == 1
+            and [b.variant for b in sort_probe._direction_buttons].count("accent") == 1,
+            f"排序列 = {[b.variant for b in sort_probe._sort_buttons]}；"
+            f"方向 = {[b.variant for b in sort_probe._direction_buttons]}",
+        )
+
+        # **换列要带出那一列自己的方向**，与点表头的行为一致。
+        # 不这么做的话：在设置里选"路径"会沿用频次的降序 → Z→A，
+        # 而点表头却给 A→Z，两处行为不一致。
+        sort_probe._choose_sort("path")
+        check(
+            "设置里换列会带出该列的默认方向（路径 → 升序）",
+            sort_probe.selected_sort() == ("path", False),
+            f"选 path 后 = {sort_probe.selected_sort()}"
+            "（路径的默认方向是升序 A→Z）",
+        )
+        sort_probe._choose_sort("count")
+        check(
+            "阳性对照：换回频次是降序（两个方向的默认值确实不同）",
+            sort_probe.selected_sort() == ("count", True),
+            f"选 count 后 = {sort_probe.selected_sort()}",
+        )
+        sort_probe._choose_direction(False)
+        check(
+            "方向按钮能改方向",
+            sort_probe.selected_sort() == ("count", False),
+            f"点「升序」后 = {sort_probe.selected_sort()}",
+        )
+        sort_probe.Destroy()
+        for _ in range(10):
+            wx.YieldIfNeeded()
+
+        # ---- 真跑一遍：改排序 → 重建窗口 → 顺序必须保持 ----
+        #
+        # 用户要的是"**下次启动**生效"，所以判据必须是跨窗口的，
+        # 不是"点一下当场变"。这里直接调 `apply_sort` 再重建窗口。
+        applied = frame.apply_sort(_app_module.COLUMN_PATH, reverse=False)
+        for _ in range(20):
+            wx.YieldIfNeeded()
+        check(
+            "apply_sort 能按列号设置排序方向",
+            applied and frame.sort_key == "path" and frame.sort_reverse is False,
+            f"返回 {applied}，sort_key={frame.sort_key}，"
+            f"降序={frame.sort_reverse}",
+        )
+        first_row_before = frame.list_ctrl.GetItemText(0, 0).strip()
+        check(
+            "排序偏好**写进了配置**（这是「下次启动生效」的前提）",
+            frame.config.get_sort_column() == "path"
+            and frame.config.get_sort_direction("path") is False,
+            f"配置读到 sort_column="
+            f"{frame.config.get_sort_column()!r}，"
+            f"direction={frame.config.get_sort_direction('path')}",
+        )
+        # 重建一个窗口，读的就是同一份配置
+        restored = _app_module.FileTracker()
+        restored.SetTitle(PROBE_TITLE)
+        restored.Show()
+        for _ in range(40):
+            wx.YieldIfNeeded()
+            time.sleep(0.02)
+        check(
+            "**新建窗口后排序偏好仍然生效**（跨启动，不只是当场变）",
+            restored.sort_key == "path" and restored.sort_reverse is False,
+            f"新窗口 sort_key={restored.sort_key}，"
+            f"降序={restored.sort_reverse}；"
+            f"上一个窗口的首行={first_row_before[-24:]!r}",
+        )
+        restored.store.close()
+        restored.Destroy()
+        for _ in range(20):
+            wx.YieldIfNeeded()
+
+        # 还原成默认，免得影响后面的检查
+        frame.apply_sort(_app_module.COLUMN_COUNT, reverse=True)
+        for _ in range(10):
+            wx.YieldIfNeeded()
+
+        # ==============================================================
+        print()
         print("=== 改动 ⑱：国际化（中文 / English）===")
         # ==============================================================
         #
@@ -1972,6 +2081,13 @@ def main() -> int:
         check("验证过程未抛异常", False, repr(error))
     finally:
         # **无条件收尾。** 不靠"我记得去销毁"，靠 finally。
+        try:
+            # 把两个"位置"还回去。留在替身上也不会影响这个一次性进程，
+            # 但下次有人往这段后面加代码时，会以为拿到的是真实的路径。
+            app_module.default_db_path = original_db
+            app_module.default_config_path = original_config
+        except Exception:
+            pass
         try:
             if frame is not None:
                 frame.open_folder = original_open_folder   # 还原，别留下替身

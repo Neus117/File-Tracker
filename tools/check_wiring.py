@@ -212,9 +212,16 @@ def check_config_keys(sources: dict[str, SourceFile]) -> list[str]:
                         and isinstance(target.slice.value, str)):
                     keys.add(target.slice.value)
         # self._data.get("key")
+        #
+        # **必须是 `self._data.get(...)`，不能是任意 `.get(...)`。**
+        # 踩过：早先只判 `func.attr == "get"`，于是
+        # `os.environ.get("APPDATA")` 也被当成了一个配置键，
+        # 报"配置键没有读取点: APPDATA"——一个环境变量被当成了配置项。
         if isinstance(node, ast.Call):
             func = node.func
-            if isinstance(func, ast.Attribute) and func.attr == "get":
+            if (isinstance(func, ast.Attribute) and func.attr == "get"
+                    and isinstance(func.value, ast.Attribute)
+                    and func.value.attr == "_data"):
                 for argument in node.args:
                     if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
                         keys.add(argument.value)

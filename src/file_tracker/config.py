@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 
+from .core import sort_keys
 from .lang import PREFERENCE_CHINESE, PREFERENCE_ENGLISH
 
 DEFAULT_DIRECTORY = "C:\\"
@@ -22,6 +23,24 @@ DEFAULT_DIRECTORY = "C:\\"
 #: 语言键的合法取值，**从 `lang` 取**——不在这里另抄一份字面量，
 #: 否则两边迟早不一致（那正是本项目修过的"两份实现"类缺陷）。
 LANGUAGES = (PREFERENCE_CHINESE, PREFERENCE_ENGLISH)
+
+
+def default_config_path() -> str:
+    """默认配置位置：``%APPDATA%\\File Tracker\\config.json``。
+
+    ## 为什么做成一个函数
+
+    原来是写死在 ``FileTracker.__init__`` 里的一行 ``os.path.join``。
+    那样的话**测试与验证脚本没法替换它**——只能去动用户真实的配置，
+    而验证脚本会往里面写排序偏好、语言偏好这些真实设置。
+
+    这跟 :func:`file_tracker.store.default_db_path` 是同一个模式，
+    也是同一个理由：**"位置"要能被替换，"内容"才敢在测试里改**。
+    """
+    import os
+
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "File Tracker", "config.json")
 
 
 class Config:
@@ -73,6 +92,48 @@ class Config:
         """写入语言偏好。**只接受已知取值**，其余忽略。"""
         if preference in LANGUAGES:
             self._data["language"] = preference
+
+    def get_sort_column(self) -> str | None:
+        """上次用的排序列标识；没设过或认不出返回 ``None``（用默认）。
+
+        存的是 :data:`file_tracker.core.SORT_SPECS` 里的 ``key``，
+        **不是列号**——列号会因为列表中间插一列而错位，
+        而且写进配置以后没法读。
+        """
+        value = self._data.get("sort_column")
+        return str(value) if value in sort_keys() else None
+
+    def set_sort_column(self, key: str) -> None:
+        if key in sort_keys():
+            self._data["sort_column"] = key
+
+    def get_sort_direction(self, key: str) -> bool | None:
+        """某一列的排序方向：``True`` = 降序，``None`` = 没设过（用该列的默认）。
+
+        ## 为什么要**按列**存方向
+
+        每一列自然的读法不同（见 :class:`~file_tracker.core.SortSpec`）。
+        如果只存一个全局方向，用户在"频次"上按了一次升序，
+        再切到"路径"就会得到 Z→A——那不是他要的第一眼结果。
+        按列存之后，切列用的是**那一列自己上次的方向**，没有就用自己的默认值。
+        """
+        directions = self._data.get("sort_directions")
+        if not isinstance(directions, dict):
+            return None
+        value = directions.get(key)
+        return bool(value) if isinstance(value, bool) else None
+
+    def set_sort_direction(self, key: str, descending: bool) -> None:
+        if key not in sort_keys():
+            return
+        directions = self._data.get("sort_directions")
+        if not isinstance(directions, dict):
+            directions = {}
+        # **整块换掉而不是原地改**：原地改的话，`_data` 里那个 dict
+        # 可能是从别处引用来的，改它等于偷偷改了别人的状态。
+        updated = dict(directions)
+        updated[key] = bool(descending)
+        self._data["sort_directions"] = updated
 
     def get_scroll_position(self) -> float:
         """目录树的纵向滚动位置，存的是 0..1 的相对值。

@@ -23,11 +23,14 @@ import subprocess
 import wx
 
 from . import win32
-from .config import Config
+from .config import Config, default_config_path
 from .core import (
     APP_NAME,
     APP_VERSION,
+    DEFAULT_SORT_KEY,
+    SORT_SPECS,
     fit_window_size,
+    find_sort_spec,
     normalize_path,
     resource_path,
     scaled_window_size,
@@ -66,13 +69,39 @@ COLUMN_PATH, COLUMN_COUNT, COLUMN_DATE, COLUMN_CLOCK = 0, 1, 2, 3
 
 
 def column_labels() -> tuple[str, ...]:
-    """四个列标题（跟随当前语言）。"""
+    """四个列标题（跟随当前语言）。
+
+    **与 `SORT_SPECS` 同序**——列的顺序和可排序列的顺序是同一件事，
+    验证脚本会断言两者长度一致、顺序对应。
+    """
     return (
         L("访问的路径", "Path"),
         L("频次", "Count"),
         L("访问日期", "Date"),
         L("访问时间", "Time"),
     )
+
+
+#: 列号 → 排序列标识。**与 `SORT_SPECS` 同序**，见 `column_labels()`。
+#: 两张表必须同序：列的顺序就是可排序列的顺序。
+#: 一致性由 `tests/test_sort_preference.py` 断言——**用测试而不是
+#: 模块级 `assert`**：`-O` 会去掉 assert，而测试不会。
+_COLUMN_SORT_KEYS = ("path", "count", "date", "clock")
+
+
+def _column_of(sort_key: str) -> int:
+    """排序列标识 → 列号；认不出返回默认列。"""
+    try:
+        return _COLUMN_SORT_KEYS.index(sort_key)
+    except ValueError:
+        return _COLUMN_SORT_KEYS.index(DEFAULT_SORT_KEY)
+
+
+def _sort_key_of(column: int) -> str:
+    """列号 → 排序列标识；认不出返回默认。"""
+    if 0 <= column < len(_COLUMN_SORT_KEYS):
+        return _COLUMN_SORT_KEYS[column]
+    return DEFAULT_SORT_KEY
 # 注：曾经还有一个 `COLUMN_TIME = COLUMN_DATE`，给"切换排序"按钮在两个
 # 排序列之间切换用。那个按钮已按用户要求删除（"没什么用"），
 # 排序列改由列头点击直接指定，所以这个别名没有读者了——已删。
@@ -103,7 +132,9 @@ class FileTracker(wx.Frame):
         self.app_data_dir = wx.StandardPaths.Get().GetUserDataDir()
         if not os.path.exists(self.app_data_dir):
             os.makedirs(self.app_data_dir, exist_ok=True)
-        self.config = Config(os.path.join(self.app_data_dir, "config.json"))
+        # 走 `default_config_path()` 而不是在这里拼路径——
+        # 测试与验证脚本要能把它换掉，否则会写进用户真实的配置。
+        self.config = Config(default_config_path())
         # **语言必须在建任何界面之前定下来。**
         #
         # 按钮文字、列标题、提示都是建控件时按当时语言取的字面量；
@@ -138,9 +169,19 @@ class FileTracker(wx.Frame):
         # 这个缺陷修了却没有生效。接线检查把它抓了出来。
         self.set_icon()
 
-        # 排序状态必须在 load_accessed_paths() 之前就位——它内部会调用排序
-        self.sort_column = COLUMN_COUNT
-        self.sort_reverse = True
+        # 排序状态必须在 load_accessed_paths() 之前就位——它内部会调用排序。
+        #
+        # **读用户上次的选择。** 用户反馈："目前是每次启动默认频次排序，
+        # 太死板，我希望用户能根据自己的习惯调节。"
+        #
+        # 没设过就还是"频次、降序"——那是 1.1 以来的行为，
+        # 老用户升级后第一眼看到的东西不该变。
+        sort_spec = find_sort_spec(self.config.get_sort_column())
+        self.sort_key = sort_spec.key
+        self.sort_column = _column_of(self.sort_key)
+        direction = self.config.get_sort_direction(sort_spec.key)
+        self.sort_reverse = (sort_spec.default_reverse
+                             if direction is None else direction)
         # 界面当前显示的行（有序）。wx.ListCtrl 按行号取值，而排序在 Python 侧做，
         # 所以持有一份有序列表比每次回读控件更可靠。
         self._rows: list[PathRecord] = []
@@ -794,12 +835,32 @@ class FileTracker(wx.Frame):
         """自绘表头被点击：按该列切换排序方向。
 
         与原来的 ``wx.EVT_LIST_COL_CLICK`` 等价，只是事件源换成了自绘控件。
+
+        两条接线**共用** :meth:`apply_sort`——排序是同一件事，
+        两份实现迟早会在分叉处不一致（本项目已经因为这类重复修过好几次）。
         """
-        if column not in (COLUMN_PATH, COLUMN_COUNT, COLUMN_DATE, COLUMN_CLOCK):
-            return
-        self.sort_column = column
-        self.sort_reverse = not self.sort_reverse
-        self.sort_list_items(column)
+        self.apply_sort(column, toggle=True)
+
+    def _remember_sort(self) -> None:
+        """把当前排序写进配置（下次启动就用它）。
+
+        ## 为什么"点表头"也写配置
+
+        用户要的是"能根据自己的习惯调节"。设置窗口是**显式**调节，
+        而点表头是**顺手**表达同一个偏好——如果只有设置窗口算数，
+        用户点了一整天的路径排序、重启后又被弹回频次排序，
+        那正是他抱怨的"太死板"。
+
+        两处都写，谁最后动谁生效，符合直觉。
+        """
+        self.config.set_sort_column(self.sort_key)
+        self.config.set_sort_direction(self.sort_key, self.sort_reverse)
+        try:
+            self.config.save()
+        except OSError as error:
+            self._report_resource_error(
+                L(f"无法保存排序偏好: {error}",
+                  f"Could not save the sort preference: {error}"))
 
     def _sync_header(self) -> None:
         """把列表的列宽同步给自绘表头，并标出排序列。
@@ -1687,12 +1748,67 @@ class FileTracker(wx.Frame):
         中间一版换成 ``DataViewListCtrl`` 时我把它删了——
         **那是一次功能倒退**，用户实测指出"所有点击功能全部失效"。
         """
-        column = event.GetColumn()
+        self.apply_sort(event.GetColumn(), toggle=True)
+
+    def apply_sort(self, column: int, *, toggle: bool = False,
+                   reverse: bool | None = None) -> bool:
+        """切换/设置排序，并**记住**这次选择。返回是否真的改了。
+
+        两个入口都走这里——自绘表头（`on_header_clicked`）与原生表头
+        （`on_column_click`，原版 1.1 就有的那条接线）。
+
+        ## 换列时用**那一列自己的**方向
+
+        原来是无条件 `not self.sort_reverse`。只用一个全局方向时，
+        "在频次上按了一次升序，再点路径"就会得到 Z→A —— 不是第一眼想要的
+        结果。现在每列记住自己的方向，没设过就用该列的默认
+        （见 :class:`~file_tracker.core.SortSpec`）。
+
+        ``toggle=True`` 表示"点同一列就翻方向"（表头的行为）；
+        设置窗口改方向时传 ``reverse`` 直接指定。
+        """
         if column not in (COLUMN_PATH, COLUMN_COUNT, COLUMN_DATE, COLUMN_CLOCK):
-            return
+            return False
+        key = _sort_key_of(column)
+
+        if reverse is not None:
+            self.sort_reverse = bool(reverse)
+        elif toggle and column == self.sort_column:
+            self.sort_reverse = not self.sort_reverse
+        elif column != self.sort_column:
+            remembered = self.config.get_sort_direction(key)
+            spec = find_sort_spec(key)
+            self.sort_reverse = (spec.default_reverse
+                                 if remembered is None else remembered)
+        # 同一列且没要求 toggle、也没给方向 → 什么都不用改
+
         self.sort_column = column
-        self.sort_reverse = not self.sort_reverse
+        self.sort_key = key
         self.sort_list_items(column)
+        # 顺手记住：用户刚表达了自己的偏好，下次启动就照这个来。
+        self._remember_sort()
+        return True
+
+    def _remember_sort(self) -> None:
+        """把当前排序写进配置（下次启动就用它）。
+
+        ## 为什么"点表头"也写配置
+
+        用户要的是"能根据自己的习惯调节"。设置窗口是**显式**调节，
+        而点表头是**顺手**表达同一个偏好——如果只有设置窗口算数，
+        用户点了一整天的路径排序、重启后又被弹回频次排序，
+        那正是他抱怨的"太死板"。
+
+        两处都写，谁最后动谁生效，符合直觉。
+        """
+        self.config.set_sort_column(self.sort_key)
+        self.config.set_sort_direction(self.sort_key, self.sort_reverse)
+        try:
+            self.config.save()
+        except OSError as error:
+            self._report_resource_error(
+                L(f"无法保存排序偏好: {error}",
+                  f"Could not save the sort preference: {error}"))
 
     def sort_list_items(self, column: int) -> None:
         """排序：顶置项始终在最前（按顶置顺序），其余按所选列排序。
@@ -1974,24 +2090,43 @@ class FileTracker(wx.Frame):
         # 当前生效值：配置里存过就用存的，没存过就是系统检测出来的那个。
         before = self.config.get_language() or (
             PREFERENCE_CHINESE if is_chinese() else PREFERENCE_ENGLISH)
-        dialog = SettingsDialog(self, self.theme, before)
+        dialog = SettingsDialog(self, self.theme, before,
+                               sort_key=self.sort_key,
+                               sort_reverse=self.sort_reverse)
+        # 把各列"上次用的方向"灌进去，这样在窗口里换列时能带出那一列自己的
+        # 方向，与点表头的行为一致（见 `SettingsDialog._choose_sort`）。
+        for spec in SORT_SPECS:
+            remembered = self.config.get_sort_direction(spec.key)
+            if remembered is not None:
+                dialog._sort_directions[spec.key] = remembered
         try:
             if dialog.ShowModal() != wx.ID_YES:
                 return
             chosen = dialog.selected_preference()
+            sort_key, sort_reverse = dialog.selected_sort()
         finally:
             dialog.Destroy()
 
+        language_changed = chosen != before
         self.config.set_language(chosen)
+        if language_changed:
+            # `apply_language` 必须在 `retranslate` 之前——
+            # retranslate 里每一次 `L(...)` 读的都是它刚设下的那个值。
+            apply_language(chosen)
+
+        # **排序**交给 `apply_sort`：它自己写配置（见 `_remember_sort`）
+        # 并按新顺序重排列表。这里不重画整个界面——
+        # 排序只影响列表内容，改语言才需要动全部文案。
+        self.apply_sort(_column_of(sort_key), reverse=sort_reverse)
+
+        if language_changed:
+            self.retranslate()
         try:
             self.config.save()
         except OSError as error:
-            self._report_resource_error(L(f"无法保存语言偏好: {error}", f"Could not save the language: {error}"))
-
-        # 生效 + 重画。`apply_language` 要在 retranslate 之前——
-        # retranslate 里每一次 `L(...)` 读的都是它刚设下的那个值。
-        apply_language(chosen)
-        self.retranslate()
+            self._report_resource_error(
+                L(f"无法保存设置: {error}",
+                  f"Could not save the settings: {error}"))
 
     def retranslate(self) -> None:
         """把界面上所有文案按**当前语言**重取一遍。

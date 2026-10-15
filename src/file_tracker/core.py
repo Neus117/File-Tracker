@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import dataclass
 
 APP_NAME = "File Tracker"
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.2.3"
 
 #: 用户指定的初始窗口增量：**累计** 32.25%
 #
@@ -270,3 +271,81 @@ def build_revision() -> str:
 def version_string() -> str:
     """形如 ``File Tracker 1.2.0+9293827`` 的自报版本串。"""
     return f"{APP_NAME} {APP_VERSION}+{build_revision()}"
+
+
+# --------------------------------------------------------------------------
+# 排序偏好
+# --------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class SortSpec:
+    """一个可排序的列：它的稳定标识、显示名、以及**默认方向**。
+
+    ## 为什么方向要按列给默认值，而不是全局一个
+
+    最自然的读法对每一列是不同的：
+
+    * **频次**——"最常访问的"当然排在最前 → 降序
+    * **访问日期 / 访问时间**——"最近的"排在最前 → 降序
+    * **路径**——字母序，A 在前 → 升序
+
+    只用一个全局方向的话，点"路径"会得到 Z→A，
+    点"频次"会得到"最少访问的在前"——两者都不是用户想要的第一眼结果。
+
+    ## 为什么标识用字符串而不是列号
+
+    列号是**界面**的事（`app.COLUMN_*`）。存进配置、并在设置界面里
+    与语言无关地引用时，需要一个不会因为"中间插了一列"就错位的名字。
+    """
+
+    key: str
+    chinese: str
+    english: str
+    default_reverse: bool
+
+    def label(self) -> str:
+        """显示名（跟随当前语言）。"""
+        from .lang import L
+
+        return L(self.chinese, self.english)
+
+
+#: 四个可排序列，顺序与列表里的列一致。
+SORT_SPECS: tuple[SortSpec, ...] = (
+    SortSpec("path", "访问的路径", "Path", default_reverse=False),
+    SortSpec("count", "频次", "Count", default_reverse=True),
+    SortSpec("date", "访问日期", "Date", default_reverse=True),
+    SortSpec("clock", "访问时间", "Time", default_reverse=True),
+)
+
+#: 没设过偏好时用哪一个。
+#:
+#: **保持"频次、降序"**——那是这个程序从 1.1 起的行为
+#: （设置排序状态的那一行注释就写着 `COLUMN_COUNT / True`）。
+#: 老用户升级之后第一眼看到的东西不该变。
+DEFAULT_SORT_KEY = "count"
+
+
+def find_sort_spec(key: str | None) -> SortSpec:
+    """按标识取 :class:`SortSpec`；认不出就返回默认那一个。
+
+    **认不出时回退而不是抛异常**：配置文件可以手改，
+    写错一个字符串不该让程序起不来。
+    """
+    for spec in SORT_SPECS:
+        if spec.key == key:
+            return spec
+    return find_sort_spec_by_key(DEFAULT_SORT_KEY)
+
+
+def find_sort_spec_by_key(key: str) -> SortSpec:
+    """:func:`find_sort_spec` 的内部查表（不再回退，避免递归）。"""
+    for spec in SORT_SPECS:
+        if spec.key == key:
+            return spec
+    return SORT_SPECS[0]
+
+
+def sort_keys() -> tuple[str, ...]:
+    """全部合法的排序列标识。"""
+    return tuple(spec.key for spec in SORT_SPECS)

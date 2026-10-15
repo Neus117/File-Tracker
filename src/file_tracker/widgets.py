@@ -19,6 +19,7 @@ from __future__ import annotations
 import wx
 
 from . import win32
+from .core import DEFAULT_SORT_KEY, SORT_SPECS, find_sort_spec, sort_keys
 from .lang import CHOICES, DISPLAY_NAMES, L
 from .theme import METRICS, Theme, scale_for_dpi
 
@@ -867,6 +868,34 @@ class ThemedDialog(wx.Dialog):
         self.Refresh()
 
 
+def _wrap_buttons(buttons, max_width: int, gap: int,
+                  row_height: int) -> list[list]:
+    """把一排分段按钮按 ``max_width`` 折成若干块（每块占一行）。
+
+    **宽度封顶靠它。** 四个排序列横排要 408 逻辑像素，加标签就逼近 600，
+    弹窗会变成又宽又扁的横带（实测 897 像素）。折成 2×2 之后就回到
+    与其它行相当的宽度。
+
+    至少保留两个一行——一行一个太散，反而不像"一组里选一个"。
+    """
+    rows: list[list] = []
+    current: list = []
+    width = 0
+    for button in buttons:
+        button_width = button.GetBestSize().width
+        needed = button_width if not current else gap + button_width
+        if current and width + needed > max_width and len(current) >= 2:
+            rows.append(current)
+            current = [button]
+            width = button_width
+        else:
+            current.append(button)
+            width += needed
+    if current:
+        rows.append(current)
+    return rows
+
+
 class SettingsDialog(ThemedDialog):
     """设置窗口：目前只有一项——**界面语言**。
 
@@ -889,7 +918,9 @@ class SettingsDialog(ThemedDialog):
     视觉沿用本项目自己的按钮，不引入第二套画法。
     """
 
-    def __init__(self, parent, theme, current_preference: str):
+    def __init__(self, parent, theme, current_preference: str,
+                 sort_key: str = DEFAULT_SORT_KEY,
+                 sort_reverse: bool | None = None):
         # 正文留空——设置窗口的内容是控件，不是一句话。
         super().__init__(parent, theme, "",
                          title=L("设置", "Settings"),
@@ -897,7 +928,19 @@ class SettingsDialog(ThemedDialog):
                          no_label=L("取消", "Cancel"))
         self._choice = current_preference
         self._language_buttons: list[RoundedButton] = []
+        self._sort_buttons: list[RoundedButton] = []
+        self._direction_buttons: list[RoundedButton] = []
+        # 排序选择：列 + 方向
+        self._sort_key = sort_key if sort_key in sort_keys() else DEFAULT_SORT_KEY
+        spec = find_sort_spec(self._sort_key)
+        self._sort_reverse = (spec.default_reverse
+                              if sort_reverse is None else bool(sort_reverse))
+        # 各列"上次用的方向"。调用方（`FileTracker.on_settings`）会把它
+        # 从配置里灌进来，这样在窗口里换列时能带出那一列自己的方向，
+        # 与点表头的行为一致。默认空字典 = 每一列都用各自的默认方向。
+        self._sort_directions: dict[str, bool] = {}
         self._build_language_row()
+        self._build_sort_rows()
         self._layout()
 
     # -- 构造 -------------------------------------------------------------
@@ -925,17 +968,105 @@ class SettingsDialog(ThemedDialog):
             button._language_value = value
             self._language_buttons.append(button)
 
+    def _build_sort_rows(self) -> None:
+        """两行：**排序列**与**排序方向**。
+
+        用户要求："可以选择下次启动时的排序方式。
+        目前是每次启动默认频次排序，太死板，我希望用户能根据自己的习惯调节。"
+
+        拆成两行而不是挤一行：四列 × 两方向 = 八个按钮，
+        挤在一行会宽得离谱，也会把标签压没。两行各自是一组"选一个"。
+        """
+        self._sort_label = wx.StaticText(
+            self, label=L("排序方式", "Sort by"))
+        self._sort_label.SetForegroundColour(wx.Colour(self.theme.text))
+        self._sort_label.SetBackgroundColour(
+            wx.Colour(self.theme.background))
+
+        for spec in SORT_SPECS:
+            button = RoundedButton(
+                self, spec.label(), self.theme,
+                variant=("accent" if spec.key == self._sort_key
+                         else "secondary"),
+                height=METRICS.dialog_button_height,
+                min_width=METRICS.dialog_button_width,
+                on_click=(lambda _event, s=spec: self._choose_sort(s.key)),
+            )
+            button._sort_value = spec.key
+            self._sort_buttons.append(button)
+
+        self._direction_label = wx.StaticText(
+            self, label=L("排序方向", "Order"))
+        self._direction_label.SetForegroundColour(wx.Colour(self.theme.text))
+        self._direction_label.SetBackgroundColour(
+            wx.Colour(self.theme.background))
+
+        # 顺序固定为「降序 / 升序」：两列里"大→小"都是更常用的那一个
+        # （频次最高、时间最近），所以把它们放前面。
+        for descending, caption in (
+                (True, L("降序", "Descending")),
+                (False, L("升序", "Ascending"))):
+            button = RoundedButton(
+                self, caption, self.theme,
+                variant=("accent" if descending == self._sort_reverse
+                         else "secondary"),
+                height=METRICS.dialog_button_height,
+                min_width=METRICS.dialog_button_width,
+                on_click=(lambda _event, d=descending:
+                          self._choose_direction(d)),
+            )
+            button._direction_value = descending
+            self._direction_buttons.append(button)
+
+    def _choose_sort(self, key: str) -> None:
+        """换列时**带出那一列自己的方向**，与点表头的行为一致。
+
+        不这么做的话，用户在这里选"路径"会沿用频次的降序，
+        得到 Z→A —— 而列表里点表头却会给他 A→Z，两处行为不一致。
+        """
+        self._sort_key = key
+        remembered = self._sort_directions.get(key)
+        spec = find_sort_spec(key)
+        self._sort_reverse = (spec.default_reverse if remembered is None
+                              else remembered)
+        self._repaint_choices()
+
+    def _choose_direction(self, descending: bool) -> None:
+        self._sort_reverse = descending
+        # 顺手记住这一列的方向，这样在同一列上换来换去不会丢
+        self._sort_directions[self._sort_key] = descending
+        self._repaint_choices()
+
     def _choose(self, value: str) -> None:
         """点一下**立刻**换色，不等点确定。"""
         self._choice = value
+        self._repaint_choices()
+
+    def _repaint_choices(self) -> None:
+        """按当前选择刷新所有分段按钮的配色。**只有一处判断**，
+        免得"语言选中了但排序没跟上"这类不一致。"""
         for button in self._language_buttons:
             button.variant = ("accent"
-                              if button._language_value == value
+                              if button._language_value == self._choice
+                              else "secondary")
+            button.Refresh()
+        for button in self._sort_buttons:
+            button.variant = ("accent"
+                              if button._sort_value == self._sort_key
+                              else "secondary")
+            button.Refresh()
+        for button in self._direction_buttons:
+            button.variant = ("accent"
+                              if button._direction_value == self._sort_reverse
                               else "secondary")
             button.Refresh()
 
     def selected_preference(self) -> str:
         return self._choice
+
+    def selected_sort(self) -> tuple[str, bool]:
+        """``(排序列标识, 是否降序)``。"""
+        return (self._sort_key, self._sort_reverse)
 
     # -- 布局 -------------------------------------------------------------
 
@@ -955,50 +1086,98 @@ class SettingsDialog(ThemedDialog):
         if not hasattr(self, "_label"):
             return
         dpi = dpi_of(self)
-        row_height = scale_for_dpi(METRICS.dialog_button_height, dpi)
-        gap = scale_for_dpi(METRICS.padding_gap, dpi)
-        margin = scale_for_dpi(METRICS.dialog_margin, dpi)
 
-        # 正文区改为容纳这一行
-        label_width = self._label.GetBestSize().width
-        buttons_width = sum(b.GetBestSize().width
-                            for b in self._language_buttons) + gap
-        content_width = max(label_width + gap + buttons_width,
-                            METRICS.dialog_button_width * 2)
-        client_width = max(content_width + margin * 2,
-                           len(self._labels)
-                           * scale_for_dpi(METRICS.dialog_button_width, dpi)
-                           + scale_for_dpi(METRICS.dialog_button_gap, dpi)
-                           + margin * 2)
+        def px(logical: int) -> int:
+            return scale_for_dpi(logical, dpi)
 
-        self._body_rect = (margin, margin,
-                           client_width - margin, margin + row_height)
-        self._buttons_top = margin + row_height + scale_for_dpi(
-            METRICS.dialog_body_to_buttons, dpi)
+        row_height = px(METRICS.dialog_button_height)
+        gap = px(METRICS.padding_gap)
+        margin = px(METRICS.dialog_margin)
+        row_gap = px(METRICS.padding_tight)     # 行与行之间比"控件之间"更紧
+
+        # **客户区宽度封顶。**
+        #
+        # 四个排序列横排要 4×96 + 3×8 = 408 逻辑像素，加上标签就逼近 600 ——
+        # 弹窗会变成一条又宽又扁的横带（实测 897 像素宽），
+        # 而它在屏幕上是居中的，左右会压到别的东西。
+        # 所以按 `dialog_row_width`（"标签 + 两个按钮"）封顶，放不下的**换行**。
+        max_width = px(METRICS.dialog_row_width)
+
+        # 每一行 = 标签 + 一组（可能折成多行的）分段按钮
+        self._rows = (
+            (self._label, [list(self._language_buttons)]),
+            (self._sort_label, _wrap_buttons(self._sort_buttons, max_width,
+                                             gap, row_height)),
+            (self._direction_label,
+             [list(self._direction_buttons)]),
+        )
+        # 每一块分段自己还要能横着放下
+        widest = 0
+        body_height = 0
+        for label, chunks in self._rows:
+            label_width = label.GetBestSize().width
+            for chunk in chunks:
+                buttons_width = (sum(b.GetBestSize().width for b in chunk)
+                                 + gap * (len(chunk) - 1))
+                widest = max(widest, label_width + gap + buttons_width)
+                body_height += row_height + row_gap
+            body_height += row_gap * (len(chunks) - 1)
+        body_height -= row_gap                     # 末尾那一次多加的
+
+        # 底部两个按钮那一排也要放得下。
+        # **它通常比设置行窄**（2×96+8 = 200 逻辑 < 240），
+        # 所以客户区宽度基本由设置行决定；只有按钮特别多时它才会顶上来。
+        footer = (len(self._labels) * px(METRICS.dialog_button_width)
+                  + max(len(self._labels) - 1, 0)
+                  * px(METRICS.dialog_button_gap))
+        client_width = max(min(widest, max_width) + margin * 2,
+                           footer + margin * 2)
+
+        self._body_rect = (margin, margin, client_width - margin,
+                           margin + body_height)
+        self._buttons_top = (margin + body_height
+                             + px(METRICS.dialog_body_to_buttons))
         client_height = (self._buttons_top + row_height
-                         + scale_for_dpi(METRICS.dialog_bottom, dpi))
+                         + px(METRICS.dialog_bottom))
         self.SetClientSize((client_width, client_height))
         self._place_buttons()
-        self._place_language_row()
+        self._place_rows(row_height + row_gap)
         self._center_on_parent()
 
+    def _place_rows(self, row_pitch: int) -> None:
+        """标签靠左；分段按钮**右对齐**，放不下就换到下一行。
+
+        （不用 sizer：基类已经把"手动摆放"这条路走通了，
+        混用 sizer 会让 `wx.Dialog` 的尺寸计算插一脚。）
+        """
+        left, top, right, _bottom = self._body_rect
+        gap = scale_for_dpi(METRICS.padding_gap, dpi_of(self))
+        y = top
+        for label, chunks in self._rows:
+            label_height = label.GetBestSize().height
+            label.SetPosition((left, y + (row_pitch - label_height) // 2))
+            # 第一块与标签同一行；后续块换到下面
+            first = True
+            for chunk in chunks:
+                row_top = y if first else y + row_pitch
+                if not first:
+                    y += row_pitch
+                first = False
+                width = chunk[0].GetBestSize().width
+                height = chunk[0].GetBestSize().height
+                total = width * len(chunk) + gap * (len(chunk) - 1)
+                x = right - total
+                for button in chunk:
+                    button.SetSize(x, row_top, width, height)
+                    x += width + gap
+            y += row_pitch
+
     def _place_language_row(self) -> None:
-        """语言行：标签靠左、两个分段靠右。**手工定位置**，与按钮一致。"""
-        left, top, right, bottom = self._body_rect
-        dpi = dpi_of(self)
-        gap = scale_for_dpi(METRICS.padding_gap, dpi)
-        row_height = scale_for_dpi(METRICS.dialog_button_height, dpi)
-
-        self._label.SetPosition((left, top + (row_height
-                                               - self._label.GetBestSize().height) // 2))
-
-        width = self._language_buttons[0].GetBestSize().width
-        total = width * len(self._language_buttons) + gap * (
-            len(self._language_buttons) - 1)
-        x = right - total
-        for button in self._language_buttons:
-            button.SetSize(x, top, width, row_height)
-            x += width + gap
+        """兼容旧调用点：只摆语言那一行。"""
+        if not hasattr(self, "_label"):
+            return
+        self._place_rows(scale_for_dpi(METRICS.dialog_button_height,
+                                       dpi_of(self)))
 
     def _on_paint(self, event) -> None:
         """基类会把 `_message` 画出来；设置窗口没有正文，所以只铺底色。"""
