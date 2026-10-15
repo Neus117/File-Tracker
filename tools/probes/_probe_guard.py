@@ -64,6 +64,19 @@ def harden_wx(need_app: bool = False):
         只有那些纯粹想跑界面、不希望被 App 缺失绊住的探针才传 ``True``。
 
     :return: 建出来的 `wx.App`（没建则返回 ``None``）。
+
+    ## ⚠️ 调用方**必须接住**返回值
+
+    踩过：写成 ``harden_wx(need_app=True)`` 而不赋值，于是那个 `wx.App`
+    **立刻被垃圾回收**（引用计数归零），后面第一次用 `wx.Image` 就报
+
+        wx._core.PyNoAppError: The wx.App object must be created first!
+
+    ——**错误信息说"没有 App"，而代码明明建了**，很容易往错的方向查。
+
+    正确写法::
+
+        _APP = harden_wx(need_app=True)     # 接住它，活到脚本结束
     """
     global _hardened
     import wx
@@ -77,7 +90,10 @@ def harden_wx(need_app: bool = False):
     if not need_app:
         return None
     app = wx.App(redirect=False)
-    # 探针不需要真的显示出来；`redirect=False` 让它的日志不弹窗
+    if app is None:
+        # 已经有 App 了：`wx.App()` 在重复构造时会失败，
+        # 那种情况下返回现有的那个，让调用方仍有东西可接。
+        app = wx.GetApp()
     return app
 
 

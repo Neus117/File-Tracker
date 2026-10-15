@@ -228,12 +228,22 @@ check("m10", "过期文档已改成与实测一致的结论",
 # ── 清理 ──────────────────────────────────────────────────────────────────
 for gone in ("requirements_v1.0+.txt", "environment_v1.0+.yml",
              "src/__init__.py", "src/File Tracker_v1.1.py",
-             "images/FileTracker_v1.0-Overview.jpg"):
+             "images/FileTracker_v1.0-Overview.jpg",
+             # v1.1.0 的总览图：它画的是**旧界面**（图上还有个早就删掉的
+             # 「切换排序」按钮），当作 v1.2.4 的展示图会与实物不符。
+             "images/FileTracker_v1.1-Overview.jpg"):
     check("清理", f"`{gone}` 已删除",
           not os.path.exists(os.path.join(ROOT, gone)), "")
-check("清理", "README 用的展示图**保留**（它在被引用）",
-      os.path.exists(os.path.join(ROOT, "images",
-                                  "FileTracker_v1.1-Overview.jpg")), "")
+
+# README 现在引用两张占位图；**文件名必须与 README 里写的一致**，
+# 否则用户做好真图同名覆盖时会发现"README 还是断图"。
+readme = read(os.path.join(ROOT, "README.md"))
+for shot in ("FileTracker_v1.2.4-light.jpg", "FileTracker_v1.2.4-dark.jpg"):
+    check("清理", f"`images/{shot}` 存在且 README 引用了它",
+          os.path.exists(os.path.join(ROOT, "images", shot))
+          and shot in readme, "")
+check("清理", "README 不再引用已删除的 v1.1 总览图",
+      "FileTracker_v1.1-Overview" not in readme, "")
 check("清理", "`.gitattributes` 存在",
       os.path.exists(os.path.join(ROOT, ".gitattributes")), "")
 check("清理", "`.gitignore` 不再有过于宽泛的 lib/ var/ parts/ env/",
