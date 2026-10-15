@@ -393,6 +393,88 @@ user32.SendMessageW.restype = ctypes.c_void_p
 > `wxAssertionError: ((HWND)GetHWND())` —— 它要一个**已创建**的窗口，
 > 不能用临时控件当参数。
 
+## 体积审计那一组（一轮审计留下的，六个）
+
+这一组是为"16.12 MB 里都是什么、能省多少"写的。**都没有弹窗**
+（它们只读产物，不建窗口），留着的价值是"下次想省体积时不用从零查"。
+
+| 探针 | 回答什么 |
+|---|---|
+| `probe_bundle_size.py` | 产物归档里每一项多大；按 wx / 可疑 / images 分类 |
+| `probe_pyz_contents.py` | PYZ 里 130 个模块是哪些；与"应用真正 import 的"做差集 |
+| `probe_used_modules.py` | 导入应用（并建出真实窗口）后，`sys.modules` 里到底加载了什么 |
+| `probe_size_candidates.py` | 哪些资源**零引用**（AST 扫字符串字面量）；谁拉进了加密/网络模块 |
+| `probe_libcrypto_source.py` | `libcrypto-3-x64.dll`（2.11 MB）的依赖链：它 ← `_hashlib` ← `hashlib` ← `tarfile`/`zipfile` |
+| `probe_standardpaths_hang.py` | `wx.StandardPaths.Get()` 在没有 `wx.App` 时的行为（见上面护栏那节） |
+
+### 结论（已实测，别重复踩）
+
+* **两张 `FileTracker_v1.*-Overview.jpg` 共 358 KB，全代码库零引用** ——
+  `datas` 打的是整个 `images/` 目录，所以被原样带进去了。纯赚。
+* **`ast` / `dis` 不能排**：`inspect` 依赖它们，排掉会让
+  `pyi_rth_inspect` 在启动时抛 `ModuleNotFoundError`（实测，会弹崩溃框）。
+* **`socket` 不能排**：进程活着但**窗口起不来**。
+* 排 `tarfile, hashlib, ssl, select, selectors, email, http, urllib, xml, bz2`
+  这一组：产物 **13.51 MB**（−16%）、`libcrypto` 消失、`--selftest` 正常 ——
+  但这个组合**只验过 selftest，没跑过完整 GUI 回归**，采用前必须补。
+
+## ⚠️ 探针必须自己关掉 wx 的模态框（`_probe_guard.py`）
+
+用户反馈过一次：
+
+> 我帮你点掉了这些窗口，对测试结论有没有影响？以后你可以自动关闭吗？
+> 我生怕你思考卡住又多等几十分钟。
+
+那一轮一共弹了三类框，**没有一个是我有意弹的**：
+
+| 框 | 谁弹的 | 怎么根治 |
+|---|---|---|
+| `wxWidgets Debug Alert`（断言失败） | **wx**：断言不抛异常，而是弹模态框等人点 | `wx.DisableAsserts()` |
+| `Unhandled exception in script` | **PyInstaller** 运行时钩子 | 别造出坏产物 + 先杀进程 |
+| 探针自己的窗口没关 | 探针 | `finally` 里 `Destroy()` |
+
+**第一类是真正危险的那个**：断言框会**一直等**，而探针是无人值守的
+——进程就停在那里，还会连累整场会话。
+
+### 规矩
+
+写探针时：
+
+```python
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _probe_guard import harden_wx, install_excepthook
+
+install_excepthook()   # 崩溃时打清楚 + 非零退出，而不是弹框
+harden_wx()            # **关掉断言框**（关键）
+import wx              # 之后再 import wx
+
+app = wx.App()
+```
+
+跑别人的探针（硬限时，超时就杀）：
+
+```python
+from _probe_guard import run_probe
+code, out = run_probe("probe_xxx.py", timeout=120)
+```
+
+### 为什么"禁用断言"不削弱结论
+
+`wx.StandardPaths.Get()` 那次的例子：断言框开着 → 挂住；
+关掉 → 顺利返回。
+
+看起来结论变了，其实**更清楚了**：
+
+* 关掉断言 == 假装有人点了「继续」，于是看到"这句本身不抛异常"
+  ⇒ 证明 `except (OSError, ValueError)` **接不住**它。
+* 而失败的**不是这次调用，是 wx 的断言处理**：
+  断言失败 → 弹框 → 无人点 → 停住。
+  也就是说，**产物挂起的原因就是那个没人点的框**。
+
+结论一样可靠，区别只是不再打扰人。**判据从"会不会卡住"变成
+"有没有抛异常 / 能不能返回"**——后者还能重复自动跑。
+
 ## `probe_open_focus.py` — 「打开」跟不跟最后一次选中
 
 用户为这个 bug 报过**两次**：

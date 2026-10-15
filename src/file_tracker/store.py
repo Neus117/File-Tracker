@@ -134,25 +134,45 @@ class PathStore:
         self.conn.commit()
 
     def replace_all(self, records: list[PathRecord]) -> None:
-        """整表替换。
+        """整表替换。**失败时整体回滚，一行都不动。**
 
         只用于导入/迁移这类**外部数据整体覆盖**的场景，不用于正常退出。
+
+        ## 为什么必须显式回滚
+
+        审计查出的一个**数据丢失**缺陷（`sqlite3` 默认不是自动提交）：
+
+            DELETE FROM paths          ← 旧数据已经进了事务
+            INSERT ...                 ← 第 3 条重复 → IntegrityError
+            commit()                   ← **没走到**
+
+        中间失败时 DELETE **还挂在那个未提交的事务里**。此后任何一次
+        `commit()`（`record_access` / `set_pinned` / `remove` / `clear`，
+        以及 `close()` 里的那次）都会把它**变成永久的**——
+        于是"导入失败"的后果是**整张表没了**。
+
+        实测过：3 条记录 → `replace_all` 撞 `IntegrityError` → 剩 1 条
+        → 一次无关的 `record_access` → **原来那 3 条永久消失**。
+
+        现在用 `with self.conn:` —— `sqlite3.Connection` 的上下文管理器
+        **在异常时自动 rollback、正常时自动 commit**，且不会漏掉任何一条
+        退出路径。整段替换因此是"要么全成、要么全不动"。
         """
-        self.cursor.execute("DELETE FROM paths")
-        for record in records:
-            self.cursor.execute(
-                """
-                INSERT INTO paths (path, access_count, last_access_time, is_pinned)
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    record.path,
-                    record.access_count,
-                    record.last_access_time,
-                    1 if record.is_pinned else 0,
-                ),
-            )
-        self.conn.commit()
+        with self.conn:
+            self.cursor.execute("DELETE FROM paths")
+            for record in records:
+                self.cursor.execute(
+                    """
+                    INSERT INTO paths (path, access_count, last_access_time, is_pinned)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        record.path,
+                        record.access_count,
+                        record.last_access_time,
+                        1 if record.is_pinned else 0,
+                    ),
+                )
 
     # -- 读 ---------------------------------------------------------------
 

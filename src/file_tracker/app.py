@@ -29,8 +29,9 @@ from .core import (
     APP_VERSION,
     DEFAULT_SORT_KEY,
     SORT_SPECS,
-    fit_window_size,
+    app_data_dir,
     find_sort_spec,
+    fit_window_size,
     normalize_path,
     resource_path,
     scaled_window_size,
@@ -129,7 +130,13 @@ class FileTracker(wx.Frame):
         # （实测 (171,171,171)），与"卡片浮在窗口底上"的分层对不上——
         # 用户会看到卡片周围一圈突兀的灰边。
         self.SetBackgroundColour(wx.Colour(self.theme.background))
-        self.app_data_dir = wx.StandardPaths.Get().GetUserDataDir()
+        # 与 `config`/`store` 用**同一个**目录，而且不依赖 wx。
+        #
+        # 原来是 `wx.StandardPaths.Get().GetUserDataDir()`：这里的 App 已经
+        # 存在所以能用，但它与 `default_config_path()` 是两套来源——
+        # 一旦 `SetAppName` 与 `APP_NAME` 不一致，配置与日志就会分到两个目录。
+        # 现在只有一处定义（`core.app_data_dir`）。
+        self.app_data_dir = app_data_dir()
         if not os.path.exists(self.app_data_dir):
             os.makedirs(self.app_data_dir, exist_ok=True)
         # 走 `default_config_path()` 而不是在这里拼路径——
@@ -290,12 +297,16 @@ class FileTracker(wx.Frame):
             pass
 
         try:
-            log_dir = wx.StandardPaths.Get().GetUserDataDir()
+            # 走 `app_data_dir()` 而不是 `wx.StandardPaths`：
+            # 同一个目录，但**不依赖 wx**（那句在没有 App 时弹断言框停住）。
+            # 也顺带修掉"`SetAppName` 之前调用会写到 %APPDATA%\<产物名>"
+            # 那个错位的毛病。
+            log_dir = app_data_dir()
             os.makedirs(log_dir, exist_ok=True)
             with open(os.path.join(log_dir, "resource-errors.log"), "a",
                       encoding="utf-8") as handle:
                 handle.write(line + "\n")
-        except (OSError, ValueError):
+        except OSError:
             # 连日志都写不了时不再抛异常——否则会盖掉真正的原始问题
             pass
 
@@ -2425,17 +2436,28 @@ def _emit_or_log(text: str) -> None:
 
     规则二要求"产物必须能自报是哪个提交构建的"。windowed 产物没有控制台，
     所以**必须有一个不依赖控制台的通道**，否则用户报障时拿不到这一行。
+
+    ## 这里**不能**碰 wx
+
+    原来这一行是 ``wx.StandardPaths.Get().GetUserDataDir()``。
+    那句在没有 `wx.App` 时会触发 wx 断言，而 **wx 断言失败是弹一个模态框
+    等人点**，不是抛异常——命令行场景没有人点，**进程就停死在那里**。
+    外面那个 `except (OSError, ValueError)` 因此形同虚设
+    （它不抛这两种异常，它只是停住）。
+
+    用户报障时踩到过：没有控制台时跑 ``--version`` 会挂住。
+    现在走 :func:`~file_tracker.core.app_data_dir`，**完全不依赖 wx**。
     """
     if _emit(text):
         return
 
     try:
-        log_dir = wx.StandardPaths.Get().GetUserDataDir()
+        log_dir = app_data_dir()
         os.makedirs(log_dir, exist_ok=True)
         log_path = os.path.join(log_dir, "version.txt")
         with open(log_path, "w", encoding="utf-8") as handle:
             handle.write(text + "\n")
-    except (OSError, ValueError):
+    except OSError:
         log_path = None
 
     if log_path:
@@ -2451,8 +2473,21 @@ def _show_message_safely(text: str) -> None:
     :class:`~file_tracker.widgets.ThemedDialog` 允许 `parent=None`，
     所以照样能弹出一个配色正确的框——**不必退回系统对话框**。
 
-    失败必须静默：这是 `--version` 的附带提示，弹不出来也不该改退出码。
+    ## 为什么必须**自动关闭**
+
+    原来是 `ShowModal()` 一直等——**没有人点就永远不退**。
+    于是这个"友好的提示"变成了一个卡死点：任何无人值守的调用
+    （脚本、自动化、CI）跑 `--version` 都会挂在那里。
+
+    用户已经因为这个吃过一次苦（审计里那条 C1）。
+
+    现在挂一个 `wx.Timer`，到时自己关。想早点关掉就按键或点「好」。
     """
+    #: 自动关闭的等待时间（毫秒）。
+    #:
+    #: 取值权衡：**必须足够长到让人看清一行版本号**，又**必须足够短到
+    #: 不像卡死**。6 秒够读一行；再长，无人值守的调用就会明显变慢。
+    auto_close_ms = 6000
     try:
         import wx as _wx
 
@@ -2462,7 +2497,17 @@ def _show_message_safely(text: str) -> None:
                               yes_label=L("好", "OK"),
                               no_label=NO_BUTTON)
         dialog.CentreOnScreen()
+
+        # 到点自己关。`wx.Timer` 在 `MainLoop` 里跑，所以会把模态循环关掉。
+        timer = _wx.Timer(dialog)
+        dialog.Bind(_wx.EVT_TIMER, lambda _event: dialog.EndModal(_wx.ID_YES),
+                    timer)
+        timer.StartOnce(auto_close_ms)
+
         dialog.ShowModal()
+        # **先停表再销毁。** 让计时器活过它所属的窗口，
+        # 事件就会打到已释放的对象上。
+        timer.Stop()
         dialog.Destroy()
         app.Destroy()
     except Exception:
@@ -2528,15 +2573,17 @@ def _run_selftest() -> int:
         _emit(f"  - {problem}")
 
     if problems:
-        # 失败时也要留痕：windowed 产物里 stdout 是空的
+        # 失败时也要留痕：windowed 产物里 stdout 是空的。
+        # **同样不能用 `wx.StandardPaths`**——`--selftest` 也没有
+        # `wx.App`，那句会弹断言框把进程停住（见 `_emit_or_log`）。
         try:
-            log_dir = wx.StandardPaths.Get().GetUserDataDir()
+            log_dir = app_data_dir()
             os.makedirs(log_dir, exist_ok=True)
             with open(os.path.join(log_dir, "selftest.log"), "w",
                       encoding="utf-8") as handle:
                 handle.write(f"{APP_VERSION} selftest: FAIL\n")
                 for problem in problems:
                     handle.write(f"  - {problem}\n")
-        except (OSError, ValueError):
+        except OSError:
             pass
     return 0 if not problems else 1

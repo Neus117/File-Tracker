@@ -1,0 +1,133 @@
+"""探针的**自我保护**：不让 wx 弹模态框把探针（和用户）卡住。
+
+## 为什么需要这个
+
+用户反馈："我帮你点掉了这些窗口……我生怕你思考卡住又多等几十分钟。"
+
+实际发生的事，一共三类，都是 **wx 的模态对话框**：
+
+① **wx 断言框**（`wxWidgets Debug Alert`）。断言失败时 wx 弹一个框等用户
+   点确认，而不是抛异常。没有人在旁边点，**进程就永远停在那里**。
+   实测：`wx.StandardPaths.Get()` 在没有 `wx.App` 时就是这一种。
+
+② **PyInstaller 的运行时错误框**（`Unhandled exception in script`）。
+   打包后的程序崩溃时弹一个原生 `MessageBox`——探针是被动等它的。
+
+③ **探针自己造的窗口没关**。
+
+## 两道处理
+
+* :func:`harden_wx` —— 在**建窗口之前**调：
+  * `wx.DisableAsserts()`：断言不再弹框，改为抛/继续。
+    这一条把"永远卡住"变成"立刻失败"，是本模块的核心。
+  * 把一个默认的 `wx.App` 建出来（需要时），
+    避免落到"没有 App 却调 App 级 API"这条路上。
+
+* :func:`run_probe` —— 把探针脚本**当子进程跑并硬限时**。
+  超时就杀，并把"超时"本身作为结论报出来。这样即使某个探针
+  还是卡住了，卡住的也是子进程，不是整场会话。
+
+## 用法
+
+```python
+from _probe_guard import harden_wx
+
+harden_wx()                 # 必须在 import wx 之后、建窗口之前
+import wx
+app = wx.App()
+```
+
+整脚本级：
+
+```python
+from _probe_guard import run_probe
+code, out = run_probe("probe_xxx.py", timeout=120)
+```
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+
+#: 进程级：只装一次
+_hardened = False
+
+
+def harden_wx(need_app: bool = False):
+    """关掉 wx 的断言弹框（并可顺手把 `wx.App` 建出来）。
+
+    :param need_app: 是否连 `wx.App` 一起建。**默认不建**——
+        因为"有没有 App"本身就是被测的东西之一
+        （见 `probe_standardpaths_hang.py`）；
+        只有那些纯粹想跑界面、不希望被 App 缺失绊住的探针才传 ``True``。
+
+    :return: 建出来的 `wx.App`（没建则返回 ``None``）。
+    """
+    global _hardened
+    import wx
+
+    if not _hardened:
+        # **这一行是关键。** 断言框会阻塞到有人点它为止；
+        # 关掉之后断言变成可恢复的失败，探针能继续或立刻报错。
+        wx.DisableAsserts()
+        _hardened = True
+
+    if not need_app:
+        return None
+    app = wx.App(redirect=False)
+    # 探针不需要真的显示出来；`redirect=False` 让它的日志不弹窗
+    return app
+
+
+def install_excepthook() -> None:
+    """把未捕获异常打清楚，**并保证非零退出码**。
+
+    默认的 wx 程序崩溃时会弹原生框；探针要的是"一行能读的错误 + 非零退出"，
+    这样 `run_probe` 才能判定失败，而不是靠人去点框。
+    """
+    def hook(kind, value, tb):
+        import traceback
+
+        traceback.print_exception(kind, value, tb, file=sys.stderr)
+        # 交给默认钩子会再弹框（打包产物上），所以这里直接退
+        os._exit(70)
+
+    sys.excepthook = hook
+
+
+def run_probe(script: str, timeout: int = 180,
+              extra_args: tuple[str, ...] = ()) -> tuple[int, str]:
+    """把探针当**子进程**跑，硬限时；超时就杀。
+
+    :return: ``(退出码, 输出)``。超时返回 ``(-1, 输出 + 说明)``。
+
+    **子进程里也装好护栏**：即使不知道探针内部做了什么，
+    断言框也不会弹出来阻塞。做法是用 `-c` 先 import 护栏再跑脚本。
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = os.path.join(os.path.dirname(os.path.dirname(here)), "src")
+    bootstrap = (
+        "import sys, runpy;"
+        f"sys.path[:0]=[{here!r}, {src!r}];"
+        "from _probe_guard import harden_wx, install_excepthook;"
+        "install_excepthook(); harden_wx();"
+        f"runpy.run_path({script!r}, run_name='__main__')"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-X", "utf8", "-c", bootstrap, *extra_args],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=timeout, cwd=os.path.dirname(here))
+        return result.returncode, (result.stdout or "") + (result.stderr or "")
+    except subprocess.TimeoutExpired as expired:
+        # **超时是结论，不是意外。** 说明这个探针会在没人点框的情况下卡住。
+        partial = ""
+        for stream in (expired.stdout, expired.stderr):
+            if stream:
+                partial += (stream.decode("utf-8", "replace")
+                            if isinstance(stream, bytes) else stream)
+        return -1, (partial
+                    + f"\n[护栏] {timeout}s 未退出，已强制结束。"
+                      "多半是有人没点的模态框（wx 断言框 / 崩溃框）。\n")

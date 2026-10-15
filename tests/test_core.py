@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 
 import pytest
@@ -219,6 +220,84 @@ def test_version_string_contains_name_and_revision():
     assert text.startswith(core.APP_NAME)
     assert core.APP_VERSION in text
     assert "+" in text
+
+
+# --------------------------------------------------------------------------
+# 用户数据目录 —— 一个真实事故换来的约束
+# --------------------------------------------------------------------------
+
+def test_app_data_dir_does_not_need_wx():
+    """**用户数据目录必须能不开 `wx.App` 算出来。**
+
+    这是审计发现、用户报障时踩到的一个事故：
+
+    ``--version`` / ``--selftest`` 两条命令行入口没有 `wx.App`，
+    而它们在没有 stdout 时会去 ``wx.StandardPaths.Get().GetUserDataDir()``
+    记日志（windowed 产物**永远**没有 stdout，所以这条路必然走到）。
+    那句在没有 App 时触发 wx 断言，而 **wx 断言失败是弹一个模态框等人点**，
+    不是抛异常——命令行场景没有人点，**进程就停死在那里**。
+    外层那个 `except (OSError, ValueError)` 因此形同虚设。
+
+    ## 为什么在**干净子进程**里测，而不是看 `sys.modules`
+
+    早先是 `assert "wx" not in sys.modules`，结果**因测试顺序而失败**：
+    同一套里别的测试 import 过 wx 之后，这条就永远不成立
+    （实测 `1 failed, 178 passed`）。那验的不是实现，是执行顺序。
+
+    放进子进程就没有这个问题：那里没有别人污染过 `sys.modules`，
+    而且**万一实现退回 `wx.StandardPaths`，子进程会挂住**——
+    由父进程的超时判失败，不会把整套测试拖死。
+    """
+    script = (
+        "import sys;"
+        "sys.path.insert(0, 'src');"
+        "import file_tracker.core as core;"
+        "assert 'wx' not in sys.modules, 'core 不该 import wx';"
+        "print(core.app_data_dir())"
+    )
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        result = subprocess.run(
+            [sys.executable, "-X", "utf8", "-c", script],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", cwd=root, timeout=20)
+    except subprocess.TimeoutExpired:
+        pytest.fail(
+            "算 app_data_dir() 用了超过 20 秒还没返回——"
+            "多半是又走回 wx.StandardPaths 了（没有 wx.App 时它会弹断言框，"
+            "而断言框会一直等人点）")
+
+    assert result.returncode == 0, (
+        f"子进程失败（{result.returncode}）：{result.stderr}")
+    directory = result.stdout.strip()
+    assert os.path.isabs(directory), directory
+    assert directory.endswith(core.APP_NAME), directory
+
+
+def test_app_data_path_joins_under_the_same_dir():
+    assert os.path.dirname(core.app_data_path("version.txt")) == \
+        core.app_data_dir()
+    assert core.app_data_path("a", "b.txt") == os.path.join(
+        core.app_data_dir(), "a", "b.txt")
+
+
+def test_config_path_lives_in_the_same_dir():
+    """配置、日志、版本文件必须落在**同一个**目录。
+
+    原来 `config.py` 自己拼了一遍 ``%APPDATA%``，而 `app.py` 用
+    `wx.StandardPaths` ——两份实现。一旦漂移就会写到两个目录，
+    用户看到的是"设置没保存"这种查不出原因的现象。
+    """
+    from file_tracker import config
+
+    assert os.path.dirname(config.default_config_path()) == \
+        core.app_data_dir()
+
+
+def test_app_data_dir_honours_appdata_env(monkeypatch, tmp_path):
+    """`%APPDATA%` 要说了算——否则没法在测试里把它引开。"""
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    assert core.app_data_dir() == os.path.join(str(tmp_path), core.APP_NAME)
 
 
 # --------------------------------------------------------------------------

@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import tempfile
 
-from .core import sort_keys
+from .core import app_data_path, sort_keys
 from .lang import PREFERENCE_CHINESE, PREFERENCE_ENGLISH
 
 DEFAULT_DIRECTORY = "C:\\"
@@ -36,11 +38,12 @@ def default_config_path() -> str:
 
     这跟 :func:`file_tracker.store.default_db_path` 是同一个模式，
     也是同一个理由：**"位置"要能被替换，"内容"才敢在测试里改**。
-    """
-    import os
 
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "File Tracker", "config.json")
+    目录本身取自 :func:`file_tracker.core.app_data_dir`——**只有一处定义**。
+    这里原来是自己拼一遍 ``%APPDATA%``；两份实现一旦漂移，
+    配置与日志就会写进两个不同的目录。
+    """
+    return app_data_path("config.json")
 
 
 class Config:
@@ -52,13 +55,50 @@ class Config:
         self.load()
 
     def load(self) -> dict:
+        """读配置。**文件损坏时先把它备份下来，再回退到默认值。**
+
+        ## 为什么必须备份
+
+        原来是 ``except ...: self._data = {}`` —— 静默重置。看起来无害，
+        实际是**数据丢失的第一步**：
+
+            ① 文件损坏（写完断电、手改出一个逗号错）
+            ② 这里静默变成 ``{}``
+            ③ 程序照常跑，用户改了任何一项 → `save()` 把 ``{}`` 写回去
+            ④ **原来的设置永久没了，而且没有任何提示**
+
+        配置文件是**明确预期会被手改的**（见 `get_sort_column` 等的注释），
+        所以"内容不合法"是正常输入，不是异常情况。
+
+        现在损坏的文件会被另存为 ``config.json.corrupt``，
+        用户至少还能从里面把 ``last_directory`` 抄回来。
+        """
         try:
             with open(self.config_file, "r", encoding="utf-8") as handle:
                 loaded = json.load(handle)
             self._data = loaded if isinstance(loaded, dict) else {}
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+        except FileNotFoundError:
+            # 第一次运行：没有文件是正常的，不是损坏
             self._data = {}
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            self._data = {}
+            self._backup_corrupt()
         return self._data
+
+    def _backup_corrupt(self) -> str | None:
+        """把损坏的配置另存为 ``<名字>.corrupt``，返回备份路径。
+
+        备份失败不抛异常——读配置失败本身已经够糟了，
+        不该因为"备份不了"让程序起不来。
+        """
+        backup = self.config_file + ".corrupt"
+        try:
+            if os.path.exists(self.config_file):
+                shutil.copy2(self.config_file, backup)
+                return backup
+        except OSError:
+            pass
+        return None
 
     def get_last_directory(self) -> str:
         """上次浏览的目录；路径已失效时回退到 ``C:\\``。
@@ -156,9 +196,45 @@ class Config:
         self._data["scroll_position"] = {"v_relative": max(0.0, min(1.0, value))}
 
     def save(self) -> None:
-        """整份写回。写失败时抛 :class:`OSError`，由调用方决定怎么告诉用户。"""
+        """整份写回。写失败时抛 :class:`OSError`，由调用方决定怎么告诉用户。
+
+        ## 为什么是"写临时文件再改名"
+
+        原来是 ``open(self.config_file, "w")`` —— **原地截断**。
+        `open(..., "w")` 一执行，旧内容就没了；接下来写的过程中断电、
+        被杀、磁盘满，留下的就是一个**半截文件**。下次启动读它 →
+        `JSONDecodeError` → 回到 ``{}`` → 所有偏好丢失。
+
+        而写入**非常频繁**：`_remember_sort` 每点一次表头就存一次
+        （见 `app.py` 的 `_remember_sort`）。把"高频写入"和
+        "非原子替换"放在一起，撞上损坏只是时间问题。
+
+        ``os.replace`` 在同一分区上是**原子**的：要么看到旧文件、
+        要么看到新的完整文件，不存在"半截"这个中间态。
+
+        临时文件必须与目标**同目录**——跨分区改名不是原子操作。
+        """
         directory = os.path.dirname(self.config_file)
         if directory and not os.path.exists(directory):
             os.makedirs(directory, exist_ok=True)
-        with open(self.config_file, "w", encoding="utf-8") as handle:
-            json.dump(self._data, handle, ensure_ascii=False, indent=2)
+
+        # 同一个目录里建临时文件，这样 os.replace 才是原子的
+        handle_fd, temp_path = tempfile.mkstemp(
+            prefix=os.path.basename(self.config_file) + ".",
+            suffix=".tmp", dir=directory or ".")
+        try:
+            with os.fdopen(handle_fd, "w", encoding="utf-8") as handle:
+                json.dump(self._data, handle, ensure_ascii=False, indent=2)
+                # **先落盘再改名。** 不 flush+fsync 的话，
+                # 改名可能先于数据到达磁盘，断电后新文件是空的。
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, self.config_file)
+        except BaseException:
+            # 失败时**不要留下临时文件**：用户会看到一个莫名其妙的 .tmp，
+            # 而且下次还可能撞上它。
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+            raise

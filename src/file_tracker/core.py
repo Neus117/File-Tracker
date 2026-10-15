@@ -268,6 +268,39 @@ def build_revision() -> str:
         return "unknown"
 
 
+def app_data_dir() -> str:
+    """本程序放用户数据的地方：``%APPDATA%\\File Tracker``。
+
+    ## 为什么不走 `wx.StandardPaths`
+
+    **因为它在没有 `wx.App` 的时候会把人卡死。**
+
+    踩过（用户报障时才发现）：``--version`` / ``--selftest`` 这两条命令行
+    入口**没有** `wx.App`，而它们在没有 stdout 时会去
+    ``wx.StandardPaths.Get().GetUserDataDir()`` 记日志。那句在没有 App 时
+    触发 wx 断言，而 **wx 断言失败不是抛异常，是弹一个模态框等人点**。
+    命令行场景没有人点 ⇒ **进程就停在那里**。
+
+    外层那个 `except (OSError, ValueError)` 形同虚设：这句不抛这两种异常，
+    它只是停住。实测：断言框开着 → 挂住；`wx.DisableAsserts()` 之后 → 正常返回。
+
+    所以这条路**不依赖 wx**：`%APPDATA%` 是标准环境变量，自己拼就行。
+    顺带修掉另一个缺陷——原来 `SetAppName` 只在 `OnInit` 里跑，
+    命令行入口会写到 ``%APPDATA%\\<产物名>``（实测 ``-c``），
+    而不是这里说的 ``File Tracker``。
+
+    与 :func:`file_tracker.config.default_config_path` 同一个目录、
+    同一个理由（"位置"要能被替换，"内容"才敢在测试里改）。
+    """
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    return os.path.join(base, APP_NAME)
+
+
+def app_data_path(*parts: str) -> str:
+    """`app_data_dir()` 下面某个文件的完整路径。"""
+    return os.path.join(app_data_dir(), *parts)
+
+
 def version_string() -> str:
     """形如 ``File Tracker 1.2.0+9293827`` 的自报版本串。"""
     return f"{APP_NAME} {APP_VERSION}+{build_revision()}"
