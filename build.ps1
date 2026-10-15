@@ -265,6 +265,38 @@ if ($reported -notmatch [regex]::Escape($revision)) {
     throw "产物自报的版本串里没有构建提交 $revision —— 它无法说明自己是哪一个版本"
 }
 
+# **版本资源必须真的在产物里。**
+#
+# 用户要求"参照 Roboc.exe 的版本信息构建"——那是 Explorer
+# 「属性 → 详细信息」看到的一页。它由 `tools/version_info.py` 生成、
+# 经 spec 的 `version=` 传给 PyInstaller。
+#
+# 这一步是**读回产物**而不是相信 spec 里的变量：spec 里那行写对了，
+# 但 PyInstaller 没吃进去的情况是存在的（`--version` 那个缺陷就是这么来的）。
+# 读回来还顺带确认了四个字段的值，而不只是"有资源"。
+# **检查逻辑放在一个 Python 脚本里，不内联。**
+# 内联时要穿过 PowerShell 的引号、cmd 的重定向、Python 的字符串三层转义，
+# 写对一次、改坏一次几乎是必然的。
+# 期望值取自**产物自己刚报出来的版本串**（`$reported`，形如
+# "File Tracker 1.2.2+5c031de"），不另外去 core.py 解析一遍。
+#
+# 这样这一步比较的是**产物说的两件事**：`--version` 报的版本，
+# 与版本资源里的产品版本。两者必须一致，否则「属性」页会骗人。
+# （另：`$version` 是 **Python 的版本** 3.11.9，不是本程序的，别用错。）
+$appVersion = ($reported -split '\+')[0].Trim().Split(' ')[-1]
+# **带空格的参数必须自己加引号。**
+# `Get-ExeOutput` 是把参数用空格拼进 cmd 命令行的，而产物叫
+# `File Tracker.exe` —— 不加引号就成了三个参数，检查脚本会报
+# "用法: check_exe_version.py <exe> <期望的产品版本>"（退出码 2）。
+$script = Join-Path $Root 'tools\check_exe_version.py'
+$versionCheck = Get-ExeOutput -Exe $Python -Arguments @(
+    "`"$script`"", "`"$exe`"", "`"$appVersion`""
+)
+Write-Host "版本资源: $($versionCheck.StdOut.Trim())"
+if ($versionCheck.ExitCode -ne 0) {
+    throw "产物的版本资源不合格（退出码 $($versionCheck.ExitCode)）：$($versionCheck.StdErr)$($versionCheck.StdOut)"
+}
+
 $selfTest = Get-ExeOutput -Exe $exe -Arguments @('--selftest')
 if ($selfTest.ExitCode -ne 0) {
     throw "产物 --selftest 失败（退出码 $($selfTest.ExitCode)）：$($selfTest.StdOut) $($selfTest.StdErr)"
