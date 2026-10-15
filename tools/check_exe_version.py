@@ -68,6 +68,18 @@ def main(argv: list[str]) -> int:
     exe_path, expected = argv
     try:
         fields = read_fields(exe_path)
+    except ImportError as error:
+        # **缺依赖与"资源读不出来"是两件事，不能混成一句话。**
+        #
+        # 踩过：这一步在 CI 上第一次跑就报
+        # ``读不出版本资源：ModuleNotFoundError: No module named 'PyInstaller'``
+        # ——看起来像"产物的版本资源坏了"，实际是**这个检查脚本自己**
+        # 缺一个构建期依赖。照着那句提示会去查打包配置，方向全错。
+        print(f"缺少构建期依赖：{error}\n"
+              f"  这个检查要读 PE 的版本资源，用的是 PyInstaller 自带的解析器。\n"
+              f"  装上再跑：pip install -r requirements-dev.txt",
+              file=sys.stderr)
+        return 2
     except Exception as error:                       # noqa: BLE001
         print(f"读不出版本资源：{type(error).__name__}: {error}",
               file=sys.stderr)

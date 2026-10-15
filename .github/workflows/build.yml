@@ -3,14 +3,27 @@
 # 骨架来自 Roboc 的 .github/workflows/build.yml。值得每次推送自动跑一遍的，
 # 都是那些"编译通过、运行无异常、只是不生效"的缺陷——本项目最难查的一类。
 #
-# 具体跑四件事：
-#   1. 单元测试（117 条，不依赖 GUI）
+# 具体跑六件事：
+#   1. 单元测试（175 条，不依赖 GUI）
 #   2. 接线检查 + 它的阳性对照
-#   3. .ps1 的 UTF-8 BOM 检查
-#   4. 打包并让产物自报版本（--version / --selftest）
+#   3. 对话框调用点检查 + 它的阳性对照
+#   4. .ps1 的 UTF-8 BOM 检查
+#   5. 打包并让产物自报版本（--version / --selftest）
+#   6. 产物的版本资源（属性 → 详细信息那一页）
 #
-# 最后一项是唯一能证明"打包配置真的能用"的手段。仓库里此前**没有任何打包配置**，
+# 最后两项是唯一能证明"打包配置真的能用"的手段。仓库里此前**没有任何打包配置**，
 # v1.1.0 那个 exe 怎么打出来的只存在于作者记忆里。
+#
+# ## 测试必须与运行环境的语言无关
+#
+# 踩过：v1.2.3 起**每次推送都失败**，而本地全绿。原因是一条测试写着
+# `assert "不存在" in plan["hint"]` —— 而那句提示是双语的
+# （`L("路径不存在：…", "Path not found: …")`），GitHub 的 runner 是
+# **英文系统**，于是它拿到英文文案就挂了。本地是中文系统，从没见过。
+#
+# 修法在 `tests/conftest.py` 的 autouse fixture：整套测试统一定死中文；
+# 英文那一侧由 `test_tree_nav.py::test_hint_follows_language`
+# 显式地、两种语言都验一遍。**以后加涉及文案的断言，请照这个做法。**
 
 name: build
 
@@ -59,6 +72,18 @@ jobs:
       - name: 接线检查的阳性对照
         run: python -X utf8 tools/check_wiring_negative.py
 
+      # 对话框调用点检查：给了两个按钮却没读 `ShowModal()` 的返回值。
+      # 用户报过这个缺陷："失效删除确认弹窗有两个按钮，功能完全一致
+      # ——关闭窗口，请简化为一个按钮「确定」。"
+      #
+      # 它**不进 pytest**是因为检查的是源码形状，不是运行时行为；
+      # 放在这里能让每次推送都过一遍。
+      - name: 对话框调用点检查
+        run: python -X utf8 tools/check_dialogs.py
+
+      - name: 对话框检查的阳性对照
+        run: python -X utf8 tools/check_dialogs_negative.py
+
       # Windows PowerShell 5.1 读没有 BOM 的 UTF-8 文件会按 ANSI 解码，
       # 脚本里的中文变成乱码甚至语法错误。踩过一次——一个检查器因此
       # 把 78 处正常代码报成了死代码。
@@ -106,6 +131,46 @@ jobs:
             # CI 上产物是在这个提交上构建的，哈希必须对得上
             Write-Error "自报版本 '$reported' 里没有本次提交 $session"
             exit 1
+          }
+
+      # **版本资源真的写进产物了吗。**
+      #
+      # 这一步是"读回产物"而不是"相信 spec"：spec 里把 `version=` 写对，
+      # 不等于 PyInstaller 真的把它写进了 exe——本项目刚因为同一类问题
+      # 发过一次事故（`_build_info` 生成在错目录、`--version` 一直自报
+      # `unknown`，而构建全绿）。
+      #
+      # 期望值取自**产物自己刚报出来的版本串**（上一步的 `$reported`），
+      # 所以这一步比的是"产物说的两件事"：版本命令报的，与属性页里的。
+      - name: 版本资源自检
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path 'dist\File Tracker.exe').Path
+
+          # 期望的产品版本：从 `--version` 的输出里取（形如
+          # "File Tracker 1.2.3+abc1234"）。用 cmd 重定向到文件抓
+          # windowed 程序的 stdout——`RedirectStandardOutput` 在本机
+          # 实测拿到过空字符串。
+          $outFile = Join-Path $env:TEMP 'ft-ver2.txt'
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = $env:ComSpec
+          $psi.Arguments = "/c `"`"$exe`" --version > `"$outFile`" 2>&1`""
+          $psi.UseShellExecute = $false
+          $psi.CreateNoWindow = $true
+          $p = New-Object System.Diagnostics.Process
+          $p.StartInfo = $psi
+          [void]$p.Start()
+          if (-not $p.WaitForExit(60000)) { $p.Kill(); throw '--version 超时' }
+          $reported = (Get-Content -LiteralPath $outFile -Raw).Trim()
+
+          $expected = (($reported -split '\+')[0].Trim() -split ' ')[-1]
+          Write-Host "期望产品版本: $expected"
+
+          # **带空格的参数必须自己加引号。** 产物叫 `File Tracker.exe`，
+          # 而下面是把参数用空格拼进命令行的。
+          python -X utf8 tools/check_exe_version.py "$exe" "$expected"
+          if ($LASTEXITCODE -ne 0) {
+            throw "产物的版本资源不合格（退出码 $LASTEXITCODE）"
           }
 
       - name: 保留产物

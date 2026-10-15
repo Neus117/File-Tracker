@@ -399,6 +399,45 @@ def test_build_walk_plan_for_missing_path(tmp_path):
     assert "不存在" in plan["hint"]
 
 
+def test_hint_follows_language(tmp_path):
+    """hint 必须**跟着语言走**，而且两种语言都要真的存在。
+
+    这条测试是因为一次 CI 事故补的：原来的写法只有
+    ``assert "不存在" in plan["hint"]``，它**假设了中文**。
+    在英文系统的 CI 上（GitHub Actions 的 runner）拿到
+    ``'Path not found: ...'`` 就挂了——而本地是中文系统，永远看不到。
+
+    `conftest.py` 里那条 autouse fixture 已经把语言钉成中文，
+    所以这里**显式地**把两种都验一遍：既确认中文分支，
+    也确认英文分支真的被翻译过（而不是漏成中文或空串）。
+    """
+    from file_tracker import lang
+
+    saved = lang._chinese
+    target = str(tmp_path / "nope")
+    try:
+        lang.apply(lang.PREFERENCE_CHINESE)
+        chinese = tree_nav.build_walk_plan(target)["hint"]
+        lang.apply(lang.PREFERENCE_ENGLISH)
+        english = tree_nav.build_walk_plan(target)["hint"]
+    finally:
+        lang._chinese = saved
+
+    # 两种语言都要给出提示，而且**确实不同**（否则等于没翻译）
+    assert chinese and english
+    assert chinese != english, f"两种语言给出同一句话：{chinese!r}"
+    # 都要带上那条路径——提示的作用就是告诉用户哪个路径没找到
+    assert target in chinese and target in english
+    # 判据落在**路径之外的那部分文案**上，而不是"整串是否含某个词"：
+    #   * 后者又是在假设具体文案，改动一个词就会误报；
+    #   * 而"整串是否 ASCII"会被临时目录里的非 ASCII 字符带偏
+    #     （本机 `C:\Users\Neus117` 恰好是纯 ASCII，换个用户名就不成立）。
+    chinese_text = chinese.replace(target, "")
+    english_text = english.replace(target, "")
+    assert any(ord(ch) > 0x7F for ch in chinese_text), chinese_text
+    assert all(ord(ch) < 0x80 for ch in english_text), english_text
+
+
 def test_build_walk_plan_for_empty_input():
     plan = tree_nav.build_walk_plan("   ")
     assert plan["status"] == "empty"
