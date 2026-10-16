@@ -1,0 +1,111 @@
+"""核对中英两版 README 的**结构与数字**是否一致。
+
+## 为什么必须自动核
+
+用户的要求是"**正确**添加未同步/缺失的英文版描述" —— 关键在"正确"。
+两份 README 最容易出的问题是**悄悄漂移**：
+一边改了数字，另一边忘了；或者少了一节、多了一节。
+
+**"我对照着写了一遍"不是证据。** 所以这里逐项比：
+
+* **节标题**：数量与顺序必须一一对应
+* **数字**：两份里出现的同一批关键数字必须相同
+* **切换链接**：两边都要有，且指向对方
+"""
+import io
+import os
+import re
+
+#: **仓库根由脚本位置推出来，不要写死绝对路径。**
+#: 写死的话本机能跑、CI 上必然找不到文件——而那正是"本机能过"骗人的经典形状。
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ZH = os.path.join(REPO, "README.md")
+EN = os.path.join(REPO, "README.en.md")
+
+
+def sections(path: str) -> list[str]:
+    text = io.open(path, encoding="utf-8").read()
+    return [m.group(1).strip() for m in re.finditer(r"^## (.+)$", text, re.M)]
+
+
+def main() -> int:
+    zh = io.open(ZH, encoding="utf-8").read()
+    en = io.open(EN, encoding="utf-8").read()
+    ok = True
+
+    print("=== ① 节标题一一对应 ===")
+    zs, es = sections(ZH), sections(EN)
+    print(f"  中文 {len(zs)} 节｜英文 {len(es)} 节")
+    if len(zs) != len(es):
+        print("  ❌ 节数不同")
+        ok = False
+    for i, (a, b) in enumerate(zip(zs, es), 1):
+        print(f"    {i}. {a:<28} | {b}")
+
+    print()
+    print("=== ② 关键数字两份是否一致 ===")
+    facts = [
+        ("版本号", r"v1\.2\.5"),
+        ("体积", r"13\.31 MB"),
+        ("旧体积", r"15\.76 MB"),
+        ("单元测试", r"192"),
+        ("界面检查", r"158"),
+        ("门禁数", r"9 道门禁|9 gates"),
+        ("审计判据", r"50 条判据|50 criteria"),
+        ("排序条目数", r"3000"),
+    ]
+    for label, pattern in facts:
+        a = bool(re.search(pattern, zh))
+        b = bool(re.search(pattern, en))
+        mark = "✅" if (a and b) else ("❌" if a != b else "⚠️")
+        if not (a and b):
+            ok = False
+        print(f"    {mark} {label:<10} 中文={a}  英文={b}")
+
+    print()
+    print("=== ③ 切换链接 ===")
+    # **不要写死标签文字。** 第一版查的是 `"简体中文](README.md)"`，
+    # 而实际写的是 `[**简体中文**](README.md)`（标签里带加粗），于是**误报断链**。
+    # 改成解析 markdown 链接本身，只看"目标指向谁"。
+    def md_links(text: str) -> list[tuple[str, str]]:
+        return [(m.group(1), m.group(2))
+                for m in re.finditer(r"\[([^\]]+)\]\(([^)]+)\)", text)]
+
+    zh_links = md_links(zh)
+    en_links = md_links(en)
+    zh_ok = any(t == "README.en.md" for _l, t in zh_links)
+    en_ok = any(t == "README.md" for _l, t in en_links)
+    # 还必须**自指**（切回自己那一版），否则只有单向
+    zh_self = any(t == "README.md" for _l, t in zh_links)
+    en_self = any(t == "README.en.md" for _l, t in en_links)
+    print(f"    {'✅' if zh_ok else '❌'} 中文版指向 README.en.md")
+    print(f"    {'✅' if en_ok else '❌'} 英文版指向 README.md")
+    print(f"    {'✅' if zh_self else '❌'} 中文版自指 README.md")
+    print(f"    {'✅' if en_self else '❌'} 英文版自指 README.en.md")
+    ok = ok and zh_ok and en_ok and zh_self and en_self
+
+    print()
+    print("=== ④ 是否残留过期数字（186 / 155 / 44 条判据）===")
+    stale = []
+    for pat, what in [(r"\b186\b", "单元测试 186"), (r"\b155\b", "界面检查 155"),
+                      (r"44 条判据", "审计判据 44")]:
+        for name, text in (("中文", zh), ("英文", en)):
+            if re.search(pat, text):
+                stale.append(f"{name}版 {what}")
+    if stale:
+        print(f"    ❌ 残留：{stale}")
+        ok = False
+    else:
+        print("    ✅ 无残留")
+
+    print()
+    print("=== ⑤ 行数 ===")
+    print(f"    中文 {len(zh.splitlines())} 行｜英文 {len(en.splitlines())} 行")
+
+    print()
+    print("  ✅ 两版一致" if ok else "  ❌ 有不一致项，见上")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
