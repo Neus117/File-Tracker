@@ -38,13 +38,17 @@ from .core import (
     version_string,
 )
 from .store import TIME_FORMAT, PathRecord, PathStore, default_db_path, split_timestamp
+from .dir_tree import DirectoryTree
 from .header import ColumnHeader
 from .lang import (L, PREFERENCE_CHINESE, PREFERENCE_ENGLISH,
                    apply as apply_language, is_chinese)
-from .theme import METRICS, Theme, from_system as theme_from_system, scale_for_dpi
+from .theme import (METRICS, THEME_CHOICES, THEME_DISPLAY_NAMES, THEME_SYSTEM,
+                    Theme, from_preference as theme_from_preference,
+                    from_system as theme_from_system, scale_for_dpi)
 from .tree_nav import TreeWalker, build_walk_plan, find_child_by_label, pick_fallback_item
 from .widgets import (BorderLine, IconButton, PathBar, RoundedButton,
-                       NO_BUTTON, SettingsDialog, ThemedDialog, dpi_of)
+                      NO_BUTTON, SettingsDialog, ThemedDialog, dpi_of)
+from .widgets import body_font as widgets_body_font
 
 #: 列表列定义：(标题, 初始宽, 是否居中)
 #:
@@ -125,6 +129,13 @@ class FileTracker(wx.Frame):
         super().__init__(parent=None, title=APP_NAME, style=style)
         self.SetName("FileTrackerFrame")
 
+        # 先按**系统**取一次：下面马上要用它设窗口底色，
+        # 而 `config` 要再往下才建出来。
+        #
+        # ⚠️ 这里**不能**直接读偏好——踩过：写成
+        # `theme_from_preference(self.config.get_theme())` 会抛
+        # `AttributeError: 'FileTracker' object has no attribute 'config'`，
+        # 整个窗口起不来。偏好稍后覆盖（见 `self.config = Config(...)` 之后）。
         self.theme: Theme = theme_from_system()
         # **窗口自己的底色也要设。** 不设的话它用 wx 的默认灰
         # （实测 (171,171,171)），与"卡片浮在窗口底上"的分层对不上——
@@ -159,6 +170,11 @@ class FileTracker(wx.Frame):
         # 走 `default_config_path()` 而不是在这里拼路径——
         # 测试与验证脚本要能把它换掉，否则会写进用户真实的配置。
         self.config = Config(default_config_path())
+
+        # **现在才读偏好**（`config` 刚建出来）。
+        # 偏好是"跟随系统"时这一步等于重算一次，代价可忽略。
+        self.theme = theme_from_preference(self.config.get_theme())
+        self.SetBackgroundColour(wx.Colour(self.theme.background))
         # **语言必须在建任何界面之前定下来。**
         #
         # 按钮文字、列标题、提示都是建控件时按当时语言取的字面量；
@@ -373,7 +389,8 @@ class FileTracker(wx.Frame):
     # ------------------------------------------------------------------
 
     def InitUI(self) -> None:
-        panel = wx.Panel(self)
+        # 留 `self.` 句柄：`_retheme()` 要够得到它（见那里的说明）
+        self._shell_panel = panel = wx.Panel(self)
         panel.SetBackgroundColour(wx.Colour(self.theme.background))
 
         main_sizer = wx.BoxSizer(wx.VERTICAL)
@@ -388,7 +405,7 @@ class FileTracker(wx.Frame):
         self.splitter = splitter
 
         # -- 左 pane：路径栏 + 目录树 --------------------------------------
-        left_panel = wx.Panel(splitter)
+        self._left_panel = left_panel = wx.Panel(splitter)
         left_panel.SetBackgroundColour(wx.Colour(self.theme.background))
         left_sizer = wx.BoxSizer(wx.VERTICAL)
 
@@ -421,11 +438,17 @@ class FileTracker(wx.Frame):
         # > 只能改样式位（`WS_BORDER` / `WS_EX_CLIENTEDGE` / `wx.BORDER_*`）。
         # > 判据要用"窗口矩形 − 客户区矩形"这种**几何量**，不要用像素取样
         # > （本环境下像素取样不可靠，我为此白跑了好几轮）。
-        self.dir_ctrl = wx.GenericDirCtrl(
-            left_panel, -1, dir=self.last_directory,
-            style=wx.DIRCTRL_MULTIPLE | wx.BORDER_NONE,
-        )
-        self.dir_ctrl.ShowHidden(True)
+        # **不用 `wx.GenericDirCtrl` 了。**
+        #
+        # 它的图标固定 16×16，而树行高被调到 50px ⇒ 图标/行高 = **0.32**，
+        # 对比 Explorer 的约 0.73「看着真的很费劲」（用户）。
+        # 而它**没有暴露任何图列表 API**（实测 `dir()` 里一个都没有），
+        # 换不了图标尺寸 —— 只能换控件。
+        #
+        # `DirectoryTree` 继承 `wx.TreeCtrl` 并实现了 `GenericDirCtrl`
+        # 被用到的那几个方法（`GetTreeCtrl` / `GetPath` / `GetPaths` /
+        # `ShowHidden`），所以**下面那几十处调用一行都不用改**。
+        self.dir_ctrl = DirectoryTree(left_panel, show_hidden=True)
         self.dir_ctrl.SetMinSize((METRICS.tree_min_width, -1))
         tree = self.dir_ctrl.GetTreeCtrl()
         tree.SetBackgroundColour(wx.Colour(self.theme.card))
@@ -454,6 +477,13 @@ class FileTracker(wx.Frame):
         # `tree.Expand()` 会触发它——那正是要躲开的"程序化事件"。
         tree.Bind(wx.EVT_TREE_KEY_DOWN, self.on_tree_selection_made)
         tree.Bind(wx.EVT_SET_FOCUS, self.on_tree_selection_made)
+        # **填充并展开到上次的目录。**
+        #
+        # `GenericDirCtrl` 是构造时用 `dir=` 一次搞定的；换成自己的树之后
+        # 要显式做这一步。**放在所有 Bind 之后**：填充会触发
+        # `EVT_TREE_ITEM_EXPANDING`（懒加载），早于 Bind 的话
+        # 那些事件没人处理。
+        self.dir_ctrl.populate(expand_path=self.last_directory)
         left_sizer.Add(self.dir_ctrl, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM,
                        METRICS.padding_gap)
         left_panel.SetSizer(left_sizer)
@@ -464,11 +494,11 @@ class FileTracker(wx.Frame):
         # 用卡片底色，表头与列表都画在卡片上。用户要的"卡片式分层
         # （面板底色 + 列表区域是另一层）"就是靠这层容器实现的——
         # 直接给列表设底色是看不出分层的（列表会占满整块 sizer）。
-        right_panel = wx.Panel(splitter)
+        self._right_panel = right_panel = wx.Panel(splitter)
         right_panel.SetBackgroundColour(wx.Colour(self.theme.background))
         right_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        card_panel = wx.Panel(right_panel)
+        self._card_panel = card_panel = wx.Panel(right_panel)
         card_panel.SetBackgroundColour(wx.Colour(self.theme.card))
         card_sizer = wx.BoxSizer(wx.VERTICAL)
 
@@ -797,9 +827,18 @@ class FileTracker(wx.Frame):
                                                 "SysHeader32")
         if native_header:
             win32.set_window_theme(native_header, theme_name)
-        tree_native = win32.find_child_window(handle, "SysTreeView32")
+        # **句柄直接取，不要去找内层的 `SysTreeView32`。**
+        #
+        # 换成 `DirectoryTree` 之后，`dir_ctrl` **本身就是那棵树** ——
+        # 没有"内层控件"可找。实测：继续用
+        # `find_child_window(..., "SysTreeView32")` 会返回 `None`，
+        # 于是行高**一次都没设上**（验证器报「实测 0px」）。
+        tree_native = (self.dir_ctrl.GetHandle()
+                       if getattr(self, "dir_ctrl", None) is not None
+                       else win32.find_child_window(handle, "SysTreeView32"))
         if tree_native:
             win32.set_window_theme(tree_native, theme_name)
+            self._apply_tree_row_height(tree_native)
 
         self._apply_list_spacing()
         self.list_ctrl.Refresh()
@@ -1079,13 +1118,138 @@ class FileTracker(wx.Frame):
                   "hot tracking makes the hover colour theme-dependent, "
                   "and ONECLICKACTIVATE opens on a single click"))
 
-        dpi = dpi_of(self)
-        extra = scale_for_dpi(METRICS.list_item_extra_height, dpi)
-        if not win32.set_item_spacing(handle, -1, extra):
-            self._report_resource_error(L("设置列表行距未生效（LVM_SETITEMSPACING）",
-                                              "Row spacing was not applied (LVM_SETITEMSPACING)"))
-        # 行距变了，竖线要按新行高重画
+        # ── 行高：用一张 1×H 的**空图列表**抬起来 ──
+        #
+        # ## 为什么不是 `LVM_SETITEMSPACING`
+        #
+        # 那个消息在 report（详细信息）视图下**是空操作**。实测
+        # （`tools/probes/probe_row_spacing.py`）：把它从 0 设到 40，
+        # 行高**恒为 39px，纹丝不动**；MSDN 也写明它只对 icon /
+        # small-icon 视图有意义。**所以那个开关从引入起就没生效过**，
+        # 只是当时没有断言量行高。
+        #
+        # ## 现在这条：让"行高"由小图标高度托底
+        #
+        # report 视图的行高 = `max(字号决定的高度, 小图标高 + 1)`。
+        # 挂一张**只有 1 像素宽**的透明空图，就只影响高度、不影响内容。
+        # 实测（`tools/probes/probe_row_height.py`）：H=40 → 行高 41、
+        # H=48 → 行高 49。字号 11pt 时文字高 35px，所以按
+        # `文字高 + extra` 取 H，行高就落在 `文字高 + extra + 1`。
+        #
+        # ## 代价（实测过，见下面 `_measure_path_text_shift` 的注释）
+        #
+        # report 视图会给第 0 列留出图标位，**路径文字会右移几像素**。
+        # 这是这条路的固有代价，不是 bug——README 的「已知限制」不需要提，
+        # 但**改这里的人要知道**。
+        self._apply_row_height()
+
+        # 竖线要按**新的真实行高**重画
         self._draw_column_separators()
+
+    def _apply_tree_row_height(self, tree_native: int) -> None:
+        """把导航窗格的行高设成"文字高 × `row_ratio`"。
+
+        ## 与列表那条**不是一回事**
+
+        列表的 `LVM_SETITEMSPACING` 在 report 视图下是空操作（实测）；
+        树控件的 `TVM_SETITEMHEIGHT` **实测一一对应**：设 20/24/28/32/40，
+        回读就是 20/24/28/32/40（`tools/probes/probe_dialog_fonts.py` 第 ④ 段）。
+
+        ## ⚠️ 它收的是**绝对高度** —— 所以**不要**去读"当前高度"再往上加
+
+        第一版就是那么写的（"自然高 + 固定像素"，并把自然高缓存起来）。
+        **它是错的**：高度一旦被改过，`TVM_GETITEMHEIGHT` 读回来的是
+        **改后的值**，不是自然高。缩字号时我清掉缓存想重算，
+        读回的却是上一步设的 40，于是行高变成 50、**比例从 1.429 漂到 2.000**。
+
+        **正确做法：完全不用管"自然高"，直接从文字高按比例算目标。**
+        字号怎么变，比例都锁死 —— 这也正是用户要的"同一种呼吸感"。
+        """
+        tree = self.dir_ctrl.GetTreeCtrl()
+        dc = wx.ClientDC(tree)
+        dc.SetFont(tree.GetFont())
+        # 用 "Ag" 而不是含中文的串：**高度只由字体度量决定，与字符无关**；
+        # 而带中文的字面量会被"漏掉 L() 的中文字符串"那条门禁拦下
+        # （它不是界面文案，不该走翻译）。
+        text_height = dc.GetTextExtent("Ag")[1]
+        if text_height <= 0:
+            return                      # 量不到就什么都不做，别写坏它
+
+        target = int(round(text_height * METRICS.row_ratio))
+        if not win32.set_tree_item_height(tree_native, target):
+            # **判据是回读**（`set_tree_item_height` 里就是那么判的）：
+            # 这一族消息"送达"与"生效"是两回事。
+            self._report_resource_error(
+                L(f"导航窗格行距没设上（量到 "
+                  f"{win32.get_tree_item_height(tree_native)}px，"
+                  f"期望 {target}px）",
+                  f"Navigation pane row height not applied (measured "
+                  f"{win32.get_tree_item_height(tree_native)}px, "
+                  f"expected {target}px)"))
+
+    def _apply_row_height(self) -> None:
+        """用空图列表把列表行高抬到"文字高 × `row_ratio`"。
+
+        见调用点那段注释：`LVM_SETITEMSPACING` 在 report 视图下无效，
+        这是唯一能在**不改字号**的前提下加高行的办法。
+
+        ## 为什么按**比例**算，不按"文字高 + 固定像素"
+
+        用户指定的验收口径是"**视觉上的间隔比例**和导航窗格同步"，
+        而两个窗格字号不同（列表 11pt、树 9pt），固定像素增量在视觉上
+        并不等价。所以两边共用 :data:`METRICS.row_ratio`：
+
+        ```
+        目标行高 = round(文字高 × row_ratio)
+        ```
+
+        实测：列表 35 × 1.429 ≈ 50px、树 28 × 1.429 ≈ 40px ——
+        正是用户认可的那两个值。
+
+        ## ⚠️ 调用时机决定它有没有用
+
+        行高按**本控件的文字高**算，所以**必须在列表字体设好之后调用**。
+        踩过：`apply_window_theme()` 在 `set_global_font()` **之前**跑
+        （`__init__` 里 227 行 vs 230 行），于是这里量到的是**系统默认字体**
+        的高度（28px），算出 28+10=38 —— 而行高本来就是 39，
+        **图列表小到不起作用，现象是"改了跟没改一样"**。
+
+        所以 `set_global_font` 里设完列表字体之后**要再调一次**。
+        """
+        ctrl = getattr(self, "list_ctrl", None)
+        if ctrl is None:
+            return
+
+        text_height = ctrl.GetTextExtent("Ag").height
+        if text_height <= 0:
+            return
+        # 行高 = max(字号决定的高度, 图列表高 + 1)，所以图列表要比目标矮 1。
+        icon_height = max(int(round(text_height * METRICS.row_ratio)) - 1, 1)
+
+        # **这张位图必须是"全透明"的。**
+        #
+        # 它的**唯一作用是把行撑高**（report 视图的行高 = max(文字高, 小图标高)），
+        # 内容本身不该被看见。而 `wx.Bitmap(1, H)` **创建后内容未定义**
+        # （实测是黑的）——直接 Add 进去，report 视图就会给第 0 列
+        # **每一行画一条 1px 宽的黑竖线**（用户报的"最左边有一条黑线"）。
+        #
+        # 修法：填成一个遮罩色并把它声明为遮罩 ⇒ 整张透明。
+        #
+        # ⚠️ 遮罩色用**洋红 `#FF00FF`**，不是黑色：
+        # 黑色是真实内容里也会出现的颜色，拿它当遮罩会连正文里的黑点一起挖空。
+        # 洋红在界面里不存在，是 Windows 图标遮罩的传统约定。
+        blank = wx.Bitmap(1, icon_height)
+        blank_dc = wx.MemoryDC(blank)
+        blank_dc.SetBackground(wx.Brush(wx.Colour(255, 0, 255)))
+        blank_dc.Clear()
+        blank_dc.SelectObject(wx.NullBitmap)
+
+        # **必须留住引用。** wx 的图列表是引用计数的，`SetImageList` 之后
+        # 本地的 `wx.ImageList` 一旦被 GC，原生那边就指向一块已释放的内存。
+        image_list = wx.ImageList(1, icon_height)
+        image_list.Add(blank, wx.Colour(255, 0, 255))
+        ctrl.SetImageList(image_list, wx.IMAGE_LIST_SMALL)
+        self._row_height_image_list = image_list
 
     def _draw_column_separators(self) -> None:
         """在列表**数据行**里画列与列之间的竖线。
@@ -1345,14 +1509,12 @@ class FileTracker(wx.Frame):
         所以显式 `SetFont` 一遍（见 :meth:`_apply_body_font`）。
         """
         default_font = wx.SystemSettings.GetFont(wx.SYS_DEFAULT_GUI_FONT)
-        body = wx.Font(
-            default_font.GetPointSize() + 1,
-            default_font.GetFamily(),
-            default_font.GetStyle(),
-            wx.FONTWEIGHT_NORMAL,
-            False,
-            default_font.GetFaceName(),
-        )
+        # **正文/按钮/弹窗的字号只有一处定义**（`widgets.body_font`）。
+        #
+        # 以前这段 `+ 1` 是写在这里的，于是弹窗拿不到它——`wx.Dialog` 是独立
+        # 顶层窗口，`SetFont` 传播过不去，回落到系统默认、比按钮小 1pt。
+        # 用户实测看出来了。**不要再把这段算法抄回来。**
+        body = widgets_body_font()
         self.body_font = body
 
         wx.SystemOptions.SetOption("msw.staticbox.optimized-paint", 0)
@@ -1375,6 +1537,33 @@ class FileTracker(wx.Frame):
             )
             self.list_ctrl.SetFont(list_font)
             self.list_ctrl.Refresh()
+            # **设完字体必须重算行高。**
+            #
+            # `_apply_list_spacing` 里已经调过一次，但那时列表还是系统默认字体
+            # （`apply_window_theme` 在 `set_global_font` 之前跑）——
+            # 量到的文字高偏小，图列表就小到抬不动行高。
+            # 现象是"我改了行距，看起来跟没改一样"。
+            self._apply_row_height()
+
+        # 自绘列头：**第三条独立的链**（正文 / 列表 / 列头）。
+        #
+        # 用户要求"访问的路径、频次、访问日期、访问时间这一栏的标题
+        # 统一增大 1pt"——它原来跟的是 body_font（10pt），现在 11pt。
+        #
+        # **必须在 `_apply_body_font()` 之后设**：窗口级 `SetFont` 会向
+        # 已存在的子控件传播，先设会被它覆盖（这个顺序坑踩过一次，
+        # 见 `set_global_font` 的 docstring）。
+        header = getattr(self, "header", None)
+        if header is not None:
+            header.SetFont(wx.Font(
+                default_font.GetPointSize() + METRICS.header_font_point_delta,
+                default_font.GetFamily(),
+                default_font.GetStyle(),
+                wx.FONTWEIGHT_NORMAL,
+                False,
+                default_font.GetFaceName(),
+            ))
+            header.Refresh()
 
         # 自绘控件不受传播影响，显式应用
         for widget in self._painted_widgets():
@@ -1503,8 +1692,17 @@ class FileTracker(wx.Frame):
 
         self.dir_ctrl.Freeze()
         try:
+            # **先试"沿路径展开"这条路。**
+            #
+            # 本树是懒加载的，深层节点在展开之前根本不存在 ——
+            # 只靠下面的 `TreeWalker`（`GenericDirCtrl` 时代写的、
+            # 假设树是 eager 的）会**半路停下**（实测只到 `C:\\Users`）。
+            item = None
+            if hasattr(self.dir_ctrl, "expand_to"):
+                item = self.dir_ctrl.expand_to(folder, select=False)
             walker = TreeWalker(tree)
-            item = walker.find_by_names(names)
+            if item is None:
+                item = walker.find_by_names(names)
             if item is not None and not item.IsOk():
                 item = None
 
@@ -1609,12 +1807,14 @@ class FileTracker(wx.Frame):
 
         审计查出的性能问题：这个方法原来做的是
 
+            self._remember_view()
             self._rows = self._ordered_records()
             self._render_rows()
             self.adjust_column_widths()
 
         而 `sort_list_items` 做的是
 
+            self._remember_view()
             self._rows = ...排序...
             self._render_rows()
             self.adjust_column_widths()
@@ -1633,7 +1833,209 @@ class FileTracker(wx.Frame):
         """
         self.sort_list_items(self.sort_column, reload_from_store=True)
 
+    def _top_visible_path(self) -> str:
+        """最上面那一行对应的路径；列表为空或取不到时返回空串。
+
+        `GetTopItem()` 在 report 视图下返回最上方**可见**行的索引。
+        索引到路径的映射就是 `self._rows` —— 列表是照它建的。
+        """
+        try:
+            index = self.list_ctrl.GetTopItem()
+            if 0 <= index < len(self._rows):
+                return self._rows[index].path
+        except (AttributeError, IndexError):
+            pass
+        return ""
+
+    def _selected_path(self) -> str:
+        """当前选中行对应的路径；没有选中返回空串。"""
+        try:
+            index = self.list_ctrl.GetFirstSelected()
+            if 0 <= index < len(self._rows):
+                return self._rows[index].path
+        except (AttributeError, IndexError):
+            pass
+        return ""
+
+    def _index_of_path(self, path: str) -> int:
+        """路径在新列表里的行号；找不到返回 -1。"""
+        if not path:
+            return -1
+        for index, record in enumerate(self._rows):
+            if record.path == path:
+                return index
+        return -1
+
+    def _remember_view(self) -> None:
+        """**在 `self._rows` 被替换之前**记下视角锚点。
+
+        ## 为什么必须单独一步
+
+        实测调用序：
+
+        ```
+        self._rows = self._ordered_records()   ← 已经是新顺序
+        self._render_rows()                    ← 这里才取锚点就晚了
+        ```
+
+        `_top_visible_path()` 是 `self._rows[旧索引].path` ——
+        **拿旧的视觉行号去查新的记录列表**。顺序一变就锚到别的记录上。
+
+        ⇒ 调用方在改 `self._rows` **之前**调本方法。
+        `_render_rows()` 消费它之后会清掉，不会串到下一次。
+        """
+        # **幂等：已经有锚点就不覆盖。**
+        #
+        # 探针实测（`tools/probes/probe_open_anchor.py`）：
+        # `record_accessed_path` 里**两个分支各记了一次**，而第二次跑的时候
+        # `self._rows` **已经被换掉了** —— `GetFirstSelected()` 还是 89，
+        # 但行号 89 已经指向**另一条记录**，于是把第一次记对的那个覆盖成错的。
+        #
+        # ⇒ 第一次记的**一定**是"改动前"的视角（调用方都写在 `_rows`
+        #   赋值之前）；第二、三次只可能更晚、更不可信。
+        #
+        # **与其去追"到底有几处会多调一次"，不如让"多调"本身无害。**
+        # `_render_rows()` 消费之后会清掉，下一次循环照常重新记。
+        if getattr(self, "_view_anchor", None) is not None:
+            return
+        self._view_anchor = (self._top_visible_path(),
+                             self._selected_path())
+
     def _render_rows(self) -> None:
+        """重建列表，**保持视角与选中**，并尽量**不让用户看到中间过程**。
+
+        ## 三段的分工（这个切分是踩出来的）
+
+        ====================  ============================================
+        段                    为什么在这儿
+        ====================  ============================================
+        取锚点                 必须在 `self._rows` 换掉**之前**
+        `Freeze` + 重建        最重、最容易闪（`DeleteAllItems` + N 次插入）
+        `Thaw` 后：选中 + 回位   **必须解冻后才能做**，见下
+        ====================  ============================================
+
+        ## ⚠️ 回位为什么不能在冻结里
+
+        用户报过："**原本搞好的聚焦和准确选中，这下全乱了**" ——
+        那一版我把整段都包进了 `Freeze`/`Thaw`。
+
+        原因是控件冻结期间：
+
+        * `GetTopItem()` 返回**冻结前的旧值**
+        * `ScrollLines()` **不真正滚动**（滚动状态要等解冻才更新）
+
+        ⇒ 回位那一段**静默失效**：不报错，但什么也没做。
+
+        而"选中 + 回位"只改两个属性、不做重活，**本身不会闪** ——
+        把它们放到解冻之后，既保住了效果，又不影响"隐藏中间过程"。
+
+        **判据**：`Freeze` 里只允许**改内容**，不允许**读写滚动状态**。
+        """
+        anchor, selected = getattr(self, "_view_anchor", None) or (
+            self._top_visible_path(), self._selected_path())
+        self._view_anchor = None
+
+        # **只冻结"重建"这一段。**
+        # `try/finally` 是必须的：`Thaw()` 漏掉的话控件会**永久冻结**，
+        # 那比闪烁严重得多。
+        self.list_ctrl.Freeze()
+        try:
+            self._render_rows_now()
+        finally:
+            self.list_ctrl.Thaw()
+
+        # **解冻之后**才恢复选中与视角 —— 见 docstring 里那段说明。
+        # **顺序有讲究**：先恢复选中，再恢复视角。
+        # 反过来做的话，`EnsureVisible(选中行)` 可能又把视角拉走。
+        selected_index = self._index_of_path(selected)
+        if selected_index >= 0:
+            # **先全清，再选。**
+            #
+            # `wx.ListCtrl.Select(i)` 只"把 i 也设为选中"，
+            # **不清掉别的**。重建之后原生控件留着陈旧的选中（通常是第 0 行），
+            # 于是用户看到"选中跳到了很远的另一条"。
+            #
+            # 全清是 O(行数)，但只在重建后跑一次 —— 与 `InsertItem`
+            # （每行一次）相比可以忽略。
+            total = self.list_ctrl.GetItemCount()
+            for index in range(total):
+                if index != selected_index:
+                    self.list_ctrl.Select(index, False)
+            # **用 `SetItemState` 一次设好"选中 + 焦点"，不要用 `Focus()`。**
+            #
+            # ## 探针实测：`Focus()` 会把视角滚走
+            #
+            # `tools/probes/probe_scroll_anchor.py` 逐步量过：
+            #
+            # ```
+            # ① 重建之后          top=0    sel=-1
+            # ② 全清之后          top=0    sel=-1
+            # ③ Focus 之后        top=262  sel=285   ← 视角被挪走 262 行
+            # ④ ScrollLines(-2)   top=260  sel=285   ← 又拉回来
+            # ```
+            #
+            # `wx.ListCtrl.Focus(i)` 会**把第 i 项滚动到可见**。而"选中项"
+            # （用户双击的那条）与"视角锚点"（他看到的顶行）本来就是
+            # **两个不同的位置** —— 于是列表先跳到选中项、再被拉回来，
+            # 用户看到一次明显的跳动（他说的"**聚焦偏移加大**"）。
+            #
+            # `SetItemState` 直接写项状态，**不触发 ensure-visible**。
+            # 焦点仍然要设 —— 它决定**方向键从哪儿继续**，
+            # 只是不能用 `Focus()` 那个会滚动的接口去设。
+            self.list_ctrl.SetItemState(
+                selected_index,
+                wx.LIST_STATE_SELECTED | wx.LIST_STATE_FOCUSED,
+                wx.LIST_STATE_SELECTED | wx.LIST_STATE_FOCUSED)
+        # **精确滚回原位，不要用 `EnsureVisible`。**
+        #
+        # `EnsureVisible` 是"保证可见"（最小滚动）：锚点落在视野**下方**时，
+        # 它只滚到锚点**刚从底边露出来**为止 —— 用户看到的就是"跳了一下"。
+        #
+        # 用户要的原话："**它的位置是完全不动的**。"
+        # 所以直接算差值滚回去：`delta = 锚点行号 − 当前顶部行号`。
+        # **顺序没变时 delta == 0，一行都不滚** —— 那正是理想效果。
+        anchor_index = self._index_of_path(anchor)
+        if anchor_index >= 0:
+            try:
+                delta = anchor_index - self.list_ctrl.GetTopItem()
+                if delta:
+                    self.list_ctrl.ScrollLines(delta)
+            except (AttributeError, IndexError):
+                # 取不到顶部行号就退回"保证可见"，总比跳回顶部好
+                self.list_ctrl.EnsureVisible(anchor_index)
+
+
+
+    def _render_rows_body(self) -> None:
+        """重建列表、恢复选中、回位 —— **不要在未冻结时调用它**。
+
+        ## 用户报的现象
+
+        "双击打开一条路径之后……记录窗格**又回到最开头了**。
+        这是因为程序刷新时，会把用户所在的视角一并刷新。"
+
+        **重排本身是对的**（频次和时间确实变了），问题在于重建之后
+        视角被重置。翻到下半页双击一条，回来就跳回顶部 —— 很难用。
+
+        ## 怎么做到"刷新前后不要有太大变化"
+
+        1. 重建**前**记下最上面那一行的**路径**（不是行号 —— 行号会变）
+        2. 重建**后**按路径找到它的新行号
+        3. `EnsureVisible()` —— **它只做最小滚动**：
+           那一行还在视野里就**一动不动**；被排出去了才滚到刚好可见
+
+        所以用户看到的是"列表内容更新了，但我的位置没变"，
+        而不是"页面跳回顶部"。
+
+        选中行也一并保住 —— 用户刚双击打开的那条不该失去高亮。
+        """
+        # 优先用调用方**提前**记下的锚点（那才是"改动之前"的视角）；
+        # 没提前记就现取 —— 那种情况下至少不比什么都不做强。
+        anchor, selected = getattr(self, "_view_anchor", None) or (
+            self._top_visible_path(), self._selected_path())
+        self._view_anchor = None
+        self._render_rows_now()
+    def _render_rows_now(self) -> None:
         """把 :attr:`_rows` 画到列表上。
 
         ``_rows`` 是界面里的**真相来源**：``wx.ListCtrl`` 按行号取值，
@@ -1940,6 +2342,7 @@ class FileTracker(wx.Frame):
         removed_a_row = self.store.remove(path)
         if path in self.pinned_paths:
             self.pinned_paths.remove(path)
+        self._remember_view()
         self._rows = [r for r in self._rows if r.path != path]
 
         if not removed_a_row and index == -1:
@@ -2102,6 +2505,8 @@ class FileTracker(wx.Frame):
         排序在 Python 侧完成、然后整体重画：``DataViewListCtrl`` 没有
         "交换两行"的接口，而记录量级是几十到几百条，重建比增量维护简单可靠得多。
         """
+        # **在动  之前**记下视角锚点（见 ）。
+        self._remember_view()
         from datetime import datetime
 
         if reload_from_store:
@@ -2127,6 +2532,7 @@ class FileTracker(wx.Frame):
             unpinned.sort(key=lambda r: r.access_count, reverse=self.sort_reverse)
 
         pinned.sort(key=lambda r: self.pinned_paths.index(r.path))
+        self._remember_view()
         self._rows = pinned + unpinned
         self._render_rows()
         # **不在这里再调 `adjust_column_widths()`。**
@@ -2562,10 +2968,14 @@ class FileTracker(wx.Frame):
         系统主题可以在程序运行期间被改掉；**不自绘的控件会自动跟随，
         自绘的不会**——这正是"改了系统主题但按钮还是旧配色"的来源。
         """
-        new_theme = theme_from_system()
-        if new_theme != self.theme:
-            self.theme = new_theme
-            self._retheme()
+        # **只有"跟随系统"才重读注册表。**
+        # 用户明确选了浅色/深色时，窗口一激活就被系统主题覆盖回去，
+        # 是那种"我明明选了却不生效"的缺陷。
+        if self.config.get_theme() in (None, THEME_SYSTEM):
+            new_theme = theme_from_system()
+            if new_theme != self.theme:
+                self.theme = new_theme
+                self._retheme()
         self.Refresh()
         for button in (self.open_btn, self.clear_btn, self.path_bar):
             if hasattr(button, "Refresh"):
@@ -2574,13 +2984,35 @@ class FileTracker(wx.Frame):
         event.Skip()
 
     def _retheme(self) -> None:
-        """系统主题变了之后重新上色。
+        """换主题之后重新上色（系统主题变了，或用户在设置里切了主题）。
 
         **自绘控件不会自己跟随系统主题**——这正是"改了系统主题但按钮还是
         旧配色"的来源。所以这里显式地把新配色推给每一个自绘控件，
         并重画列表（行底色是按当前配色算出来的）。
+
+        ## ⚠️ 容器也要重新上色，否则"面板部分不跟着反色"
+
+        用户报（原话）："切换主题后，**面板部分不会立即正确反色**。
+        老问题了，关闭程序再启动才正确反色。"
+
+        **根因**：`InitUI` 里的 `panel` / `left_panel` / `right_panel` /
+        `card_panel` 原来都是**局部变量** —— 创建时 `SetBackgroundColour`
+        上过一次色，之后**再也没有任何代码够得到它们**。
+        主题一变，窗口和控件都换了色，唯独这几层容器还是旧的，
+        于是"左边一整块不跟着反色"。
+
+        `wx.SplitterWindow` 的 sash 是 wx 自己画的（取系统色），
+        所以它本来就不该在这里处理——本项目已经把它 `SetSashInvisible`
+        并改用自绘的 `BorderLine`（见 `InitUI` 与 `_position_pane_border`）。
+
+        **判据**：这一组必须有 `self.` 句柄才可能被重上色。
+        新增容器时**照着这里加一行**，否则同一个缺陷会再长出来一次。
         """
         self.SetBackgroundColour(wx.Colour(self.theme.background))
+        for holder in (self._shell_panel, self._left_panel,
+                       self._right_panel, self.splitter):
+            holder.SetBackgroundColour(wx.Colour(self.theme.background))
+        self._card_panel.SetBackgroundColour(wx.Colour(self.theme.card))
         for child in (self.open_btn, self.clear_btn):
             child.apply_theme(self.theme)
         self.path_bar.apply_theme(self.theme)
@@ -2590,6 +3022,68 @@ class FileTracker(wx.Frame):
         # apply_window_theme 里已经重摆过分隔线，但 Layout 可能又改了尺寸，
         # 所以这里再摆一次（幂等，代价是两次 SetSize）
         self._position_pane_border()
+
+    def _repaint_all(self, window=None) -> None:
+        """**递归重画**每一扇子窗口。
+
+        ## 为什么需要它
+
+        用户报（截图）："每次点击更换主题后，**主界面的面板部分
+        不能及时刷新**。"
+
+        `_retheme()` 已经改对了各层容器的**底色**，问题在**没有让它们重画**：
+        此刻模态设置窗口盖在上面，主窗口的重绘请求被压后，
+        不显式 `Update()` 就会看到"改了一半"的样子。
+
+        **为什么递归**：漏掉哪一个，哪一个就留旧色 ——
+        "刷新不完整"就是这么来的。递归遍历不会漏，
+        代价只是几次 `Refresh()`（它们本身会被合并成一次重绘）。
+        """
+        target = window if window is not None else self
+        target.Refresh()
+        for child in target.GetChildren():
+            self._repaint_all(child)
+        target.Update()
+
+    def _preview_theme(self, dialog, preference: str) -> None:
+        """设置窗口里点了主题按钮 —— **立刻换**（用户要求"所见即所得"）。
+
+        两件事都要做，缺一不可：
+
+        1. **主窗口**换主题并重上色（`_retheme` 会把新配色推给每个自绘控件）
+        2. **设置窗口自己**也要换 —— 只换主窗口的话，他会看到
+           "外面暗了、设置窗口还是亮的"，那反而不像生效了。
+        """
+        self.theme = theme_from_preference(preference)
+        self._retheme()
+        dialog.apply_theme(self.theme)
+        # **显式重画整扇窗**（含每一层子窗口）——
+        # 否则模态弹窗压着，主窗口只刷一部分（用户报的"刷新不及时"）。
+        self._repaint_all()
+        dialog.Refresh()
+        dialog.Update()
+
+    def _preview_sort(self, key: str, reverse: bool) -> None:
+        """设置窗口里点了排序按钮 —— **立刻重排列表**。
+
+        用户报："排序方式、排序方向**没有及时生效**。"
+        主题与语言都接了预览回调，**只有排序漏了**。
+
+        排序与那两者不同：它不改配色、也不改文案，只改**列表内容的顺序**，
+        所以调 `apply_sort` 就够，不必重上色。
+        """
+        self.apply_sort(_column_of(key), reverse=reverse)
+        self._repaint_all()
+
+    def _preview_language(self, dialog, preference: str) -> None:
+        """设置窗口里点了语言按钮 —— **立刻换**。
+
+        `apply_language` 必须在 `retranslate` 之前：后者每一次 `L(...)`
+        读的都是它刚设下的那个值（与确认路径同一条纪律）。
+        """
+        apply_language(preference)
+        self.retranslate()
+        dialog.retranslate()
 
     def on_settings(self, event) -> None:
         """打开设置窗口；用户点确定且语言变了就**立刻**生效并持久化。
@@ -2604,9 +3098,20 @@ class FileTracker(wx.Frame):
         # 当前生效值：配置里存过就用存的，没存过就是系统检测出来的那个。
         before = self.config.get_language() or (
             PREFERENCE_CHINESE if is_chinese() else PREFERENCE_ENGLISH)
-        dialog = SettingsDialog(self, self.theme, before,
-                               sort_key=self.sort_key,
-                               sort_reverse=self.sort_reverse)
+        theme_before = self.config.get_theme() or THEME_SYSTEM
+        # 排序的"打开设置之前"状态 —— 取消时要还原
+        sort_before = (self.sort_key, self.sort_reverse)
+        dialog = SettingsDialog(
+            self, self.theme, before,
+            sort_key=self.sort_key,
+            sort_reverse=self.sort_reverse,
+            theme_preference=theme_before,
+            # **点了就生效**（用户要求"所见即所得"）。
+            # 用 lambda 延迟取 `dialog` —— 传的时候它还没建好。
+            on_theme_preview=lambda value: self._preview_theme(dialog, value),
+            on_language_preview=lambda value: self._preview_language(dialog, value),
+            on_sort_preview=lambda key, rev: self._preview_sort(key, rev),
+        )
         # 把各列"上次用的方向"灌进去，这样在窗口里换列时能带出那一列自己的
         # 方向，与点表头的行为一致（见 `SettingsDialog._choose_sort`）。
         for spec in SORT_SPECS:
@@ -2615,26 +3120,59 @@ class FileTracker(wx.Frame):
                 dialog._sort_directions[spec.key] = remembered
         try:
             if dialog.ShowModal() != wx.ID_YES:
+                # **取消 = 什么都没发生。**
+                #
+                # 预览已经改过界面了，不还原的话：界面停在他最后点的那个，
+                # 而配置里还是旧的 —— 重启一次又跳回去，
+                # 是最难查的那类不一致。
+                if self.config.get_theme() != theme_before \
+                        or self.theme != theme_from_preference(theme_before):
+                    self.theme = theme_from_preference(theme_before)
+                    self._retheme()
+                if self.config.get_language() != before:
+                    apply_language(before)
+                    self.retranslate()
+                # **排序也要还原** —— 预览已经重排过列表了
+                if (self.sort_key, self.sort_reverse) != sort_before:
+                    self.apply_sort(_column_of(sort_before[0]),
+                                    reverse=sort_before[1])
+                    self._repaint_all()
                 return
             chosen = dialog.selected_preference()
             sort_key, sort_reverse = dialog.selected_sort()
+            theme_chosen = dialog.selected_theme()
         finally:
             dialog.Destroy()
 
-        language_changed = chosen != before
+        # **确定：只落盘，不重新应用。**
+        #
+        # 用户报："选好之后点确定，导航窗格、记录窗格以及整个界面都会
+        # **再刷新一次**……因为设置里已经及时生效了，所以我认为
+        # 点击确定**不应该在用户面前再刷新一次**。"
+        #
+        # 根因是这里原来**把每一项又应用了一遍**，而判据
+        # （`language_changed` / `theme_chosen != theme_before`）
+        # 比的是"打开设置之前"的值 —— 预览早就改过界面了，
+        # 所以条件必然成立，于是全部重跑一次，用户就看到界面抖了一下。
+        #
+        # ⇒ 落盘归落盘；界面**只在真的不一致时**才动。
         self.config.set_language(chosen)
-        if language_changed:
+        self.config.set_theme(theme_chosen)
+
+        # **自愈**：正常路径下这几条都是空操作（预览已经改好了），
+        # 但万一将来某条预览没接上，界面也不会停在旧值。
+        # 比"无条件应用"好（那会抖），也比"完全不应用"稳（那会留旧值）。
+        if is_chinese() != (chosen == PREFERENCE_CHINESE):
             # `apply_language` 必须在 `retranslate` 之前——
             # retranslate 里每一次 `L(...)` 读的都是它刚设下的那个值。
             apply_language(chosen)
-
-        # **排序**交给 `apply_sort`：它自己写配置（见 `_remember_sort`）
-        # 并按新顺序重排列表。这里不重画整个界面——
-        # 排序只影响列表内容，改语言才需要动全部文案。
-        self.apply_sort(_column_of(sort_key), reverse=sort_reverse)
-
-        if language_changed:
             self.retranslate()
+        if self.theme != theme_from_preference(theme_chosen):
+            self.theme = theme_from_preference(theme_chosen)
+            self._retheme()
+        if (self.sort_key, self.sort_reverse) != (sort_key, sort_reverse):
+            # 排序交给 `apply_sort`：它自己写配置（见 `_remember_sort`）
+            self.apply_sort(_column_of(sort_key), reverse=sort_reverse)
         try:
             self.config.save()
         except OSError as error:

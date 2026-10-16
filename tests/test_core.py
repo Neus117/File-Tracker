@@ -176,8 +176,35 @@ def test_split_path_chain_of_empty_input():
 # --------------------------------------------------------------------------
 
 def test_scaled_window_size_is_15_percent_larger():
-    """改动 ①：1280×720 增大 15% → 1472×828。"""
-    assert core.scaled_window_size((1280, 720), 1.15) == (1472, 828)
+    """改动 ①：1280×720 增大 15% → 1472×828。
+
+    **必须显式传 `extra_height=1.0`** —— 只测「等比放大」这一条路径。
+    默认值里还叠着「只加高度」的那一项，见下一个测试。
+    """
+    assert core.scaled_window_size((1280, 720), 1.15, 1.0) == (1472, 828)
+
+
+def test_scaled_window_size_adds_height_only():
+    """改动 ⑬：**只加高度，宽度不动**。
+
+    用户要求「初始窗口高度适当增加」，同时「其余地方的文字和排版不动」——
+    所以宽度必须与加高之前**一模一样**。
+    """
+    plain = core.scaled_window_size((1280, 720), core.WINDOW_SCALE, 1.0)
+    taller = core.scaled_window_size((1280, 720), core.WINDOW_SCALE,
+                                     core.WINDOW_EXTRA_HEIGHT)
+    assert plain == (1693, 952), "加高之前的基准（累计 32.25%）"
+    assert taller[0] == plain[0], "宽度不应随高度调整而变"
+    assert taller[1] == 1047, "高度 +10% → 1047"
+    assert taller[1] > plain[1]
+
+
+def test_window_extra_height_is_a_modest_step():
+    """加高幅度要「循序渐进」——用户取向第 20.5 条：**一次只动一档**。
+
+    守住上界，避免以后有人顺手把它调到 1.5 之类。
+    """
+    assert 1.0 < core.WINDOW_EXTRA_HEIGHT <= 1.15
 
 
 def test_fit_window_size_keeps_preferred_when_it_fits():

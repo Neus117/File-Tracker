@@ -19,12 +19,19 @@ import tempfile
 
 from .core import app_data_path, sort_keys
 from .lang import PREFERENCE_CHINESE, PREFERENCE_ENGLISH
+from .theme import THEME_CHOICES
 
 DEFAULT_DIRECTORY = "C:\\"
 
 #: 语言键的合法取值，**从 `lang` 取**——不在这里另抄一份字面量，
 #: 否则两边迟早不一致（那正是本项目修过的"两份实现"类缺陷）。
 LANGUAGES = (PREFERENCE_CHINESE, PREFERENCE_ENGLISH)
+
+#: 主题键的合法取值，**从 `theme` 取**——同上，不另抄一份。
+#:
+#: `theme` 模块是 wx-free 的（只有 dataclass），所以这个导入不会
+#: 把 wx 拖进 `config`（有测试守着 `config` 不依赖 wx）。
+THEMES = THEME_CHOICES
 
 
 def default_config_path() -> str:
@@ -132,6 +139,23 @@ class Config:
         """写入语言偏好。**只接受已知取值**，其余忽略。"""
         if preference in LANGUAGES:
             self._data["language"] = preference
+
+    def get_theme(self) -> str | None:
+        """主题偏好：``"system"`` / ``"light"`` / ``"dark"``；没设过返回 ``None``。
+
+        ``None`` 与 ``"system"`` 行为相同（都跟随系统）。保留区分是因为
+        设置窗口要能显示"当前选中的是哪一项"——没设过时高亮"跟随系统"。
+
+        认不出的值一律当成 ``None``。**与语言那边同一条纪律**：
+        配置文件是可以手改的，写错一个字符串不该让界面崩溃或空白。
+        """
+        value = self._data.get("theme")
+        return str(value) if value in THEMES else None
+
+    def set_theme(self, preference: str) -> None:
+        """写入主题偏好。**只接受已知取值**，其余忽略。"""
+        if preference in THEMES:
+            self._data["theme"] = preference
 
     def get_sort_column(self) -> str | None:
         """上次用的排序列标识；没设过或认不出返回 ``None``（用默认）。

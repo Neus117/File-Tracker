@@ -163,6 +163,18 @@ a = Analysis(  # noqa: F821
         # ⚠️ **每加一项都要跑 GUI 回归**（`tools/verify_gui.py`）——
         #    "包打得出来"与"界面能用"是两件事，本项目为此栽过跟头。
         "tarfile", "hashlib", "email",
+        # === wx 的 html 子模块（0.39 MB = 产物的 2.9%）===
+        #
+        # `probe_bundle_size.py` 实测：
+        #   wxmsw32u_html_vc140_x64.dll  0.22 MB
+        #   _html.cp311-win_amd64.pyd    0.17 MB
+        #
+        # 源码里**一处都没有**用到（grep `wx.html` / `HtmlWindow` /
+        # `wx.richtext` / `wx.xrc` 全为空）—— 它是 **PyInstaller 的
+        # wx hook 默认打进来**的，不是我们引的。
+        #
+        # 本项目不渲染任何 HTML，排掉没有功能损失。
+        "wx.html", "wx.html2", "wx.richtext", "wx.xrc",
     ],
     noarchive=False,
     optimize=0,

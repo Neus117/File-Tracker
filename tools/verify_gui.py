@@ -36,6 +36,7 @@ import wx  # noqa: E402
 import file_tracker.app as _app_module  # noqa: E402
 from file_tracker import core as _core  # noqa: E402
 from file_tracker import core, win32  # noqa: E402
+from file_tracker import theme as _theme  # noqa: E402
 from file_tracker import widgets as _widgets  # noqa: E402
 from file_tracker.store import PathStore  # noqa: E402
 
@@ -524,21 +525,45 @@ def main() -> int:
                 "（踩过：只比'最外一圈四条边'时，整块偏移半像素也能通过）",
             )
             # 最外那一列必须**满覆盖**——半覆盖就是"裁断感"的来源
-            coverage_span = max(card_red - min(min(lefts), min(rights)), 1)
-            left_cov = (card_red - lefts[0]) / coverage_span
-            right_cov = (card_red - rights[0]) / coverage_span
+            #
+            # ⚠️ 判据必须**与主题无关**，而且**不能拿"按钮内部"当基准**。
+            # 两次都踩了：
+            #
+            # ① 原式 `(card_red - lefts[0]) / (card_red - min(...))`
+            #    **假定"按钮比卡片暗"**。浅色下成立；深色下 accent 比卡片亮
+            #    （卡片 36、accent 116），减法变负 → 报出 -80.00。
+            # ② 改成拿 `lefts[-1]`（内部）当基准后又踩一次：
+            #    **secondary 按钮的填充就是卡片色**（浅色下都是 255），
+            #    于是 span 塌成 1 → 报出 -34.00。
+            #
+            # 真正要守的是：**外列应当是偏离底色最远的那个样本**
+            # （即满强度的那一像素），而不是"内部同色"。
+            # 这样无论按钮比底色深还是浅、填充是否与底色相同，都成立。
+            def _cov(samples) -> float:
+                refer = card_red
+                outer = abs(refer - samples[0])
+                peak = max(abs(refer - s) for s in samples)
+                return outer / max(peak, 1)
+
+            left_cov = _cov(lefts)
+            right_cov = _cov(rights)
             check(
                 f"按钮最外列满覆盖（{variant_label}）",
                 left_cov > 0.95 and right_cov > 0.95,
                 f"左覆盖 = {left_cov:.2f}，右覆盖 = {right_cov:.2f}"
+                f"（左 {lefts}，底色 {card_red}）"
                 "（1.00 = 满覆盖；0.5 会看出'边缘淡了一层'）",
             )
             probe_btn.Destroy()
         # 阳性对照：secondary 的描边确实画了（不然"对称"地全等于底色也算通过）
+        #
+        # 用 `abs()` —— 深色下按钮比底色**亮**，"比底色深"这个说法不成立。
+        # 要守的是"**与底色可区分**"，不是"更深"。
         check(
-            "阳性对照：有描边的按钮最外列明显比底色深",
-            lefts[0] < card_red - 4,
-            f"最外列 = {lefts[0]}，底色 = {card_red}",
+            "阳性对照：有描边的按钮最外列与底色可区分",
+            abs(lefts[0] - card_red) > 4,
+            f"最外列 = {lefts[0]}，底色 = {card_red}，"
+            f"差 = {abs(lefts[0] - card_red)}",
         )
 
         # ==============================================================
@@ -616,10 +641,122 @@ def main() -> int:
         )
         body_pt = frame.body_font.GetPointSize()
         hint_pt = pb.text_ctrl.GetFont().GetPointSize()
+        # .. note::
+        #
+        #     这条断言**一度改过口径又改回来**。经过是：
+        #     用户先说"将**导航窗格**内的文字（包括顶栏标题）缩小 1pt"，
+        #     于是我把它改成判"正文 + 偏移"；**随后用户更正，原意是
+        #     "记录窗格"**，导航窗格那处撤回 —— 所以这里恢复原判据。
+        #
+        #     **留下这段是因为它值一条教训**：用户的措辞与代码结构对不上时
+        #     （"导航窗格"里并没有"记录窗格"才有的列头标题），
+        #     应当**先问再改**，而不是照着字面执行。
         check(
             "输入框字号 = 正文字号（不再小一号）",
             hint_pt == body_pt,
             f"输入框 {hint_pt}pt，正文 {body_pt}pt",
+        )
+
+        # ── 换主题后**每一层容器**都要跟着反色 ──
+        #
+        # 用户报："切换主题后，**面板部分不会立即正确反色**。
+        # 老问题了，关闭程序再启动才正确反色。"
+        #
+        # 根因：`panel` / `left_panel` / `right_panel` / `card_panel`
+        # 原来是 `InitUI` 的**局部变量**，创建时上过一次色之后
+        # 再也没有代码够得到它们 —— 主题一变就只有它们还是旧的。
+        #
+        # **判据是回读每个容器的实际底色**，而不是"我调了 _retheme"。
+        def _rgb(widget) -> tuple:
+            c = widget.GetBackgroundColour()
+            return (c.Red(), c.Green(), c.Blue())
+
+        def _want(hex_colour: str) -> tuple:
+            return (int(hex_colour[1:3], 16),
+                    int(hex_colour[3:5], 16),
+                    int(hex_colour[5:7], 16))
+
+        theme_now = frame.theme
+        containers = [
+            ("外壳面板", frame._shell_panel, theme_now.background),
+            ("左面板（导航）", frame._left_panel, theme_now.background),
+            ("右面板", frame._right_panel, theme_now.background),
+            ("卡片面板", frame._card_panel, theme_now.card),
+            ("目录树", frame.dir_ctrl.GetTreeCtrl(), theme_now.card),
+            ("列表", frame.list_ctrl, theme_now.card),
+        ]
+        wrong = [f"{name}={_rgb(w)} 应={_want(c)}"
+                 for name, w, c in containers if _rgb(w) != _want(c)]
+        check(
+            "每一层容器都拿到了当前主题的底色（回读，不是设了就算）",
+            not wrong,
+            f"当前主题 card={theme_now.card} background={theme_now.background}；"
+            + ("全部一致" if not wrong else f"不一致：{wrong}"),
+        )
+        check(
+            "阳性对照：至少有两个容器**底色不同**（分层真的存在）",
+            _rgb(frame._card_panel) != _rgb(frame._left_panel),
+            f"卡片 {_rgb(frame._card_panel)} ≠ "
+            f"左面板 {_rgb(frame._left_panel)}",
+        )
+
+        # ── 输入框框线的可见度（用户："不然用户很难注意到它"）──
+        #
+        # 判据**不是**"我把颜色改深了"，而是**量出来的对比度**：
+        # 框线要在面板底上看得见，且比普通 `border` 明显更深。
+        def _rel_lum(hex_colour: str) -> float:
+            rgb = [int(hex_colour.lstrip("#")[i:i + 2], 16) / 255
+                   for i in (0, 2, 4)]
+            chan = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+                    for c in rgb]
+            return 0.2126 * chan[0] + 0.7152 * chan[1] + 0.0722 * chan[2]
+
+        def _contrast(a: str, b: str) -> float:
+            la, lb = _rel_lum(a), _rel_lum(b)
+            hi, lo = max(la, lb), min(la, lb)
+            return (hi + 0.05) / (lo + 0.05)
+
+        light = _theme.Theme.light()
+        field_c = _contrast(light.field_border, light.background)
+        plain_c = _contrast(light.border, light.background)
+        check(
+            "浅色主题：输入框框线比普通 border 更深（对比度更高）",
+            field_c > plain_c,
+            f"框线 {light.field_border} 对比度 {field_c:.2f} > "
+            f"border {light.border} 对比度 {plain_c:.2f}",
+        )
+        check(
+            "浅色主题：框线对比度 ≥ 1.65（border 原始只有 1.21，太难看见）",
+            field_c >= 1.65,
+            f"框线 {light.field_border} vs 面板 {light.background} = {field_c:.2f}",
+        )
+
+        # 深色主题：**用户第二轮要求"也加一级对比度"**，为了两个主题视觉统一。
+        # ⚠️ 深色下"加对比度"是**提亮**（背景是暗的），方向与浅色相反。
+        dark = _theme.Theme.dark()
+        dark_field_c = _contrast(dark.field_border, dark.background)
+        dark_plain_c = _contrast(dark.border, dark.background)
+        check(
+            "深色主题：输入框框线比普通 border **更亮**（对比度更高）",
+            dark_field_c > dark_plain_c,
+            f"框线 {dark.field_border} 对比度 {dark_field_c:.2f} > "
+            f"border {dark.border} 对比度 {dark_plain_c:.2f}",
+        )
+        check(
+            "深色主题：框线对比度 ≥ 1.9（border 原始只有 1.55）",
+            dark_field_c >= 1.9,
+            f"框线 {dark.field_border} vs 面板 {dark.background} = {dark_field_c:.2f}",
+        )
+
+        # **阳性对照：两个主题的"一级"要差不多大** —— 用户的原话是
+        # "为了视觉上效果统一"，所以不能一边加 30%、另一边加 100%。
+        light_step = field_c / plain_c
+        dark_step = dark_field_c / dark_plain_c
+        check(
+            "阳性对照：两个主题「加一级」的倍率接近（差 < 0.25）",
+            abs(light_step - dark_step) < 0.25,
+            f"浅色 {light_step:.2f}×（{plain_c:.2f}→{field_c:.2f}）｜"
+            f"深色 {dark_step:.2f}×（{dark_plain_c:.2f}→{dark_field_c:.2f}）",
         )
         # 用户反馈"输入框太矮"——确认它有个明确的高度，而不是由单行文本撑
         check(
@@ -870,6 +1007,225 @@ def main() -> int:
             "正文字号跟随系统 UI 字号（不写死像素）",
             body == system_pt + 1,
             f"正文 {body}pt，系统 UI {system_pt}pt",
+        )
+
+        # ==============================================================
+        print()
+        print("=== 改动 ⑬：记录窗格字号与行距（用户要求，含一次更正）===")
+        # ==============================================================
+        # 用户原话：「**只**将记录窗格中的条目字号增大 1pt，上下间距（行距）
+        # 适当增加。**其余地方的文字和排版不动**」。
+        #
+        # 所以这一组有三条：① 列表真的大了；② **阳性对照**：正文没跟着大
+        # （证明我只动了列表那条链）；③ 行高是**几何量**，不是"设了就算"。
+        list_pt = frame.list_ctrl.GetFont().GetPointSize()
+        delta = _theme.METRICS.list_font_point_delta
+        check(
+            f"记录窗格条目字号 = 系统 UI + 偏移（9 + {delta} = {system_pt + delta}pt）",
+            list_pt == system_pt + delta,
+            f"列表 {list_pt}pt = 系统 UI {system_pt}pt + 偏移 {delta}",
+        )
+        check(
+            "阳性对照：正文仍是「系统 + 1」，没被列表那条链牵动",
+            body == system_pt + 1,
+            f"正文 {body}pt（应仍为 {system_pt + 1}pt，即只 +1）",
+        )
+
+        # 自绘列头的字号：**第三条独立的链**。
+        # 用户要求"访问的路径、频次、访问日期、访问时间这一栏的标题统一增大 1pt"。
+        header_pt = frame.header.GetFont().GetPointSize()
+        h_delta = _theme.METRICS.header_font_point_delta
+        check(
+            f"列头标题字号 = 系统 UI + 偏移（9 + {h_delta} = {system_pt + h_delta}pt）",
+            header_pt == system_pt + h_delta,
+            f"列头 {header_pt}pt = 系统 UI {system_pt}pt + 偏移 {h_delta}",
+        )
+        check(
+            "列头与数据行**同号**（不再一大一小）",
+            header_pt == list_pt,
+            f"列头 {header_pt}pt，数据行 {list_pt}pt",
+        )
+        check(
+            "阳性对照：列头没有连坐按钮（仍为「系统 + 1」）",
+            frame.open_btn.GetFont().GetPointSize() == system_pt + 1,
+            f"「打开」按钮 {frame.open_btn.GetFont().GetPointSize()}pt",
+        )
+
+        # ==============================================================
+        print()
+        print("=== 改动 ⑭：弹窗字号与按钮一致 + 导航窗格行距 ===")
+        # ==============================================================
+        # 用户要求：设置窗口、所有提示弹窗（含标题栏）的字号，
+        # 与「打开」「清空」按钮不一致的，统一成按钮那一套。
+        #
+        # **原来弹窗整整小 1pt**：`wx.Dialog` 是独立顶层窗口，
+        # frame 的 `SetFont` 传播过不去，于是回落到系统默认 9pt。
+        button_pt = frame.open_btn.GetFont().GetPointSize()
+
+        def dialog_fonts(dialog) -> tuple[list[str], list[str]]:
+            """返回 (字号不对的控件名, 见到的全部字号)。"""
+            bad, seen = [], []
+            stack = [dialog]
+            while stack:
+                w = stack.pop()
+                pt = w.GetFont().GetPointSize()
+                seen.append(f"{type(w).__name__}={pt}")
+                if pt != button_pt:
+                    label = ""
+                    try:
+                        label = w.GetLabel()
+                    except Exception:
+                        pass
+                    bad.append(f"{type(w).__name__}{label}={pt}")
+                stack.extend(w.GetChildren())
+            return bad, seen
+
+        settings = _widgets.SettingsDialog(
+            frame, frame.theme,
+            __import__("file_tracker.lang",
+                       fromlist=["lang"]).PREFERENCE_CHINESE)
+        bad_s, seen_s = dialog_fonts(settings)
+        check(
+            "设置窗口的每个控件字号都 = 「打开」按钮",
+            not bad_s,
+            f"按钮 {button_pt}pt；不一致 {len(bad_s)} 个"
+            + (f"：{bad_s[:4]}" if bad_s else f"（共查 {len(seen_s)} 个控件）"),
+        )
+        settings.Destroy()
+
+        note = _widgets.ThemedDialog(frame, frame.theme,
+                                     "路径已失效，确定要删除吗？",
+                                     title="确认删除")
+        bad_n, seen_n = dialog_fonts(note)
+        check(
+            "提示弹窗的每个控件字号都 = 「打开」按钮",
+            not bad_n,
+            f"按钮 {button_pt}pt；不一致 {len(bad_n)} 个"
+            + (f"：{bad_n[:4]}" if bad_n else f"（共查 {len(seen_n)} 个控件）"),
+        )
+        note.Destroy()
+
+        # **阳性对照**：确认上一条不是"因为按钮也 9pt 才通过"。
+        check(
+            "阳性对照：按钮字号**不是**系统默认（9pt），所以上面两条有意义",
+            button_pt != system_pt,
+            f"按钮 {button_pt}pt，系统默认 {system_pt}pt",
+        )
+
+        # ── 导航窗格行距：`TVM_SETITEMHEIGHT` **确实有效** ──
+        # （与列表的 `LVM_SETITEMSPACING` 不同，那个在 report 视图下是空操作。）
+        #
+        # ⚠️ 判据**不是**"自然高 + 额外值"——那个算法踩过坑：
+        # `TVM_SETITEMHEIGHT` 收的是**绝对高度**，"自然高"一旦被改过就读不回原值，
+        # 缩字号时重算会拿到"上次设的值"，比例从 1.429 漂到 2.000。
+        # 现在两边都直接从文字高按 `row_ratio` 现算，所以这里也按比例判。
+        # **句柄直接取。** 换成 `DirectoryTree` 之后 `dir_ctrl` 本身就是
+        # `SysTreeView32`，`find_child_window` 找不到"内层控件"，
+        # 于是读出"行高 0px"这种**假失败**。
+        tree_native = frame.dir_ctrl.GetHandle()
+        measured = win32.get_tree_item_height(tree_native) if tree_native else 0
+        ratio = _theme.METRICS.row_ratio
+        tree_widget = frame.dir_ctrl.GetTreeCtrl()
+        dc_tree = wx.ClientDC(tree_widget)
+        dc_tree.SetFont(tree_widget.GetFont())
+        tree_text_h = dc_tree.GetTextExtent("Ag路径")[1]
+        tree_want = int(round(tree_text_h * ratio))
+        check(
+            "导航窗格行高 = 文字高 × row_ratio（回读，不是设了就算）",
+            measured == tree_want and tree_text_h > 0,
+            f"实测 {measured}px = round({tree_text_h}px × {ratio}) = {tree_want}px",
+        )
+
+        # ── **两个窗格的行距比例必须一致**（用户指定的验收口径）──
+        #
+        # 用户原话："记录窗格的行距再增加一点点，视觉上的间隔比例就和
+        # 导航窗格同步了 —— **导航窗格那个比例是最舒服的**。"
+        #
+        # 所以判据是**比例**（行高 / 文字高），不是像素：
+        # 两个控件字号不同，"都加 10px"在视觉上并不一致。
+        # 这条断言把"最舒服的那个比例"钉住 —— 以后谁改了任一边
+        # 的字号或行距，对不上就会红。
+        def _text_height(win) -> int:
+            dc = wx.ClientDC(win)
+            dc.SetFont(win.GetFont())
+            # "Ag" 足够：**高度只由字体度量决定，与字符无关**。
+            return dc.GetTextExtent("Ag")[1]
+
+        if frame.list_ctrl.GetItemCount() > 0:
+            lh_row = frame.list_ctrl.GetItemRect(0).height
+            lh_text = _text_height(frame.list_ctrl)
+            th_row = measured
+            # ⚠️ **必须量 `GetTreeCtrl()`，不是 `dir_ctrl`。**
+            # 两者字体不同：`dir_ctrl` 报 9pt/雅黑（文字高 28px），
+            # 而 `GetTreeCtrl()` 报 9pt/更纱黑体（文字高 25px）——
+            # **原生树按后者渲染**，产品的行高也是按后者算的。
+            # 量错控件会得到 36/28 = 1.286 这种假失败（踩过）。
+            th_text = _text_height(frame.dir_ctrl.GetTreeCtrl())
+            if lh_text > 0 and th_text > 0:
+                list_ratio = lh_row / lh_text
+                tree_ratio = th_row / th_text
+                check(
+                    "记录窗格与导航窗格的**行距比例**一致",
+                    abs(list_ratio - tree_ratio) < 0.02,
+                    f"记录 {lh_row}/{lh_text} = {list_ratio:.3f}｜"
+                    f"导航 {th_row}/{th_text} = {tree_ratio:.3f}"
+                    f"（目标比例 {ratio}）",
+                )
+                check(
+                    "阳性对照：两边比例都不是 1.0（确实有行距，不是贴着）",
+                    list_ratio > 1.1 and tree_ratio > 1.1,
+                    f"记录 {list_ratio:.3f}，导航 {tree_ratio:.3f}",
+                )
+
+        # **行高必须是回读出来的几何量。**
+        #
+        # ⚠️ 这里最初写的是"行高 ≥ 文字高 + 配置的额外间距"，它**失败了** ——
+        # 而失败是对的：`LVM_SETITEMSPACING` 在 report 视图下**根本不生效**
+        # （`tools/probes/probe_row_spacing.py`：extra 0→40，行高恒为 39px）。
+        # 那个"额外间距"字段从引入起就没起作用，只是当时没有断言量行高。
+        #
+        # report 视图的行高**只由字号决定**，所以这里改判两件**真实成立**的事：
+        if frame.list_ctrl.GetItemCount() > 0:
+            row_h = frame.list_ctrl.GetItemRect(0).height
+            text_h = frame.list_ctrl.GetTextExtent("Ag")[1]
+            check(
+                "行高是回读出来的几何量（不是「设了就算」）",
+                row_h > text_h,
+                f"行高 {row_h}px > 文字高 {text_h}px（净空 {row_h - text_h}px）",
+            )
+            check(
+                "行高已被抬到「文字高 × row_ratio」",
+                row_h == int(round(text_h * ratio)),
+                f"行高 {row_h}px = round(文字高 {text_h}px × {ratio})"
+                "（机制：1×H 空图列表托底，H = 目标行高 − 1；"
+                "`LVM_SETITEMSPACING` 在 report 视图下是空操作）",
+            )
+            # **阳性对照**：确认行高不是靠"字号自己变高"撑起来的 ——
+            # 净空必须明显大于纯字号时的 4px。
+            check(
+                "阳性对照：净空确实比不加图列表时大（那时只有 4px）",
+                row_h - text_h > 4,
+                f"净空 {row_h - text_h}px > 4px",
+            )
+        else:
+            check("列表非空（行高断言需要至少一行）", False,
+                  f"GetItemCount = {frame.list_ctrl.GetItemCount()}")
+
+        # 窗口尺寸：**宽度不动、高度增加**。
+        # 期望值由 wx-free 的纯函数算出，那边另有 3 条 pytest 守着
+        # （见 tests/test_core.py 的 window 组）——这里只核"真实窗口"。
+        preferred = _core.scaled_window_size()
+        before = _core.scaled_window_size(extra_height=1.0)
+        actual = frame.GetSize()
+        check(
+            "初始窗口：宽度不受加高影响",
+            abs(actual.width - preferred[0]) <= 24,
+            f"实际宽 {actual.width}，期望 {preferred[0]}（容差含非客户区）",
+        )
+        check(
+            f"初始窗口：高度已增加（{before[1]} → {preferred[1]}）",
+            actual.height >= int(preferred[1] * 0.95),
+            f"实际高 {actual.height}，期望 {preferred[1]}",
         )
         check(
             "窗口已应用 Win11 圆角（DwmSetWindowAttribute 返回成功）",
@@ -1475,29 +1831,132 @@ def main() -> int:
             else "标签与按钮同行时留出间距，放不下则标签独占一行",
         )
 
-        # **标签要与第一行按钮垂直居中对齐。**
+        # **版式：标签与按钮「挨在一起」，整块居中。**
         #
-        # 用户截图："把标题「排序方式」和右边的按钮水平对齐，
-        # 你自己看看现在怪不怪" —— 那一版让标签**独占一行**，
-        # 于是它孤零零飘在按钮上方。标签是"这一行的标题"，
-        # 就该与这一行的按钮在同一条基线上。
-        misaligned = []
+        # .. note::
+        #
+        #     这条断言**改过三次口径**，每次都是用户改了主意 ——
+        #     记在这里是为了说明：**版式是用户的审美决定，
+        #     断言要跟着他的口径走，不是跟着我以为的对错。**
+        #
+        #     ① 最初："标签与第一行按钮垂直居中"（标签靠左、按钮右对齐）
+        #     ② 用户要求居中版式 → "标签在按钮上方且居中"
+        #     ③ 用户否决居中 → 回到 ① 的左右分列
+        #     ④ **用户再改**："标题和按钮之间隔得太远了……不要分别
+        #        左对齐和右对齐，让它们**左右挨在一起**……
+        #        然后**整段居中**。" → 就是现在这三条。
+        layout_bad = []
         for label, chunks in sort_probe._rows:
-            buttons = chunks[0]
+            buttons = [b for chunk in chunks for b in chunk]
             if not buttons:
                 continue
             label_rect = label.GetRect()
-            button_rect = buttons[0].GetRect()
+            rects = [b.GetRect() for b in buttons]
+            first_row_y = min(r.y for r in rects)
+            first_row = [r for r in rects if r.y == first_row_y]
+            left_x = min(r.x for r in first_row)
+            right_x = max(r.x + r.width for r in first_row)
+
+            # ① 标签与**第一行**按钮同行（垂直居中）
             label_mid = label_rect.y + label_rect.height // 2
-            button_mid = button_rect.y + button_rect.height // 2
-            if abs(label_mid - button_mid) > 3:
-                misaligned.append(
-                    (label.GetLabel(), label_mid, button_mid))
+            row_mid = first_row_y + first_row[0].height // 2
+            if abs(label_mid - row_mid) > 4:
+                layout_bad.append(
+                    f"{label.GetLabel()}：标签中心 {label_mid} "
+                    f"≠ 首行按钮中心 {row_mid}")
+
+            # ② 标签紧挨在按钮**左边**，且**间距很小**（"挨在一起"）
+            if label_rect.x + label_rect.width > left_x:
+                layout_bad.append(f"{label.GetLabel()}：标签压住了按钮")
+            space = left_x - (label_rect.x + label_rect.width)
+            if space > 24:
+                layout_bad.append(
+                    f"{label.GetLabel()}：标签与按钮之间空 {space}px，太远")
+
+            # ③ **整段左对齐**（用户："整段左对齐"）
+            left_edge = sort_probe._body_rect[0]
+            if abs(label_rect.x - left_edge) > 6:
+                layout_bad.append(
+                    f"{label.GetLabel()}：标签左缘 {label_rect.x} "
+                    f"≠ 内容区左边界 {left_edge}")
         check(
-            "设置窗口的标签与第一行按钮垂直居中（不再飘在上方）",
-            not misaligned,
-            f"中心不对齐的 = {misaligned}" if misaligned
-            else "三个标签的中心都落在各自第一行按钮的中心上",
+            "设置窗口：标签与按钮挨在一起、且整段左对齐（用户定下的版式）",
+            not layout_bad,
+            f"不合规 = {layout_bad}" if layout_bad
+            else "四组都是「标签 + 两个空格 + 按钮」贴内容区左边",
+        )
+
+        # **底部按钮右对齐**（用户："确定和取消一组放在底部右侧"）。
+        footer_rects = sort_probe._button_rects
+        if footer_rects:
+            content_right = (sort_probe._body_rect[0]
+                             + sort_probe._body_rect[2]
+                             - sort_probe._body_rect[0])
+            last_x, last_w = footer_rects[-1]
+            margin = _theme.scale_for_dpi(
+                _theme.METRICS.dialog_margin, _widgets.dpi_of(sort_probe))
+            client_w = sort_probe.GetClientSize().width
+            check(
+                "设置窗口：底部按钮组靠右（不再居中）",
+                abs((last_x + last_w) - (client_w - margin)) <= 4,
+                f"末个按钮右缘 {last_x + last_w} vs 期望 {client_w - margin}"
+                f"（客户区宽 {client_w}，右边距 {margin}）",
+            )
+            check(
+                "阳性对照：底部按钮**不是**居中的（否则这条没意义）",
+                abs((footer_rects[0][0] + footer_rects[-1][0]
+                     + footer_rects[-1][1]) // 2 - client_w // 2) > 8,
+                f"整组中心 {(footer_rects[0][0] + footer_rects[-1][0] + footer_rects[-1][1]) // 2}"
+                f" vs 客户区中心 {client_w // 2}",
+            )
+
+        # **排序方式 2×2**（用户："四个并排看着还是太奇怪了"）。
+        sort_chunks = dict(sort_probe._rows).get(sort_probe._sort_label)
+        check(
+            "设置窗口：排序方式成两行两列（不是四个并排）",
+            sort_chunks is not None and len(sort_chunks) == 2
+            and all(len(c) == 2 for c in sort_chunks),
+            f"折成 {[len(c) for c in (sort_chunks or [])]}"
+            "（应为 [2, 2] = 两行两列）",
+        )
+
+        # **用户要求②：三个主题选项必须并排在同一行。**
+        #
+        # 不能只靠上面那条——折成两行时中心仍可能对上。
+        theme_chunks = dict(sort_probe._rows).get(sort_probe._theme_label)
+        check(
+            "设置窗口：三个主题选项并排在同一行（跟随系统 / ☀ / ☾）",
+            theme_chunks is not None and len(theme_chunks) == 1,
+            f"折成了 {0 if theme_chunks is None else len(theme_chunks)} 块"
+            "（应为 1 块 = 三个并排）",
+        )
+        check(
+            "设置窗口：三个主题都用符号（💻 / ☀ / ☾）",
+            [b.label for chunk in (theme_chunks or []) for b in chunk]
+            == ["💻", "☀", "☾"],
+            f"实际标签 = "
+            f"{[b.label for chunk in (theme_chunks or []) for b in chunk]}",
+        )
+
+        # **阳性对照：组与组之间真的有空行**（这就是用户要的"层次感"）
+        #
+        # 没有它的话，"四组贴在一起"也能通过上面那条。
+        gaps = []
+        rows = sort_probe._rows
+        for index in range(1, len(rows)):
+            prev_buttons = [b for chunk in rows[index - 1][1] for b in chunk]
+            this_buttons = [b for chunk in rows[index][1] for b in chunk]
+            if prev_buttons and this_buttons:
+                prev_bottom = max(b.GetRect().y + b.GetRect().height
+                                  for b in prev_buttons)
+                gaps.append(this_buttons[0].GetRect().y - prev_bottom)
+        row_h = sort_probe._sort_buttons[0].GetSize().height if \
+            sort_probe._sort_buttons else 0
+        check(
+            "阳性对照：组与组之间留出了空行（比组内间距明显更大）",
+            bool(gaps) and min(gaps) > row_h // 3,
+            f"组间净空 = {gaps}，按钮高 = {row_h}"
+            "（「空一行」就是层次感的来源）",
         )
 
         check(
@@ -1801,26 +2260,30 @@ def main() -> int:
         window_w = dc_rect.right - dc_rect.left
         client_w = frame.dir_ctrl.GetClientSize().width
         border_px = window_w - client_w
-        check(
-            "导航窗格没有非客户区边框（白框的根因）",
-            border_px == 0,
-            f"窗口宽 {window_w} − 客户区宽 {client_w} = {border_px}px"
-            "（`GenericDirCtrl` 默认带 2px 非客户区边框，由系统按浅色绘制；"
-            "加 wx.BORDER_NONE 后为 0）",
-        )
+        # **样式位也要显式声明。**
+        #
+        # 这条和上面那条是**两件事**，不能合并：
+        # 上面判的是"非客户区有多大"（几何量），这条判的是
+        # "我们有没有主动要求无边框"（样式位）。
+        # 少了这条，将来谁把 `wx.BORDER_NONE` 从样式里去掉、
+        # 而恰好又没有非客户区差异时，就没有东西挡着了。
         check(
             "导航窗格已显式声明 wx.BORDER_NONE",
             bool(frame.dir_ctrl.GetWindowStyleFlag() & wx.BORDER_NONE),
             f"样式 = {frame.dir_ctrl.GetWindowStyleFlag():#x}，"
-            f"BORDER_NONE = {bool(frame.dir_ctrl.GetWindowStyleFlag() & wx.BORDER_NONE)}",
+            f"BORDER_NONE = "
+            f"{bool(frame.dir_ctrl.GetWindowStyleFlag() & wx.BORDER_NONE)}",
         )
+
         check(
-            "内层原生树也没有 WS_EX_CLIENTEDGE",
-            not (user32.GetWindowLongW(
-                ctypes.c_void_p(frame.dir_ctrl.GetTreeCtrl().GetHandle()),
-                -20,
-            ) & win32.WS_EX_CLIENTEDGE),
-            "非客户区边框位（另一圈系统绘制的边）",
+            "导航窗格没有多余的边框（非客户区只允许是滚动条）",
+            (border_px == 0)
+            or abs(border_px
+                   - wx.SystemSettings.GetMetric(wx.SYS_VSCROLL_X)) <= 2,
+            f"窗口宽 {window_w} − 客户区宽 {client_w} = {border_px}px"
+            f"；滚动条宽 {wx.SystemSettings.GetMetric(wx.SYS_VSCROLL_X)}px"
+            "（`GenericDirCtrl` 时代那条断言写的是它自带的 2px 非客户区边框；"
+            "换成自己的树之后，非客户区里合法的东西**只有滚动条**）",
         )
 
         # ---- 列间竖线（这条我漏了三轮）----

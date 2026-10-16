@@ -48,6 +48,129 @@ python tools/probes/<名字>.py
 
 ---
 
+## 分类索引：我现在该跑哪个？
+
+**按用途分组。** 每组第一列是"什么时候用它"。
+详细结论在下面的同名小节里（本文档其余部分是**逐条的实测记录**，不重复在这里）。
+
+### 一、抓图与离屏渲染 —— 先解决"怎么看到像素"
+
+| 探针 | 什么时候用 |
+|---|---|
+| `probe_capture.py` | 想知道本进程内**哪种抓图方式能拿到真像素**（先跑它） |
+| `probe_layout_render.py` / `probe_settings_render.py` | 把弹窗**离屏重画成图片**看排版 |
+| `probe_render_noise.py` | 想确认"**像素能不能当判据**" |
+| `probe_dim_image.py` | 量某张图的尺寸/内容 |
+
+> ⚠️ **本环境的窗口抓图大半不可信** —— 见下面的「先读这两条」。
+
+### 二、列表：行高与间距
+
+| 探针 | 什么时候用 |
+|---|---|
+| `probe_row_spacing.py` | 怀疑 `LVM_SETITEMSPACING` 生效了（**它不生效**） |
+| `probe_row_height.py` | 改"空图列表托底"那套行高机制之前 |
+| `probe_row_ratio.py` | 改 `METRICS.row_ratio`（两个窗格的比例）之前 |
+| `probe_row_effect.py` | 改完行高后，**核副作用**（文字有没有位移、数据缺没缺） |
+
+### 三、列表：高亮 / 悬停 / 选中
+
+`probe_row_hover.py` · `probe_row_selected_pixels.py` · `probe_row_highlight.py` ·
+`probe_row_colour_set.py` · `probe_row_trackselect.py` · `probe_two_tier_highlight.py` ·
+`probe_hover_time.py` —— **动"预选 / 选中"这两档之前，全部跑一遍**。
+
+### 三之二、列表：刷新时的**视角、选中、闪烁**
+
+用户报"双击打开一条之后，记录窗格又回到最开头了"时写的三个探针。
+**改 `_render_rows` 之前先跑它们。**
+
+| 探针 | 什么时候用 |
+|---|---|
+| `probe_open_anchor.py` | **重放真实的双击流程**，把每次 `_remember_view()` / `_render_rows()` 的中间状态打出来。**"锚点取晚了"和"重复记锚点"都是它抓到的** |
+| `probe_scroll_anchor.py` | **新旧对比**：同一场景分别用 `Focus()` 与 `SetItemState()`，看哪个会把视角滚走 |
+| `probe_doublebuffer.py` | 想问"要不要加双缓冲"时先跑它 |
+
+### ⚠️ 改"刷新时保持视角"必须知道的四件事
+
+都是实测踩出来的，**顺序就是踩坑的顺序**：
+
+1. **锚点必须在 `self._rows` 换掉之前取** —— 否则是"旧的视觉行号 + 新的记录列表"
+2. **`_remember_view()` 必须幂等** —— 它会被调用多次，第二次时 `_rows` 已经换了
+3. **`Focus()` 会把视角滚走** —— 设焦点要用 `SetItemState`，不用 `Focus()`
+4. **`Freeze()` 里不能读写滚动状态** —— 冻结期间 `GetTopItem()` 返回旧值、
+   `ScrollLines()` 不生效。**`Freeze` 只包"重建"，选中与回位放到 `Thaw` 之后**
+
+> **判据**：`Freeze` 里只允许**改内容**，不允许**读滚动状态**。
+
+### 四、列表：多选 / 双击 / 焦点
+
+| 探针 | 什么时候用 |
+|---|---|
+| `probe_multi_select.py` | 问"列表到底能不能多选" |
+| `probe_multiselect.py` | 问"**多选树上** `SelectItem` 的语义"（**与上一个是两个探针，别合并**） |
+| `probe_double_click.py` | 改了列表标志之后，核双击语义有没有变 |
+| `probe_open_focus.py` | 核「打开」到底跟不跟最后一次选中 |
+
+### 五、表头
+
+`probe_header_event.py` · `probe_native_lvm.py` · `probe_lvm_final.py` ·
+`probe_darkmode_api.py` —— **改表头之前跑**。结论：原生表头在深色下不可用，
+所以本项目是自己画的（见「双重顶栏」那节）。
+
+### 六、树与导航窗格
+
+| 探针 | 什么时候用 |
+|---|---|
+| `probe_dir_tree.py` | 改 `dir_tree.DirectoryTree` 之前（图标尺寸、盘符、`GetPath`） |
+| `probe_tree_paths.py` | 怀疑**盘符解析错了**（`C:` vs `C:\\` 那类） |
+| `probe_tree_perf.py` | 改 `_children_of` / `_populate_item` 之前**先量基线** |
+| `probe_lazy_expand.py` | 核树是不是懒加载的 |
+| `probe_tree_labels.py` | 核驱动器节点的标签（`SYSTEM (C:)` 那种） |
+| `probe_tree_frame.py` / `probe_tree_scrollbar.py` / `probe_tree_blank.py` | 核容器底色 / 滚动条 / 空白区 |
+| `probe_nav_variants.py` | 查那圈白框的根因（**已结案**，留作参考） |
+
+### 七、布局 / 字体 / 弹窗
+
+| 探针 | 什么时候用 |
+|---|---|
+| `probe_dialog_fonts.py` | 核**弹窗字号**与**导航窗格行高** |
+| `probe_nav_fonts.py` | 核导航窗格里每一处文字的字号 |
+| `probe_settings_font.py` | 核设置窗口的标签会不会被按钮压住 |
+| `probe_stroke_raster.py` | **定规则**：GDI+ 的描边落在哪几列（改描边前必读） |
+| `probe_button_border.py` / `probe_button_edge_columns.py` | 核按钮描边有没有被裁断 |
+| `probe_sash_border.py` / `probe_sash_geometry.py` / `probe_sash_drag.py` | 改两栏分界线之前 |
+| `probe_dialog_center.py` / `probe_dpi_units.py` | 核居中 / 核 wx 报的坐标单位 |
+
+### 八、性能与体积
+
+| 探针 | 什么时候用 |
+|---|---|
+| `probe_rebuild_cost.py` / `probe_scale_cost.py` / `probe_scale_profile.py` | 改列表重建逻辑之前**先量基线** |
+| `probe_adjust_reentry.py` | 怀疑某个回调被重复进入 |
+| `probe_bundle_size.py` / `probe_pyz_contents.py` / `probe_size_candidates.py` / `probe_libcrypto_source.py` / `probe_used_modules.py` | 每轮体积审计 |
+
+### 九、一次性诊断（结论已并入代码，留着当模板）
+
+| 探针 | 它解决过什么 |
+|---|---|
+| `probe_theme_icon.py` | **自绘按钮"看着没画出来"** —— 渲染成位图数像素，一次定案 |
+| `probe_submit_hang.py` | **界面卡死** —— `faulthandler` 超时转储调用栈 |
+| `probe_standardpaths_hang.py` | 同类卡死（`wx.StandardPaths`） |
+| `probe_field_edge.py` | 排除了 `WS_EX_CLIENTEDGE`（**结论：不是它**） |
+| `probe_dataview_api.py` / `probe_topmost.py` / `probe_setwindowstyle_topmost.py` | API 可行性 |
+| `probe_version_info.py` / `probe_sort_persistence.py` / `probe_pathbar_focus.py` / `probe_item_colour.py` | 版本资源 / 排序持久化 / 地址栏 / 按列设色 |
+
+> **`probe_theme_icon.py` 与 `probe_submit_hang.py` 值得当模板**：
+> 前者回答"自绘的东西到底画了没有"，后者回答"到底卡在哪一行"。
+> 这两类问题**读代码都看不出来** —— 本会话三次读代码失败，都是它们定的案。
+
+### 十、试过但**不通**的路
+
+见本文件后面的「试过但**不通**的路」那节 —— **改相关的代码之前先读它**，
+免得把死路再走一遍。
+
+---
+
 ## ⚠️ 写新探针前必读：临时目录一律用 `_probe_temp`
 
 用户反馈过："**你怎么每次打开的测试窗口都不关，我桌面上一堆 target-folder**"。
@@ -449,6 +572,139 @@ adjust_column_widths
 
 所以 `app.on_always_on_top` 用 `SetWindowStyle` 是**对的**，
 别照着那份旧文档去"修"它。
+
+### ⚠️ 一次**读错需求**的返工（记在这里，因为它是最贵的教训）
+
+用户说"将**导航窗格**内的文字（**包括顶栏标题**）整体缩小 1pt"。
+
+**这句话与代码结构是矛盾的**：导航窗格（左侧）只有地址栏 + 目录树，
+**根本没有"顶栏标题"**；有列头标题的是**记录窗格**（右侧）。
+
+我照着字面执行了 —— 把树 10→9pt、地址栏 10→9pt。
+用户随后更正：**原意是"记录窗格"**（他熬夜了，说反了）。
+
+> **教训：用户的措辞与代码结构对不上时，先问再改。**
+>
+> 判据很便宜：**他提到的那个部件，在他说的那个区域里存在吗？**
+> 不存在 ⇒ 需求描述有误，问一句就能省掉一轮返工。
+> 我当时注意到了"记录窗格才有列头"，但没停下来确认。
+
+**实际落点**：记录窗格（列表条目 + 自绘列头）11pt → **10pt**；
+导航窗格那两处**撤回**。现在**全部文字都是 10pt**（按钮/列头/列表/树/地址栏/弹窗），
+"2pt 不协调"从根上消失。
+
+### 按**比例**对齐两个窗格（`probe_row_ratio.py`）
+
+用户验收后提最后一条：
+
+> 把记录窗格中的条目行距再增加一点点，**视觉上的间隔比例**就和导航窗格
+> 同步了 —— **导航窗格那个比例是最舒服的**。
+
+**"比例"不是"像素"**：两个控件字号不同（列表 11pt、树是系统默认 9pt），
+"都加 10px"在视觉上并不一致。要对齐的是 `行高 / 文字高`：
+
+| | 字号 | 行高 | 文字高 | 比例 |
+|---|---|---|---|---|
+| 记录窗格（改前） | 11pt | 46 | 35 | 1.314 |
+| **导航窗格**（基准） | 9pt | 40 | 28 | **1.429** |
+| **记录窗格（改后）** | 11pt | **50** | 35 | **1.429** |
+
+（那个 `list_item_extra_height` 字段**后来被删了**：行高现在直接由
+`文字高 × row_ratio` 现算，不存在"额外像素"这种字段。）
+
+**这条现在是断言**（`verify_gui.py`）：两边比例差 < 0.02 才算过，
+另有阳性对照确认两个比例都 > 1.1（不是"贴着"）。
+
+> **教训：对齐两种控件时，对齐"比例"而不是"像素"。**
+> 它们的字号往往不同，同一个像素增量在视觉上并不等价。
+
+## 弹窗字号与导航窗格行高（`probe_dialog_fonts.py`）
+
+**起因**：用户要求"检查设置窗口、所有提示弹窗中的字体、字号（包括标题栏）
+是否和『打开』『清空』按钮一致，不一致的统一"；并问"导航窗格的行距可以增加吗"。
+
+### 量出来的：弹窗整整小 1pt
+
+| 控件 | 改前 | 改后 |
+|---|---|---|
+| 「打开」/「清空」按钮 | **10pt** | 10pt（基准） |
+| 设置窗口：自身 + 全部按钮 + 3 个标签 | **9pt** | **10pt** |
+| 提示弹窗：自身 + 按钮 | **9pt** | **10pt** |
+
+**根因**：`wx.Dialog` 是**独立顶层窗口**，frame 那边的 `SetFont` 传播过不去，
+于是弹窗回落到**系统默认 9pt**。而这段"系统 + 1"的算法当时只写在
+`app.set_global_font` 里 —— 弹窗根本拿不到。
+
+修法：把算法收成**唯一的定义**（`widgets.body_font()`），
+`ThemedDialog.apply_body_font()` 再把它套到自身与**全部子控件**上
+（`self.SetFont()` 只管"默认字体"，**不影响已经建好的子控件**，
+所以必须自己走一遍）。
+
+### 量出来的：导航窗格行高**可以**加
+
+`TVM_SETITEMHEIGHT` **实测一一对应**：
+
+| 设定值 | 20 | 24 | 28 | 32 | 40 |
+|---|---|---|---|---|---|
+| 回读值 | 20 | 24 | 28 | 32 | 40 |
+
+⚠️ **与列表那条不是一回事**：列表的 `LVM_SETITEMSPACING` 在 report 视图下
+从 0 设到 40、行高纹丝不动（见「列表行高那一组」）。
+
+⚠️ **它收的是绝对高度，不是"多加多少"** —— 自然高度必须在第一次改之前
+量下来存住，否则每进一次主题就长高一点（40 → 50 → 60…）。
+
+### 教训
+
+> **继承来的字体是不可靠的。** 同一个"正文 + 1"的意图，在 frame 的子控件上
+> 靠传播成立，在**独立顶层窗口**（对话框）上就不成立。
+> **判据只能是逐个控件回读 `GetFont().GetPointSize()`。**
+
+## 列表行高那一组（`probe_row_spacing.py` / `probe_row_height.py`）
+
+**起因**：用户要求"记录窗格条目字号 +1pt、行距适当增加"。
+改完之后验证器报了一条失败 —— 而**那条失败暴露了一个长期存在的死代码**。
+
+### 量出来的
+
+**① `LVM_SETITEMSPACING` 在 report 视图下是空操作**
+
+| extra | 0 | 2 | 6 | 10 | 20 | 40 |
+|---|---|---|---|---|---|---|
+| 回读行高 | 39 | 39 | 39 | 39 | 39 | **39** |
+
+**纹丝不动。** MSDN 也写明该消息只对 icon / small-icon 视图有意义。
+
+⇒ **`METRICS.list_item_extra_height` 从引入起就没生效过。**
+当时没有断言量行高，所以没人发现；这次是因为"改了一个假开关"才查出来。
+
+**② report 视图的行高只由字号决定**
+
+| 字号 | 9pt | 10pt | 11pt | 12pt |
+|---|---|---|---|---|
+| 行高 | 32px | 34px | **39px** | 40px |
+| 文字高 | 28px | 30px | 35px | 36px |
+
+⇒ **"加行距"最省事的办法就是加字号**（本次 10→11pt 顺带把行高从 34 抬到 39，+15%）。
+
+**③ 想"字号不动但行更高"，唯一的路是挂一张空图列表**
+
+`wx.ImageList(1, H)` 设为 SMALL 图列表：
+
+| H | 1 | 8 | 16 | 24 | 32 | **40** | **48** |
+|---|---|---|---|---|---|---|---|
+| 行高 | 39 | 39 | 39 | 39 | 39 | **41** | **49** |
+
+**行高 = max(字号决定的高度, H+1)。**
+
+⚠️ **代价**：report 视图会为第 0 列保留图标位，**路径文字会右移几像素**。
+所以这是**换机制**，不是调参 —— 要单独一轮，不要顺手改。
+
+### 教训
+
+> **一个"看起来在调参"的开关，可能从来没接上。**
+> 判据只能是**回读几何量**（`GetItemRect(row).height`），
+> 不能是"我调了这个值"或"那个 API 返回了成功"。
 
 ## 列表规模那一组（`probe_scale_cost.py` / `probe_scale_profile.py`）
 

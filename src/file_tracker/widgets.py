@@ -16,12 +16,16 @@
 
 from __future__ import annotations
 
+import math
+
 import wx
 
 from . import win32
 from .core import DEFAULT_SORT_KEY, SORT_SPECS, find_sort_spec, sort_keys
 from .lang import CHOICES, DISPLAY_NAMES, L
-from .theme import METRICS, Theme, scale_for_dpi
+from .theme import (METRICS, THEME_CHOICES, THEME_DARK, THEME_DISPLAY_NAMES,
+                    THEME_LIGHT, THEME_SYSTEM, THEME_TOOLTIPS, Theme,
+                    scale_for_dpi)
 
 
 def _measure_probe() -> str:
@@ -121,11 +125,60 @@ class BufferedPanel(wx.Panel):
     def draw(self, dc) -> None:  # pragma: no cover - 由子类实现
         """用 ``dc`` 绘制本控件。原点为控件左上角。"""
 
+    def SetLabel(self, label: str) -> None:
+        """**自绘按钮的标题只有一份状态。**
+
+        ## 踩过的坑：两份状态必然分叉
+
+        `_on_paint` 画的是 `self.label`；而 wx 那边也有一份标题，
+        `GetLabel()` / `SetLabel()` 读写的是**它**。
+
+        主窗口 `retranslate()` 换语言时走的是 `SetLabel()` ——
+        **只改了 wx 那份，自绘那份一个字没动**，于是按钮文字纹丝不动。
+        用户报："只有非按钮部分的语言发生了变更，
+        **按钮部分实际上还是原语言**。"（截图里 `打开`/`清空` 还是中文。）
+
+        这里把 `SetLabel` 接管过来，让它去写 `self.label`，
+        于是**无论谁从哪边调，都落到同一份状态上**。
+
+        `InvalidateBestSize()` 是必须的：`DoGetBestSize` 按标题文字算宽度，
+        换了语言不重算，英文长标题就会被压掉尾巴。
+        """
+        self.label = label
+        super().SetLabel(label)
+        self.InvalidateBestSize()
+        self.Refresh()
+
     def apply_theme(self, theme: Theme) -> None:
         """主题变化时重新取色并重绘。"""
         self.theme = theme
         self.SetBackgroundColour(wx.Colour(theme.background))
         self.Refresh()
+
+
+def body_font() -> wx.Font:
+    """正文 / 按钮 / 弹窗的**统一字号**：系统 UI 字号 + 1。
+
+    ## 这是唯一的定义处
+
+    以前这段算法只写在 `app.set_global_font` 里，于是**弹窗拿不到它**：
+    `wx.Dialog` 是**独立的顶层窗口**，frame 的 `SetFont` 传播过不去，
+    弹窗就回落到系统默认 —— 实测比「打开」按钮**小整整 1pt**。
+
+    用户把这一条看出来了：「检查设置窗口、所有提示弹窗中的字体、字号
+    （包括标题栏）是否和『打开』『清空』按钮一致」。
+
+    **所以别再在别处重写这个 `+ 1`** —— 换一处写，就又多一个会漂移的副本。
+    """
+    base = wx.SystemSettings.GetFont(wx.SYS_DEFAULT_GUI_FONT)
+    return wx.Font(
+        base.GetPointSize() + 1,
+        base.GetFamily(),
+        base.GetStyle(),
+        wx.FONTWEIGHT_NORMAL,
+        False,
+        base.GetFaceName(),
+    )
 
 
 class RoundedButton(wx.Control):
@@ -147,6 +200,9 @@ class RoundedButton(wx.Control):
         super().__init__(parent, style=wx.BORDER_NONE)
         self.theme = theme
         self.label = label
+        #: 设了它就**画图标**而不是文字（见 `_draw_icon`）。
+        # 默认 `None` ⇒ 行为与以前完全一致，不影响任何现有按钮。
+        self.icon_painter = None
         self.variant = variant
         self._hovering = False
         self._pressed = False
@@ -353,6 +409,18 @@ class RoundedButton(wx.Control):
             )
 
             font = self.GetFont()
+            if self.icon_painter is not None:
+                # **画图标**：尺寸取"文字高"，这样它和旁边的字符按钮同高。
+                gc.SetFont(font, wx.Colour(foreground))
+                _tw, th = gc.GetTextExtent("M")
+                # ⚠️ 用 `width` / `height`（本控件的客户区尺寸），
+                # **不要用 `rect`** —— 这个作用域里没有那个名字，
+                # 上一版写成 `rect.x + rect.width / 2` 把图标算到了
+                # 客户区外面，用户看到的就是"图标没画出来"。
+                _draw_icon(gc, self.icon_painter,
+                           width / 2.0, height / 2.0,
+                           float(th), wx.Colour(foreground))
+                return
             gc.SetFont(font, wx.Colour(foreground))
             text_width, text_height = gc.GetTextExtent(self.label)
             gc.DrawText(
@@ -626,11 +694,37 @@ class ThemedDialog(wx.Dialog):
             self._stretch_guard.Hide()
 
         self._apply_window_chrome()
+        self.apply_body_font()
 
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
         self.Bind(wx.EVT_PAINT, self._on_paint)
         self.Bind(wx.EVT_SHOW, self._on_show)
         self.Bind(wx.EVT_SIZE, self._on_size)
+
+    def apply_body_font(self) -> None:
+        """把正文/按钮那一套字号应用到**本弹窗及其全部子控件**。
+
+        ## 为什么弹窗必须自己设
+
+        `wx.Dialog` 是**独立的顶层窗口**——frame 那边的 `SetFont` 传播
+        过不来。不显式设的话，弹窗回落到系统默认，实测**比「打开」按钮
+        小 1pt**，而且标题、正文、按钮三处一起小，用户一眼就看出来了。
+
+        ## 为什么是"全部子控件"而不是只设 `self`
+
+        `self.SetFont()` 只定"本窗口的默认字体"，**不影响已经建好的子控件**
+        （按钮在 `__init__` 里就建好了）。所以要自己走一遍。
+
+        **子类加了新控件之后要再调一次**——设置窗口就是这么做的。
+        """
+        font = body_font()
+        self.SetFont(font)
+        stack = list(self.GetChildren())
+        while stack:
+            child = stack.pop()
+            child.SetFont(font)
+            child.Refresh()
+            stack.extend(child.GetChildren())
 
     def _apply_window_chrome(self) -> None:
         """标题栏深色 + 窗口圆角 + **标题栏图标**（都要在窗口显示之前设）。
@@ -945,8 +1039,200 @@ def _label_width(label) -> int:
     return text_width + margin
 
 
+def _pen_width(stroke) -> int:
+    """把笔宽收敛成 **int**。
+
+    ## 这个函数存在的唯一理由：`wx.Pen` 不收 float
+
+    实测报错：
+
+    ```
+    wx.Pen(colour, 2.0)
+    TypeError: Pen(): arguments did not match any overloaded call:
+        overload 3: argument 2 has unexpected type 'float'
+    ```
+
+    **而它发生在 `draw_to` 里 —— wx 会把绘制期的异常吞掉**，
+    于是症状是"图标**静默地**一个都不画"，代码看着却完全正常。
+    用户报"三个主题图标一个都没出来"，我读了三遍代码都没看出来，
+    最后是**把按钮渲染成位图**才抓到的
+    （`tools/probes/probe_theme_icon.py`）。
+
+    ⇒ 笔宽一律走这里，别在别处直接 `wx.Pen(colour, <float>)`。
+    """
+    return max(int(round(float(stroke))), 1)
+
+
+def _draw_icon(gc, painter, cx: float, cy: float, size: float,
+               colour) -> None:
+    """按**图元列表**在 `gc` 上画一个图标。
+
+    ## 为什么是图元，不是字形
+
+    另一个会话的智能体画显示器用的是**几何图元**（空心矩形 + 底座横线），
+    不是字体里的字符 —— 所以它不受"字体有没有这个字形"的约束，
+    **任何主题、任何字体下都画得出来**。
+
+    这正好补上 💻 的短板：emoji 要靠字体覆盖，而图元不靠。
+
+    ## 支持的图元
+
+    * ``("rect", x0, y0, x1, y1, stroke, colour, fill, radius)``
+      —— ``fill`` 为 ``None`` 表示空心
+    * ``("line", x0, y0, x1, y1, stroke, colour)``
+
+    **宽高用 `size` 归一**，所以调用方只要给"想画多大"。
+    """
+    for item in painter(cx, cy, size, colour):
+        kind = item[0]
+        if kind == "rect":
+            _k, x0, y0, x1, y1, stroke, item_colour = item[:7]
+            x0, y0, x1, y1 = float(x0), float(y0), float(x1), float(y1)
+            # **用四条线描边，不要 `DrawRectangle`。**
+            #
+            # 踩过：`wx.GraphicsContext` 上 `SetBrush(wx.TRANSPARENT_BRUSH)`
+            # **不生效**，`DrawRectangle` 会拿上一次留下的画刷去填充 ——
+            # 用户看到的就是"电脑图标变成一块**实心白方块**"。
+            #
+            # 描边就没有"填充"这件事，比赌透明画刷在哪条渲染后端上生效可靠。
+            pen = wx.Pen(item_colour, _pen_width(stroke))
+            gc.SetPen(pen)
+            gc.StrokeLine(x0, y0, x1, y0)
+            gc.StrokeLine(x1, y0, x1, y1)
+            gc.StrokeLine(x1, y1, x0, y1)
+            gc.StrokeLine(x0, y1, x0, y0)
+        elif kind == "line":
+            _k, x0, y0, x1, y1, stroke, item_colour = item[:7]
+            gc.SetPen(wx.Pen(item_colour, _pen_width(stroke)))
+            gc.StrokeLine(float(x0), float(y0), float(x1), float(y1))
+        elif kind == "ellipse":
+            _k, x0, y0, x1, y1, stroke, item_colour = item[:7]
+            x0, y0, x1, y1 = float(x0), float(y0), float(x1), float(y1)
+            # **空心椭圆也走"折线描边"**，理由同上面的 rect：
+            # `SetBrush(wx.TRANSPARENT_BRUSH)` 在 GC 上不可靠，
+            # 而用 48 边形逼近肉眼看不出来。
+            cx_, cy_ = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+            rx_, ry_ = (x1 - x0) / 2.0, (y1 - y0) / 2.0
+            gc.SetPen(wx.Pen(item_colour, _pen_width(stroke)))
+            steps = 48
+            prev = None
+            for i in range(steps + 1):
+                ang = 2 * math.pi * i / steps
+                point = (cx_ + rx_ * math.cos(ang), cy_ + ry_ * math.sin(ang))
+                if prev is not None:
+                    gc.StrokeLine(prev[0], prev[1], point[0], point[1])
+                prev = point
+        elif kind == "polygon":
+            _k, points, item_colour = item[:3]
+            # 多边形是**实心**的（月亮要的就是实心）。
+            #
+            # ⚠️ `wx.GraphicsContext` **没有 `DrawPolygon`**
+            # （实测 `AttributeError`）—— 它走的是路径：
+            # `CreatePath` → `MoveToPoint`/`AddLineToPoint` → `FillPath`。
+            path = gc.CreatePath()
+            path.MoveToPoint(float(points[0]), float(points[1]))
+            for i in range(2, len(points), 2):
+                path.AddLineToPoint(float(points[i]), float(points[i + 1]))
+            path.CloseSubpath()
+            gc.SetBrush(wx.Brush(item_colour))
+            gc.SetPen(wx.Pen(item_colour, _pen_width(1)))
+            gc.FillPath(path)
+
+
+def icon_sun(cx: float, cy: float, size: float, colour) -> list:
+    """太阳 —— 圆 + 八条光线，各自独立画，**圆心留空**。
+
+    **由另一个会话的智能体提供**。他特别标注了：
+    "圆心一定要空心（fill=None），实心圆看起来是太阳被云挡了" ——
+    所以这里用的是 `ellipse` 图元（描边），不是实心圆。
+    比例也照抄：圆心半径 0.24、光线内端 0.38、外端 0.50、线宽 size/9。
+    """
+    r = size * 0.24
+    st = max(1.0, size / 9)
+    parts = [("ellipse", cx - r, cy - r, cx + r, cy + r, st, colour, None)]
+    for i in range(8):
+        a = math.radians(i * 45)
+        parts.append(("line",
+                      cx + size * 0.38 * math.cos(a),
+                      cy + size * 0.38 * math.sin(a),
+                      cx + size * 0.50 * math.cos(a),
+                      cy + size * 0.50 * math.sin(a),
+                      max(1.0, size / 12), colour))
+    return parts
+
+
+def icon_moon(cx: float, cy: float, size: float, colour) -> list:
+    """月亮 —— **实心多边形 = 整圆减去一个偏移的圆**。
+
+    **由另一个会话的智能体提供**。他的说明：
+    "不要用两段圆弧拼"，所以这里是按射线法算出的闭合折线，一次填满。
+    点数取 40（他标注"射线法是 O(点数)"）。
+    """
+    r, dx = size * 0.45, size * 0.30
+    r2 = r * 1.02
+    n = 40
+    a = (r * r - r2 * r2 + dx * dx) / (2 * dx)
+    hc = math.sqrt(max(0.0, r * r - a * a))
+    th, ph = math.atan2(hc, a), math.atan2(hc, a - dx)
+    pts = []
+    for i in range(n + 1):
+        ang = th + (2 * math.pi - 2 * th) * i / n
+        pts += [cx + r * math.cos(ang), cy + r * math.sin(ang)]
+    for i in range(n + 1):
+        ang = (2 * math.pi - ph) - (2 * math.pi - 2 * ph) * i / n
+        pts += [cx + dx + r2 * math.cos(ang), cy + r2 * math.sin(ang)]
+    return [("polygon", tuple(pts), colour)]
+
+
+def icon_monitor(cx: float, cy: float, size: float, colour) -> list:
+    """显示器：空心外框 + 底座横线。
+
+    **由另一个会话的智能体提供**（他画得好显示器、我画得好月亮，
+    用户让我们互相补）。原样保留他的坐标公式，只补上类型标注。
+    """
+    half = size / 2.0
+    stroke = max(1.0, size / 9.0)
+    top = cy - half * 0.74
+    bottom = cy + half * 0.26
+    return [
+        # 外框：描边色实心，再内缩半个线宽挖空（fill=None 表示空心）
+        ("rect", cx - half, top, cx + half, bottom, stroke, colour, None, stroke),
+        # 底座：比外框略窄，压在外框下沿下方
+        ("line", cx - half * 0.5, bottom + stroke * 1.9,
+         cx + half * 0.5, bottom + stroke * 1.9, stroke, colour),
+    ]
+
+
+def _has_non_bmp(text: str) -> bool:
+    """这段文字里有没有 **BMP 之外**的字符（即码位 > U+FFFF）。
+
+    emoji 大多在 astral 平面；而 `Microsoft YaHei UI` 覆盖的是 BMP 里的符号。
+    判据很简单，但**必须有** —— 它决定了要不要换字体，
+    而不是"看到是 emoji 就换"。
+    """
+    return any(ord(ch) > 0xFFFF for ch in text)
+
+
+#: 能覆盖 emoji 的字体名，按优先级。**Windows 必装 `Segoe UI Emoji`。**
+_EMOJI_FACES = ("Segoe UI Emoji", "Segoe UI Symbol")
+
+
+def _emoji_face() -> str | None:
+    """挑一个系统里真的装了的 emoji 字体；都没有则返回 ``None``。
+
+    **用 `wx.FontEnumerator` 现查**，不要写死名字就当它存在 ——
+    精简版 Windows 上 `Segoe UI Emoji` 是可以缺席的（N 版 / LTSC）。
+    """
+    installed = set(wx.FontEnumerator.GetFacenames())
+    for face in _EMOJI_FACES:
+        if face in installed:
+            return face
+    return None
+
+
 def _wrap_buttons(buttons, content_width: int, gap: int,
-                  label_width: int = 0) -> list[list]:
+                  label_width: int = 0,
+                  max_per_row: int | None = None) -> list[list]:
     """把一排分段按钮折成若干块（每块占一行）。
 
     ## 第一行要给标签留位置
@@ -973,7 +1259,20 @@ def _wrap_buttons(buttons, content_width: int, gap: int,
         return (sum(b.GetBestSize().width for b in chunk)
                 + gap * (len(chunk) - 1))
 
-    # 首行预算：优先"与标签同行"，放不下两个就放弃同行
+    # ## 布局改版后这里**简化了两处**（用户要求的新版式）
+    #
+    # 旧版是"标签靠左、按钮右对齐"，所以：
+    #   ① 首行要**减去标签宽度**给标签留位置；
+    #   ② 首行**至多两个按钮**（避免折成 `[3, 1]` 那种参差）。
+    #
+    # 用户要求改成"**标题在上方居中、按钮在下方居中**"之后，两条都不成立：
+    #   * 标签**独占一行**，不再与按钮抢宽度；
+    #   * "至多两个"会**把三个主题选项折成 `[2, 1]`**，而用户明确要求
+    #     "跟随系统 / 浅色 / 深色**三个选项全部并排在一起**"——实测踩到，
+    #     新版式下它是纯粹的阻力。
+    #
+    # **标签又回到同一行了**（用户这一轮否决了居中式版式），
+    # 所以首行仍要给它留出宽度；后续行整条内容宽都能用。
     if label_width:
         first_budget = content_width - label_width - gap
         if width_of(buttons[:2]) > first_budget:
@@ -981,21 +1280,16 @@ def _wrap_buttons(buttons, content_width: int, gap: int,
     else:
         first_budget = content_width
 
-    # **首行至多两个。**
-    #
-    # 不封的话，`content_width` 稍宽一点，首行就塞进三个、次行孤零零剩一个
-    # （实测折成 `[3, 1]`）——既不对称，也让弹窗白宽出一大截。
-    # 两列一组与"标签 + 两个按钮"的自然形态一致，也最像"一组里选一个"。
-    if len(buttons) > 2:
-        two_buttons = width_of(buttons[:2])
-        first_budget = max(min(first_budget, two_buttons), 1)
-
     rows: list[list] = []
     current: list = []
     budget = first_budget
     for button in buttons:
         candidate = current + [button]
-        if current and width_of(candidate) > budget and len(current) >= 2:
+        too_wide = width_of(candidate) > budget
+        # **每行上限**：用户要求「排序方式还是成两行两列」——
+        # 四个并排"看着太奇怪"。所以这一组强制每行 2 个。
+        too_many = max_per_row is not None and len(candidate) > max_per_row
+        if current and (too_wide or too_many):
             rows.append(current)
             current = [button]
             budget = content_width          # 后续行没有标签要避让
@@ -1030,7 +1324,11 @@ class SettingsDialog(ThemedDialog):
 
     def __init__(self, parent, theme, current_preference: str,
                  sort_key: str = DEFAULT_SORT_KEY,
-                 sort_reverse: bool | None = None):
+                 sort_reverse: bool | None = None,
+                 theme_preference: str | None = None,
+                 on_theme_preview=None,
+                 on_language_preview=None,
+                 on_sort_preview=None):
         # 正文留空——设置窗口的内容是控件，不是一句话。
         super().__init__(parent, theme, "",
                          title=L("设置", "Settings"),
@@ -1049,11 +1347,178 @@ class SettingsDialog(ThemedDialog):
         # 从配置里灌进来，这样在窗口里换列时能带出那一列自己的方向，
         # 与点表头的行为一致。默认空字典 = 每一列都用各自的默认方向。
         self._sort_directions: dict[str, bool] = {}
+        # 主题偏好：`None` 与 `"system"` 都是跟随系统，显示上高亮"跟随系统"。
+        self._theme_choice = (theme_preference
+                              if theme_preference in THEME_CHOICES
+                              else THEME_SYSTEM)
+        self._theme_buttons: list[RoundedButton] = []
+        # **预览回调**：点一下立刻生效（用户要求"所见即所得"）。
+        # 由主窗口提供——只有它知道怎么给整扇窗重上色、怎么重取全部文案。
+        self._on_theme_preview = on_theme_preview
+        self._on_language_preview = on_language_preview
+        self._on_sort_preview = on_sort_preview
+
         self._build_language_row()
+        self._build_theme_row()
         self._build_sort_rows()
+        # **加了新控件之后必须再套一次字体。**
+        # 基类 `__init__` 里已经套过一次，但那是在语言行/排序行建出来**之前**——
+        # 那时它们还不存在，`self.SetFont` 也传播不到后建的控件。
+        self.apply_body_font()
         self._layout()
 
     # -- 构造 -------------------------------------------------------------
+
+    def _build_theme_row(self) -> None:
+        """主题选择：跟随系统 / 浅色 / 深色。
+
+        用户要求："干脆把切换主题也加进设置吧，这样方便用户也方便你测试。"
+
+        与语言那一行同构（标签 + 一排分段按钮，选中的用强调色），
+        显示名从 :data:`THEME_DISPLAY_NAMES` 取 —— **不在界面里另抄一份**，
+        那样加一种主题就要改两处，而漏改的那处不会有任何提示。
+        """
+        self._theme_label = wx.StaticText(
+            self, label=L("界面主题", "Theme"))
+        self._theme_label.SetForegroundColour(wx.Colour(self.theme.text))
+        self._theme_label.SetBackgroundColour(
+            wx.Colour(self.theme.background))
+
+        for value in THEME_CHOICES:
+            caption = L(*THEME_DISPLAY_NAMES[value])
+            button = RoundedButton(
+                self, caption, self.theme,
+                variant="accent" if value == self._theme_choice else "secondary",
+                height=METRICS.dialog_button_height,
+                # **正方**：最小宽 = 高。用户要求「缩窄成正方圆角矩形，
+                # 这样就不占太多横向空间」。符号本身很窄，所以取等高即可；
+                # 若哪天换成文字标题，它会自己变宽而不会压字。
+                min_width=METRICS.dialog_button_height,
+                on_click=(lambda _event, v=value: self._choose_theme(v)),
+            )
+            # 符号说不清"这是什么主题"，完整名称放 tooltip
+            button.SetToolTip(L(*THEME_TOOLTIPS[value]))
+            # **「跟随系统」不用字形，用画出来的显示器。**
+            #
+            # 曾经这里想用 💻（U+1F4BB），但它是 astral 平面的 emoji：
+            # 自绘按钮走 GDI+，而 **GDI+ 不做字体回退**，`Microsoft YaHei UI`
+            # 里没有这个字形，于是画成 `.notdef`（用户看到的"非法标识符"方框）。
+            #
+            # 另一个会话的智能体给的 `icon_monitor` 用的是**几何图元** ——
+            # 不依赖任何字体覆盖，所以**在任何主题、任何字体下都画得出来**。
+            # 这正是这个位置的正确做法：**图标就该画，不该指望字体**。
+            #
+            # `☀`/`☾` 保持字形：它们是 BMP 符号，字体覆盖得到，
+            # 而且与旁边的显示器图元视觉重量相当。
+            # **三个都用画出来的图标**（用户拿来了对方画的太阳/月亮）。
+            #
+            # 图元不依赖字体覆盖 —— 这正是 `☀`/`☾` 换成绘制版的原因：
+            # 字形要靠字体有那个码位，而**画出来的图形在任何字体、
+            # 任何主题、任何精简版 Windows 上都一样**。
+            button.icon_painter = {
+                THEME_SYSTEM: icon_monitor,
+                THEME_LIGHT: icon_sun,
+                THEME_DARK: icon_moon,
+            }.get(value)
+            button._theme_value = value
+            self._theme_buttons.append(button)
+
+    def _choose_theme(self, value: str) -> None:
+        """点一下立刻换高亮，**不等点确定**（与语言那一行一致）。
+
+        写法与 :meth:`_repaint_choices` 相同：直接改 ``variant`` 再 ``Refresh()``。
+        ``RoundedButton`` **没有** ``set_variant`` —— 别去发明一个，
+        否则同一个效果就有两套实现。
+        """
+        self._theme_choice = value
+        for button in self._theme_buttons:
+            button.variant = ("accent"
+                              if button._theme_value == value
+                              else "secondary")
+            button.Refresh()
+        # **立刻生效**：主窗口换主题，并让本对话框重新上色。
+        if self._on_theme_preview is not None:
+            self._on_theme_preview(value)
+
+    def selected_theme(self) -> str:
+        return self._theme_choice
+
+    def _all_buttons(self) -> list:
+        """**所有**需要跟着主题走的按钮。
+
+        ⚠️ 底部那对（确定/取消）是基类 `ThemedDialog` 建的，存在
+        `self._buttons` 里 —— 一开始漏了它们，于是换主题时
+        **只有「取消」保持旧配色**（用户截图里它是深色，其余是浅色）。
+        """
+        return (list(self._language_buttons) + list(self._theme_buttons)
+                + list(self._sort_buttons) + list(self._direction_buttons)
+                + list(getattr(self, "_buttons", [])))
+
+    def _all_labels(self) -> list:
+        return [self._label, self._theme_label,
+                self._sort_label, self._direction_label]
+
+    def apply_theme(self, theme: Theme) -> None:
+        """**本对话框自己重新上色。**
+
+        用户要的是"所见即所得"：他点月亮时，**设置窗口本身也必须变暗**——
+        只把主窗口换掉、设置窗口还是亮的，那看着就像没生效。
+
+        `RoundedButton` 是自绘的，不会跟着走，所以逐个推给它（`apply_theme`）。
+        """
+        self.theme = theme
+        self.SetBackgroundColour(wx.Colour(theme.background))
+        for label in self._all_labels():
+            label.SetForegroundColour(wx.Colour(theme.text))
+            label.SetBackgroundColour(wx.Colour(theme.background))
+        for button in self._all_buttons():
+            button.theme = theme
+            button.Refresh()
+        # **非客户区要重新声明。**
+        #
+        # 用户报（截图）："各项变化**刷新不完整**" —— 设置窗口主体变暗了，
+        # 但**标题栏那一条还是浅的**。
+        #
+        # 根因：标题栏是**非客户区**，`SetBackgroundColour` 对它无效，
+        # 只能靠 `DwmSetWindowAttribute`（`_apply_window_chrome` 里那一步），
+        # 而那一步**只在 `__init__` 跑过一次**。所以这里必须补调一次。
+        self._apply_window_chrome()
+        self.Refresh()
+        self.Update()
+
+    def retranslate(self) -> None:
+        """**本对话框自己重新取一遍文案**（换语言时用）。
+
+        只改文字，不动尺寸；改完**必须重跑 `_layout()`** ——
+        英文标签与中文标签宽度不同，不重排会压字。
+        """
+        self._label.SetLabel(L("界面语言", "Language"))
+        self._theme_label.SetLabel(L("界面主题", "Theme"))
+        self._sort_label.SetLabel(L("排序方式", "Sort by"))
+        self._direction_label.SetLabel(L("排序方向", "Order"))
+
+        # **按钮的文字也要重取** —— 上一版只改了标签，所以用户看到
+        # "只有非按钮部分变了，按钮部分还是原语言"。
+        #
+        # 自绘按钮的标题走 `SetLabel`（已被 `RoundedButton` 接管，
+        # 会同时写 `self.label` 并重算宽高）。
+        for button in self._sort_buttons:
+            spec = find_sort_spec(getattr(button, "_sort_value", None))
+            if spec is not None:
+                button.SetLabel(spec.label())
+        for button, descending in zip(
+                self._direction_buttons, (True, False)):
+            button.SetLabel(L("降序", "Descending") if descending
+                            else L("升序", "Ascending"))
+        # 底部那一对：文案与 `ThemedDialog.__init__` 里传的是同一组
+        for button, key in zip(getattr(self, "_buttons", []),
+                               (("确定", "OK"), ("取消", "Cancel"))):
+            button.SetLabel(L(*key))
+        # 主题按钮是符号，与语言无关；语言按钮写的是语言自己的名字，
+        # 也不该跟着翻译（"English" 在中文界面下仍然是 English）。
+        self._layout()
+        self.Refresh()
+        self.Update()
 
     def _build_language_row(self) -> None:
         # **标签用 `wx.StaticText` 而不是自绘。** 它是纯静态文字，
@@ -1128,6 +1593,18 @@ class SettingsDialog(ThemedDialog):
             button._direction_value = descending
             self._direction_buttons.append(button)
 
+    def _preview_sort(self) -> None:
+        """把"当前选中的排序"推给主窗口，**立刻重排列表**。
+
+        用户报："排序方式、排序方向**没有及时生效**。"
+        —— 主题与语言都接上了预览回调，**只有排序漏了**。
+
+        排序与那两者不同：它不改配色也不改文案，只改**列表内容的顺序**，
+        所以主窗口那边调 `apply_sort` 就够了，不需要重上色。
+        """
+        if self._on_sort_preview is not None:
+            self._on_sort_preview(self._sort_key, self._sort_reverse)
+
     def _choose_sort(self, key: str) -> None:
         """换列时**带出那一列自己的方向**，与点表头的行为一致。
 
@@ -1140,17 +1617,33 @@ class SettingsDialog(ThemedDialog):
         self._sort_reverse = (spec.default_reverse if remembered is None
                               else remembered)
         self._repaint_choices()
+        # **立刻重排**（用户报"排序方式没有及时生效"）
+        #
+        # ⚠️ 上一轮我漏了这一处：那次替换用的锚点文本
+        # 在 `__init__` 里也有一份，`replace(..., 1)` 命中了
+        # **第一处**（`__init__`），于是只有 `_choose_direction`
+        # 接上了预览，`_choose_sort` 没有 ——
+        # 症状就是"点排序方式不生效、点排序方向生效"。
+        self._preview_sort()
 
     def _choose_direction(self, descending: bool) -> None:
         self._sort_reverse = descending
+        # **立刻重排**（用户报"排序方向没有及时生效"）
+        self._preview_sort()
         # 顺手记住这一列的方向，这样在同一列上换来换去不会丢
         self._sort_directions[self._sort_key] = descending
         self._repaint_choices()
 
     def _choose(self, value: str) -> None:
-        """点一下**立刻**换色，不等点确定。"""
+        """点一下**立刻**换色，不等点确定；并**立刻把语言也换掉**。
+
+        用户要求"如果他切换了英文，界面的文字马上就全部变成英文"——
+        所以这里不只是把选中项标出来，而是真的换语言。
+        """
         self._choice = value
         self._repaint_choices()
+        if self._on_language_preview is not None:
+            self._on_language_preview(value)
 
     def _repaint_choices(self) -> None:
         """按当前选择刷新所有分段按钮的配色。**只有一处判断**，
@@ -1158,6 +1651,11 @@ class SettingsDialog(ThemedDialog):
         for button in self._language_buttons:
             button.variant = ("accent"
                               if button._language_value == self._choice
+                              else "secondary")
+            button.Refresh()
+        for button in getattr(self, "_theme_buttons", []):
+            button.variant = ("accent"
+                              if button._theme_value == self._theme_choice
                               else "secondary")
             button.Refresh()
         for button in self._sort_buttons:
@@ -1213,9 +1711,10 @@ class SettingsDialog(ThemedDialog):
         # 所以按 `dialog_row_width`（"标签 + 两个按钮"）封顶，放不下的**换行**。
         max_width = px(METRICS.dialog_row_width)
 
-        # 每行的按钮组，按**来源**分组；折行留到宽度定下来之后再做。
+        # 每组按钮，按**来源**分组。
         groups = (
             (self._label, list(self._language_buttons)),
+            (self._theme_label, list(self._theme_buttons)),
             (self._sort_label, list(self._sort_buttons)),
             (self._direction_label, list(self._direction_buttons)),
         )
@@ -1229,100 +1728,153 @@ class SettingsDialog(ThemedDialog):
                   + max(len(self._labels) - 1, 0)
                   * px(METRICS.dialog_button_gap))
 
-        # **一、先把每行的"自然宽度"量出来（不折行）。**
-        natural = max(_label_width(label) + gap + chunk_width(buttons)
-                      for label, buttons in groups)
-        content_width = max(min(natural, max_width), footer)
+        # **宽度 = max(标签+按钮, 底部按钮排, 下限)。**
+        #
+        # 版式回到"**标签在左、按钮在右**"（用户这一轮否决了居中式），
+        # 所以标签又与按钮同行了 —— 宽度要按"标签宽 + 间距 + 按钮宽"算。
+        #
+        # 加 `settings_min_width` 下限：用户之前要求过"窗口可以放大一些"。
+        # 标签与按钮之间用 **`padding_tight`**（比 `padding_gap` 紧一档）：
+        # 用户要求"中间的空格全部删掉……最多打一两个空格就够了"。
+        #
+        # ⚠️ 真正摆放时 `_place_rows` 会改用量出来的"**两个空格**"
+        # （用户后来明确了长度）。这里只用于**算内容宽度**，
+        # 取紧的那一档即可 —— 算宽时宁可窄一点，不要让窗口被撑宽。
+        label_gap = px(METRICS.padding_tight)
+        natural = max(
+            [_label_width(label) + label_gap + chunk_width(buttons)
+             for label, buttons in groups]
+            + [footer]
+        )
+        content_width = max(min(natural, max_width),
+                            px(METRICS.settings_min_width), footer)
 
-        # **二、再按已定的 `content_width` 折行。**
+        # **每行按钮数上限**：`None` = 不限制，只按宽度折。
         #
-        # 顺序很重要：先折行再定宽度的话，"宽度"要依赖"折成几块"、
-        # "折成几块"又要依赖"多宽"——循环。先量自然宽度、再封顶、
-        # 再折行，就没有这个环。
-        #
-        # **折行预算 = 内容宽 − 标签宽 − 间距。** 这个减法踩过两次：
-        #   ① 拿 `max_width`（封顶值）当预算 → 按钮按 420 排，
-        #      而标签还要从这 420 里占掉 88，于是压字；
-        #   ② `_place_rows` 又拿 `_body_rect` 的右边界（比内容宽多一个
-        #      margin）去右对齐，两处用的宽度不是同一个数。
-        # **放不下就"标签独占一行、按钮另起一行"。**
-        #
-        # 这是第三次修这个压字。前两次都想让"标签与按钮共用一行"，
-        # 于是要在 420 像素里既放标签（88）又放按钮（350）——**放不下**，
-        # 只能靠右对齐硬挤，结果就是标签被压住。
-        #
-        # 与其把宽度撑大到 600+（弹窗变成横带，已经否决过一次），
-        # 不如把这一行拆成两行：标签一行，按钮一行（右对齐）。
-        # 布局简单了，也不再依赖"标签到底多宽"这种字体相关的量。
-        # 折行这件事**只在 `_wrap_buttons` 里做**。
-        # 这里再判一次"放不放得下"就会有两套规则，两套迟早不一致。
+        # 用户要求「排序方式还是成**两行两列**吧，四个并排看着还是太奇怪了」。
+        # 其它三组不限制（语言 2 个、主题 3 个、方向 2 个，本来就排得下）。
+        per_row_caps = {
+            id(self._sort_label): 2,
+        }
+
         self._rows = tuple(
             (label, _wrap_buttons(buttons, content_width, gap,
-                                  label_width=_label_width(label)))
+                                  label_width=_label_width(label) + label_gap,
+                                  max_per_row=per_row_caps.get(id(label))))
             for label, buttons in groups
         )
 
-        # 高度 = 按钮块数 × 行高。**标签不额外占行**（它与第一块垂直居中）。
+        # **每组 = 标签 + 若干按钮行；组与组之间空一行。**
+        #
+        # 用户要求「每个类之间**一定要多空一行**」—— 这就是"层次感"的来源。
+        # 标签**不额外占行**，它与第一块按钮垂直居中（见 `_place_rows`）。
+        group_gap = px(METRICS.dialog_group_gap)
+
         body_height = 0
-        for _label, chunks in self._rows:
-            body_height += (row_height + row_gap) * _row_height_lines(chunks)
+        for index, (_label, chunks) in enumerate(self._rows):
+            if index:
+                body_height += group_gap
+            body_height += (row_height + row_gap) * len(chunks)
         body_height -= row_gap                     # 末尾那一次多加的
 
         client_width = content_width + margin * 2
 
         self._body_rect = (margin, margin, margin + content_width,
                            margin + body_height)
+        # **底部按钮与选项之间多空一行**（用户要求）。
+        # 它在 `dialog_body_to_buttons` 之上**再加**一段。
         self._buttons_top = (margin + body_height
-                             + px(METRICS.dialog_body_to_buttons))
+                             + px(METRICS.dialog_body_to_buttons)
+                             + px(METRICS.dialog_footer_gap))
         client_height = (self._buttons_top + row_height
                          + px(METRICS.dialog_bottom))
         self.SetClientSize((client_width, client_height))
-        self._place_buttons()
-        # **把内容宽度传进去，不要让 `_place_rows` 自己去读 `_body_rect`。**
+
+        # **底部按钮右对齐**（用户要求"放在底部右侧"）。
         #
-        # 踩过：`_body_rect` 的右边界是 `client_width - margin`，
-        # 而各行实际只分配到 `content_width`（可能因为封顶而更窄）。
-        # 两者差一个 margin（42 像素），于是按钮比"内容和标签共用的那片区域"
-        # 往左多占了 42，标签的最后两三个字被压住——正是用户截图里那样。
-        # 现在两边用**同一个数**，不可能再对不上。
-        self._place_rows(content_width, row_height + row_gap)
+        # 基类 `ThemedDialog._layout()` 把它们算成**居中**的，
+        # 所以这里要重算 `_button_rects` 再摆；`_place_buttons()` 只负责
+        # 按 `_button_rects` 落位，改这里就够了。
+        footer_gap = px(METRICS.dialog_button_gap)
+        footer_width = px(METRICS.dialog_button_width)
+        x = client_width - margin - footer
+        for index in range(len(self._labels)):
+            self._button_rects[index] = (x, footer_width)
+            x += footer_width + footer_gap
+        self._place_buttons()
+        self._place_rows(content_width)
         self._center_on_parent()
 
-    def _place_rows(self, content_width: int, row_pitch: int) -> None:
-        """标签靠左；分段按钮**右对齐**，放不下就换到下一行。
+    def _place_rows(self, content_width: int) -> None:
+        """**「标签 + 按钮」当成一整块，整段居中**；组与组之间空一行。
+
+        ## 用户对间距的两次要求（都记下来）
+
+        1. "按钮全部都挤在一起，**没有层次感**" → 加了组间空行。
+        2. "标题和按钮之间**隔得太远了**，用户很难把这些东西关联到一起。
+           ……**不要分别左对齐和右对齐**，就让它们**左右挨在一起**……
+           然后让它们**整段居中**。"
+
+        第 2 条说的就是早先那种"标签钉左边、按钮钉右边"的做法：
+        内容一宽，两者之间就是一大片空白，**看不出谁属于谁**。
+        现在整块居中之后，标签永远紧挨着它那组按钮。
 
         带宽由 :meth:`_layout` 传进来——**不要自己去读 `_body_rect`**，
         两者差一个 margin（见 `_layout` 里那段说明）。
-
-        （不用 sizer：基类已经把"手动摆放"这条路走通了，
-        混用 sizer 会让 `wx.Dialog` 的尺寸计算插一脚。）
         """
         left, top, _right, _bottom = self._body_rect
-        right = left + content_width
-        gap = scale_for_dpi(METRICS.padding_gap, dpi_of(self))
+        dpi = dpi_of(self)
+        gap = scale_for_dpi(METRICS.padding_gap, dpi)
+        label_gap = scale_for_dpi(METRICS.padding_tight, dpi)
+        row_gap = scale_for_dpi(METRICS.padding_tight, dpi)
+        group_gap = scale_for_dpi(METRICS.dialog_group_gap, dpi)
+        row_pitch = scale_for_dpi(METRICS.dialog_button_height, dpi) + row_gap
+
+        # **标签与按钮之间留"两个空格"。**
+        #
+        # 用户："标题和按钮之间间隔**两个空格**我看看效果。"
+        # 那就**按字体现量**两个空格有多宽，而不是写死一个像素数——
+        # 换字体或换 DPI 时它仍然是"两个空格"，这正是用户描述的那个量。
+        dc = wx.ClientDC(self)
+        label_font = self._label.GetFont()
+        dc.SetFont(label_font)
+        # **三个空格**（用户："标题和按钮之间再加一个空格"）。
+        # 按字体现量，换字体或换 DPI 时它仍然是"三个空格"。
+        label_gap = max(dc.GetTextExtent("   ").width, scale_for_dpi(4, dpi))
+
         y = top
-        for label, chunks in self._rows:
-            # 标签**按实测宽度**定尺寸（`GetBestSize()` 是旧字体下的缓存值，
-            # 见 `_label_width` 的说明）。
+        for index, (label, chunks) in enumerate(self._rows):
+            if index:
+                y += group_gap              # ← "每个类之间多空一行"
+
             label_height = label.GetSize().height
             label_width = _label_width(label)
 
-            # **标签与第一块按钮垂直居中，不额外占行。**
-            # 早先让它独占一行，结果"排序方式"飘在按钮上方——
-            # 用户直接指出"你自己看看现在怪不怪"。
-            label.SetSize(left, y + max((row_pitch - label_height) // 2, 0),
+            def chunk_total(chunk) -> int:
+                if not chunk:
+                    return 0
+                width = chunk[0].GetBestSize().width
+                return width * len(chunk) + gap * (len(chunk) - 1)
+
+            # **整段左对齐**（用户："整段左对齐"）。
+            #
+            # 上一版是整块居中；用户看过之后改主意了，就用内容区的左边界。
+            block_left = left
+
+            label.SetSize(block_left,
+                          y + max((row_pitch - label_height) // 2, 0),
                           label_width, label_height)
 
-            for index, chunk in enumerate(chunks):
-                row_top = y + index * row_pitch
-                width = chunk[0].GetBestSize().width
-                height = chunk[0].GetBestSize().height
-                total = width * len(chunk) + gap * (len(chunk) - 1)
-                x = right - total
+            x0 = block_left + label_width + label_gap
+            for chunk in chunks:
+                width = chunk[0].GetBestSize().width if chunk else 0
+                height = chunk[0].GetBestSize().height if chunk else 0
+                x = x0                      # ← 各排**左对齐**，紧挨标签
                 for button in chunk:
-                    button.SetSize(x, row_top, width, height)
+                    button.SetSize(x, y, width, height)
                     x += width + gap
-            y += row_pitch * len(chunks)
+                y += row_pitch
+            y -= row_gap                     # 末尾那一次多加的
 
     def _on_paint(self, event) -> None:
         """基类会把 `_message` 画出来；设置窗口没有正文，所以只铺底色。"""
@@ -1526,7 +2078,14 @@ class PathBar(BufferedPanel):
 
         **输入框本身也要用正文大小**——用户看的是"输入框里的字有多大"，
         而它由 :attr:`text_ctrl` 自己的字体决定，不是由 PathBar 的字体决定。
-        只设 PathBar 不设 text_ctrl 的话，输入框看起来还是小一号（实测 9pt）。"""
+        只设 PathBar 不设 text_ctrl 的话，输入框看起来还是小一号（实测 9pt）。
+
+        .. note::
+
+           曾经这里还叠过一个"导航窗格偏移"，起因是用户要求把
+           "导航窗格内的文字（包括顶栏标题）缩小 1pt"——**他随后更正说
+           原意是"记录窗格"**，那处已撤回，所以这里就是**正文本身**。
+        """
         self.text_ctrl.SetFont(body)
         self.Refresh()
 
@@ -1536,13 +2095,75 @@ class PathBar(BufferedPanel):
         描边画在输入框**外面**一圈（构造时留了 2 逻辑像素的内边距），
         否则会被输入框自己的背景盖住。有焦点时用强调色：
         **这是"这里可以输入"的主要视觉线索。**
+
+        没有焦点时用 :attr:`Theme.field_border` 而**不是** `Theme.border`：
+        后者画的是次要按钮和分隔条，那些控件**本身有填充色**表达"我是个控件"；
+        而本输入框的填充几乎与背景同色，**框线是它唯一的线索**，
+        所以它需要更高的对比度（用户："不然用户很难注意到它"）。
+
+        ## ⚠️ 一次**没查出来**的排查，记在这里免得后人重走
+
+        用户报："浅色主题下默认框线只有一条……深色主题下默认框线**里面
+        还有一圈纯黑色**，让输入框看起来有了立体感，更像一个按钮。"
+
+        用户进一步观察定出了位置：**右边线、底边线内部**有两条黑像素，
+        **左边线、顶部边线内部没有**。这个**不对称**是"亮色走左上、
+        暗色走右下"的凹陷边框签名。
+
+        **排查结论：不是 `WS_EX_CLIENTEDGE`。**
+        实测同款新建控件的 EX 样式：
+
+        ==========================================  ============
+        样式                                         EX 样式
+        ==========================================  ============
+        默认（不给 style）                            `0x00000200`（带）
+        **`wx.BORDER_NONE`（本控件用的）**             `0x00000000`（**不带**）
+        ==========================================  ============
+
+        所以 `remove_client_edge()` 在这里是**空操作**（它返回 `True`
+        只是因为"本来就没有也算成功"）。那条路走过了，别再走。
+
+        ## 真正的原因：**1 物理像素的笔在 175% 缩放下是亚像素的**
+
+        在用户截图上逐像素量四条边（图像由屏幕 5.57× 放大，见
+        `tools/probes/analyze_shot*.py` 的记录）：
+
+        ======  ==================  ==================================
+        边      描边像素实测         说明
+        ======  ==================  ==================================
+        左      `#1A`（背景 `#19`）  只亮 1 级 —— **几乎没画出来**
+        上      `#1A`               同上
+        右      `#42`               接近本色 `#4A4A4A` —— 画出来了
+        下      `#41`               同上
+        ======  ==================  ==================================
+
+        **同一条描边，四边强度差约 40 倍。** 而且右/底在填充与描边之间
+        还夹着一层 `#292929`（比填充 `#2E2E2E` 更暗）——
+        **那就是用户看到的"框线里面的黑"。**
+
+        **机制**：`wx.Pen()` 默认宽度 **1 物理像素**，在 175% 缩放下
+        只有 **0.57 逻辑像素**。GDI+ 抗锯齿把它摊到相邻两个物理像素上，
+        摊多少取决于路径相对像素网格的位置 —— 右侧拿到约 85% 覆盖、
+        左侧只有约 2%，于是同一条线一边实一边虚。
+
+        **修法**：把笔宽**按 DPI 缩放成整数物理像素**
+        （`scale_for_dpi(1, dpi)`，@168dpi = 2px）。这样四边都是整像素，
+        不需要抗锯齿，强度自然一致。同时描边仍走 GC，圆角保持平滑。
         """
         rect = self.text_ctrl.GetRect()
         colour = wx.Colour(
-            self.theme.accent if self.text_ctrl.HasFocus() else self.theme.border
+            self.theme.accent if self.text_ctrl.HasFocus()
+            else self.theme.field_border
         )
         x, y = rect.x - 1, rect.y - 1
         w, h = rect.width + 2, rect.height + 2
+
+        # **笔宽必须按 DPI 取整。**
+        #
+        # 见上面那段：1 物理像素的笔在非整数缩放下是亚像素的，
+        # 抗锯齿会让同一条线四边粗细不一（实测左 2%、右 85% 覆盖）。
+        # 取 `scale_for_dpi(1, dpi)` 让它落在整数物理像素上。
+        pen_width = max(scale_for_dpi(1, dpi_of(self)), 1)
 
         # **必须走 GraphicsContext 才没有锯齿。**
         #
@@ -1555,12 +2176,12 @@ class PathBar(BufferedPanel):
         gc = wx.GraphicsContext.Create(dc)
         if gc is not None:
             gc.SetBrush(wx.TRANSPARENT_BRUSH)
-            gc.SetPen(wx.Pen(colour))
+            gc.SetPen(wx.Pen(colour, pen_width))
             gc.DrawRoundedRectangle(x, y, w, h, METRICS.radius_field)
         else:
             # 取不到 GC 时退回 GDI（会有锯齿，但不会崩、也不会不画）
             dc.SetBrush(wx.TRANSPARENT_BRUSH)
-            dc.SetPen(wx.Pen(colour))
+            dc.SetPen(wx.Pen(colour, pen_width))
             dc.DrawRoundedRectangle(x, y, w, h, METRICS.radius_field)
 
     def refresh_hint(self) -> None:

@@ -29,6 +29,13 @@ LVM_SETITEMSPACING = LVM_FIRST + 51
 LVM_SETEXTENDEDLISTVIEWSTYLE = LVM_FIRST + 54
 LVM_GETEXTENDEDLISTVIEWSTYLE = LVM_FIRST + 55
 
+# 树控件（`SysTreeView32`）。**与列表那组不是一回事**：
+# 列表的 `LVM_SETITEMSPACING` 在 report 视图下实测无效，
+# 而树控件的 `TVM_SETITEMHEIGHT` **确实生效**（见下面的 docstring）。
+TVM_FIRST = 0x1100
+TVM_GETITEMHEIGHT = TVM_FIRST + 28
+TVM_SETITEMHEIGHT = TVM_FIRST + 27
+
 
 #: 扩展样式位
 #
@@ -137,6 +144,43 @@ def invalidate_window(hwnd: int, erase: bool = True) -> bool:
 
 
 
+def get_tree_item_height(hwnd: int) -> int:
+    """读树控件的行高（``TVM_GETITEMHEIGHT``）。
+
+    返回 0 表示读不到（非 Windows、句柄无效，或调用失败）。
+    """
+    if not IS_WINDOWS or not hwnd:
+        return 0
+    return _send_message(hwnd, TVM_GETITEMHEIGHT, 0, 0)
+
+
+def set_tree_item_height(hwnd: int, height: int) -> bool:
+    """设置树控件的行高（``TVM_SETITEMHEIGHT``）。
+
+    ## 这个**真的有效**，与列表那个消息不一样
+
+    用户问"导航窗格的行距可以增加吗"。实测
+    （`tools/probes/probe_dialog_fonts.py` 的第 ④ 段）：
+
+    ==========  ======  ======  ======  ======  ======
+    设定值         20      24      28      32      40
+    回读值         20      24      28      32      40
+    ==========  ======  ======  ======  ======  ======
+
+    **一一对应。** 对照：列表的 `LVM_SETITEMSPACING` 在同一台机器上
+    从 0 设到 40、行高纹丝不动（那是 report 视图的固有限制）。
+
+    :param height: 期望行高（**物理像素**）。传 0 或负值表示恢复默认。
+    :return: 是否设置成功（判据是**回读**，不是消息返回值——见下）
+    """
+    if not IS_WINDOWS or not hwnd:
+        return False
+    _send_message(hwnd, TVM_SETITEMHEIGHT, height, 0)
+    # **判据取回读**：这一族消息"送达"与"生效"是两回事
+    # （列表那三个扩展样式上踩过一次）。这里比的是量出来的行高。
+    return get_tree_item_height(hwnd) == height
+
+
 def set_item_spacing(hwnd: int, width: int, height: int) -> bool:
     """设置列表行间距（``LVM_SETITEMSPACING``）。
 
@@ -145,6 +189,20 @@ def set_item_spacing(hwnd: int, width: int, height: int) -> bool:
     否则 ``-1`` 会被当成 ``65535``。
 
     **注意**：这只对原生 ``SysListView32`` 有意义（``wx.ListCtrl`` 就是它）。
+
+    ## ⚠️ 实测：这个函数对 **report（详细信息）视图是空操作**
+
+    `tools/probes/probe_row_spacing.py` 把 ``height`` 从 0 一路设到 40，
+    **回读行高恒为 39px，一次都没变**（列表停在默认的 report 视图）。
+
+    MSDN 也写明该消息只对 **icon / small-icon 视图**有意义 —— 实测与文档一致。
+
+    **所以调用方不要依赖它生效**，也不要凭返回值判断"行距设上了"：
+    它返回的是"消息送达"，而且**成功时还是 0**。
+
+    report 视图的行高**只由字号决定**；想在不改字号的前提下加高，
+    只能给列表挂一张 1×H 的空 ``wx.ImageList`` 作为 SMALL 图列表
+    （`tools/probes/probe_row_height.py` 验证过：H=40 → 行高 41、H=48 → 49）。
     """
     if not IS_WINDOWS or not hwnd:
         return False

@@ -18,7 +18,7 @@ import sys
 from dataclasses import dataclass
 
 APP_NAME = "File Tracker"
-APP_VERSION = "1.2.5"
+APP_VERSION = "1.3.0"
 
 #: 用户指定的初始窗口增量：**累计** 32.25%
 #
@@ -26,6 +26,19 @@ APP_VERSION = "1.2.5"
 # 所以这里直接写最终倍数，而不是在代码里连乘两次：
 # `1.15 * 1.15 = 1.3225`。**改这个数之前先确认用户要的是"再增"还是"总共"。**
 WINDOW_SCALE = 1.3225
+
+#: **只加高度**的额外倍数（宽度不动）。
+#
+# 起因：用户要求"记录窗格条目字号 +1pt、行距加大"，并要求"初始窗口高度适当增加"。
+# 行变高了 ⇒ 同样高度下能看到的条数变少，所以补一点垂直空间。
+#
+# 取 **+10%**：1693×952 → 1693×1047（+95 像素，约两行）。
+# 这是"循序渐进"的一档；不够就改这个数，**不要顺手连宽度一起动**。
+#
+# ⚠️ 它与 `WINDOW_SCALE` 是**两条独立的链**：那个管"用户要多大"，
+# 这个管"字变大了要多留垂直空间"。混在一起以后就说不清是谁要的了。
+WINDOW_EXTRA_HEIGHT = 1.10
+
 DEFAULT_WINDOW_SIZE = (1280, 720)
 
 #: 左上右下留出的安全边距，避免窗口标题栏贴住屏幕边缘或压住任务栏。
@@ -189,12 +202,19 @@ def split_path_chain(path: str) -> list[str]:
 # --------------------------------------------------------------------------
 
 def scaled_window_size(base: tuple[int, int] = DEFAULT_WINDOW_SIZE,
-                       scale: float = WINDOW_SCALE) -> tuple[int, int]:
+                       scale: float = WINDOW_SCALE,
+                       extra_height: float = WINDOW_EXTRA_HEIGHT,
+                       ) -> tuple[int, int]:
     """按比例放大基准窗口尺寸，四舍五入到整数。
 
-    1280×720 增大 15% → 1472×828。
+    **宽度**只乘 :data:`WINDOW_SCALE`；**高度**再额外乘
+    :data:`WINDOW_EXTRA_HEIGHT`（见那里的说明）。
+
+    1280×720 → 宽 1280×1.3225 = 1693；高 720×1.3225×1.10 = 1047。
     """
-    return (int(round(base[0] * scale)), int(round(base[1] * scale)))
+    width = base[0] * scale
+    height = base[1] * scale * extra_height
+    return (int(round(width)), int(round(height)))
 
 
 def fit_window_size(preferred: tuple[int, int],
