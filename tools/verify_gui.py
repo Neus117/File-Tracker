@@ -98,6 +98,32 @@ def _colour_hex(colour) -> str:
     )
 
 
+def select_only(frame, row: int) -> None:
+    """让列表里**只有第 `row` 行**被选中。
+
+    ## ⚠️ 为什么需要这个函数（2026-10-17）
+
+    用户加了"按住 Ctrl 多选"之后，列表不再是 `LC_SINGLE_SEL` ——
+    **`Select(i)` 不再自动取消别的行**。
+
+    验证脚本里原来到处是裸的 `frame.list_ctrl.Select(0)`，
+    本意是"选中第 0 行"，在多选下变成"**额外**选中第 0 行" ——
+    于是前面步骤留下的选中会一直累积，后面所有
+    "单条选中"的断言全部失真。
+
+    实测后果：一次跑出 5 条失败（`open_targets` 返回一整个选中集、
+    顶置顺序错乱），而**程序本身是对的**。
+    ⇒ 凡是要"选中某一条"的地方一律走这里。
+    """
+    control = frame.list_ctrl
+    for index in range(control.GetItemCount()):
+        control.Select(index, index == row)
+    if 0 <= row < control.GetItemCount():
+        control.Focus(row)
+    for _ in range(6):
+        wx.YieldIfNeeded()
+
+
 def enum_our_windows(title: str) -> list[tuple[int, str, int]]:
     """枚举可见顶层窗口，按**进程映像名**过滤出本进程的窗口。
 
@@ -173,9 +199,14 @@ def main() -> int:
         # 让 `TemporaryDirectory` 的清理失败，于是临时目录留在盘上。
         #
         # 所以这里一次性替换掉，全程只记录路径、不开窗口。
+        #
+        # ⚠️ **替身必须返回 `True`**（2026-10-17）：`open_folder` 现在返回
+        # "是否真的打开了"，而调用方**按它决定要不要记这次访问**
+        # （审计查出的缺陷：原来是先记访问、再打开，失败也照记）。
+        # 替身返回 `None` 会被当成"没打开" ⇒ 记录被跳过 ⇒ 一堆假失败。
         opened_paths: list[str] = []
         original_open_folder = frame.open_folder
-        frame.open_folder = lambda path: opened_paths.append(path)
+        frame.open_folder = lambda path: (opened_paths.append(path), True)[1]
 
         frame.Show()
         # 原生表头的隐藏是**延迟**做的（CallLater 60ms，见
@@ -768,9 +799,13 @@ def main() -> int:
         # 回车必须真的打开资源管理器，而不是只定位树节点。
         # **open_folder 已被替身接管**（见 main 开头），所以这里读的是它收到的调用，
         # 不会真的弹窗口——既验证了行为，又不在用户桌面上留东西。
+        #
+        # ⚠️ **替身必须返回 `True`**（2026-10-17）：`open_folder` 现在返回
+        # "是否真的打开了"，调用方**按它决定要不要记这次访问**。
+        # 返回 `None` 会被当成"没打开" ⇒ 记录被跳过 ⇒ 这条判据假失败。
         opened: list[str] = []
         original_open = frame.open_folder
-        frame.open_folder = lambda path: opened.append(path)
+        frame.open_folder = lambda path: (opened.append(path), True)[1]
         try:
             target = os.path.join(scratch.name, "deep", "enter-probe")
             os.makedirs(target, exist_ok=True)
@@ -792,6 +827,28 @@ def main() -> int:
             "回车后同时完成记录",
             recorded is not None and recorded.access_count >= 1,
             f"库中频次 = {recorded.access_count if recorded else None}",
+        )
+
+        # **阴性对照：打不开的时候**不该记这次访问（审计查出的缺陷）。
+        #
+        # 原来是 `record_accessed_path(path)` **先于** `open_folder(path)` 调用，
+        # 而 `open_folder` 的失败信号没人读 ⇒ "没打开成功"的路径照样 +1 上屏。
+        never_opened = os.path.join(scratch.name, "deep", "cannot-open-probe")
+        os.makedirs(never_opened, exist_ok=True)
+        original_open = frame.open_folder
+        frame.open_folder = lambda path: False          # ← 模拟"打不开"
+        try:
+            frame.on_path_submitted(never_opened)
+            for _ in range(20):
+                wx.YieldIfNeeded()
+        finally:
+            frame.open_folder = original_open
+        unrecorded = frame.store.get(never_opened)
+        check(
+            "阴性对照：**打不开就不该记这次访问**",
+            unrecorded is None or unrecorded.access_count == 0,
+            f"打不开却记了频次 = "
+            f"{unrecorded.access_count if unrecorded else '（没记录，正确）'}",
         )
 
         # ==============================================================
@@ -1480,7 +1537,7 @@ def main() -> int:
             )
 
             # ② 两档同时可见（用户截图里要的效果）
-            frame.list_ctrl.Select(3)
+            select_only(frame, 3)
             frame._paint_key = None
             frame._apply_selection_highlight()
             for _ in range(20):
@@ -1525,8 +1582,7 @@ def main() -> int:
             )
         # 选中高亮：设完之后**回读**，确认没被原生覆盖
         if frame.list_ctrl.GetItemCount():
-            frame.list_ctrl.Select(0)
-            frame.list_ctrl.Focus(0)
+            select_only(frame, 0)
             frame._apply_selection_highlight()
             for _ in range(20):
                 wx.YieldIfNeeded()
@@ -1578,10 +1634,10 @@ def main() -> int:
             f"列表 {row_count} 行",
         )
         # 选中列表第 0 行 → 最后一次选中来自**记录窗格**
-        frame.list_ctrl.Select(0)
-        frame.list_ctrl.Focus(0)
-        for _ in range(10):
-            wx.YieldIfNeeded()
+        #
+        # ⚠️ 必须用 `select_only`：列表现在**可多选**，
+        # 裸的 `Select(0)` 是"额外选中第 0 行"，前面步骤留下的选中会累积。
+        select_only(frame, 0)
         frame._focus_pane = "list"
         chosen_from_list = frame.open_targets()
         check(
@@ -2847,10 +2903,11 @@ def main() -> int:
             if row < 0:
                 check(f"能在列表里找到 {name}", False, f"find_path 返回 {row}")
                 continue
-            frame.list_ctrl.Select(row)
-            frame.list_ctrl.Focus(row)
-            for _ in range(8):
-                wx.YieldIfNeeded()
+            # **可多选之后必须用 select_only** —— 不加清空的话，
+            # 上一轮的顶置会把该行的"选中"留着，下一次 `on_pin` 可能
+            # 作用在**多条**上（`selected_path()` 只取第一条，
+            # 但顶置顺序就乱了）。
+            select_only(frame, row)
             frame.on_pin(None)
             for _ in range(8):
                 wx.YieldIfNeeded()

@@ -19,6 +19,17 @@ import os
 import sys
 import time
 
+# **输出编码兜底。**
+#
+# 审计实测：本文件里的 `✅`/`❌` 在 **GBK 控制台**（Windows 默认）下抛
+# `UnicodeEncodeError`，于是它在**打印结论之前就崩了**，还连带
+# `frame.store.close()` 走不到、临时目录清理失败。
+#
+# 仓库里的探针都建议用 `-X utf8` 跑，但**不能指望每个人都记得** ——
+# 一个诊断脚本在报结论前崩掉，等于这次诊断白做。
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src"))
 
 import wx

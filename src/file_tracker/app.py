@@ -40,6 +40,7 @@ from .core import (
 from .store import TIME_FORMAT, PathRecord, PathStore, default_db_path, split_timestamp
 from .dir_tree import DirectoryTree
 from .header import ColumnHeader
+from . import paint_trace
 from .lang import (L, PREFERENCE_CHINESE, PREFERENCE_ENGLISH,
                    apply as apply_language, is_chinese)
 from .theme import (METRICS, THEME_CHOICES, THEME_DISPLAY_NAMES, THEME_SYSTEM,
@@ -449,6 +450,12 @@ class FileTracker(wx.Frame):
         # 被用到的那几个方法（`GetTreeCtrl` / `GetPath` / `GetPaths` /
         # `ShowHidden`），所以**下面那几十处调用一行都不用改**。
         self.dir_ctrl = DirectoryTree(left_panel, show_hidden=True)
+        # **把树的错误上报接到项目的资源错误通道上。**
+        #
+        # 审计查出的缺陷：`_populate_item` 展开失败时原来既不重试也不报错，
+        # 用户只看到"这个目录点不开、里面什么都没有"。
+        # `dir_tree` 不能反向 import `app`（循环依赖），所以用**注入回调**。
+        self.dir_ctrl.on_error = self._report_resource_error
         self.dir_ctrl.SetMinSize((METRICS.tree_min_width, -1))
         tree = self.dir_ctrl.GetTreeCtrl()
         tree.SetBackgroundColour(wx.Colour(self.theme.card))
@@ -457,7 +464,21 @@ class FileTracker(wx.Frame):
         # 原生 `SysTreeView32` 本来就不响应（那里没有节点），
         # 所以能改善的是**让选中状态更明显**，而不是让空白可点。
         self._enable_tree_row_highlight(tree)
+        # **两个事件都要绑，少一个就少一条路。**
+        #
+        # * `EVT_TREE_ITEM_ACTIVATED` —— **键盘回车**激活（事件自带节点）
+        # * `EVT_LEFT_DCLICK`          —— **鼠标双击**（实测**不发**上面那个事件！）
+        #
+        # ⚠️ 2026-10-17 实测（`tools/probes/probe_tree_events.py`）：
+        # 给树的窗口发真的 `WM_LBUTTONDOWN/UP/DBLCLK/UP`，收到的是
+        # `EVT_LEFT_DOWN / LEFT_UP / **LEFT_DCLICK** / LEFT_UP` ——
+        # **`EVT_TREE_ITEM_ACTIVATED` 一次都不发。**
+        #
+        # 只绑前者时，"双击导航窗格里的文件"这条路上
+        # `on_dir_item_activated` **根本不会被调用**：不打开、不记录、
+        # 焦点也不转移 —— 正是用户报的"焦点一直停留在导航窗格"。
         tree.Bind(wx.EVT_TREE_ITEM_ACTIVATED, self.on_dir_item_activated)
+        tree.Bind(wx.EVT_LEFT_DCLICK, self.on_dir_item_activated)
         tree.Bind(wx.EVT_SCROLLWIN, self.on_scroll)
         # 导航窗格里**用户操作**了 → 之后的「打开」以它为准。
         #
@@ -521,9 +542,19 @@ class FileTracker(wx.Frame):
         # 所以我一度误判"深色只有一条顶栏 = 没有重复"。
         self.list_ctrl = wx.ListCtrl(
             card_panel,
-            style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.BORDER_NONE
-            | wx.LC_NO_HEADER,
+            style=wx.LC_REPORT | wx.BORDER_NONE | wx.LC_NO_HEADER,
         )
+        # **允许多选（Ctrl / Shift 点击）。**
+        #
+        # ⚠️ 构造时**不传** `wx.LC_SINGLE_SEL` 还不够 ——
+        # 实测（`tools/probes/probe_multiselect_native.py`）：
+        # 只改 wx 侧时"API 多选能用、真 Ctrl 点击仍然只选一行"。
+        # 决定鼠标行为的是**原生** `LVS_SINGLESEL` 位，
+        # 所以这里再按原生口径清一次。
+        #
+        # 清掉之后实测：Ctrl 点击 → `[1, 4]`，Shift 点击 → `[2,3,4,5,6]`，
+        # 都是**原生支持**的，不用自己实现。
+        win32.enable_list_multi_select(self.list_ctrl.GetHandle())
         self.list_ctrl.SetBackgroundColour(wx.Colour(self.theme.card))
         for index, (width, _centered) in enumerate(COLUMNS):
             self.list_ctrl.InsertColumn(index, column_labels()[index],
@@ -559,6 +590,10 @@ class FileTracker(wx.Frame):
         # `_apply_selection_highlight`）。这几个事件都要接：
         # 点选、键盘上下、全选、以及"点空白处取消选中"。
         self._highlighted_row = -1
+        #: **上一次画过的整个选中集**（多选之后必须有这个）。
+        #: 取消选中时要靠它把那些行还原成底色 —— 只记一条的话，
+        #: 其余行会留着上一次的蓝，擦不掉。
+        self._highlighted_rows: tuple = ()
         # 列宽重入标志（见 `adjust_column_widths`）：`SetColumnWidth` 会触发
         # `EVT_SIZE` 打回自己，靠它只让最外层那一次做完。
         self._adjusting_columns = False
@@ -572,9 +607,35 @@ class FileTracker(wx.Frame):
         self._paint_key = None
         self.list_ctrl.Bind(wx.EVT_MOTION, self.on_list_motion)
         self.list_ctrl.Bind(wx.EVT_LEAVE_WINDOW, self.on_list_leave)
-        # 竖线是覆盖层，滚动/重绘会被擦掉，所以每次都要补画
+        # **拖拽多选**（用户 2026-10-17 要的）。
+        #
+        # ⚠️ 原生拖拽框选在这个控件上**用不了**：实测 7 种组合
+        #    （`SendMessage` 各种 flags/步数/`SetCapture`/预选/双缓冲）
+        #    拖动之后都只选中按下那一行 —— 见
+        #    `tools/probes/probe_multiselect_drag.py`。
+        #    所以这一条**自己实现**：按下记起点，移动超阈值就按行区间选中。
+        #
+        # 三个状态位：
+        #   `_drag_origin_row`  按下时的行（-1 = 没在拖）
+        #   `_drag_origin_pos`  按下的客户区坐标（判断"是拖还是点"）
+        #   `_dragging`         是否已经进入拖拽（超了阈值）
+        self._drag_origin_row = -1
+        self._drag_origin_pos = None
+        self._dragging = False
+        self.list_ctrl.Bind(wx.EVT_LEFT_DOWN, self.on_list_left_down)
+        self.list_ctrl.Bind(wx.EVT_LEFT_UP, self.on_list_left_up)
+        # **竖线是覆盖层，滚动/重绘会被擦掉，所以每次都要补画**
         self.list_ctrl.Bind(wx.EVT_SCROLLWIN, self.on_list_scroll)
         self.list_ctrl.Bind(wx.EVT_PAINT, self.on_list_paint)
+
+        # **行底色诊断（默认关闭）。**
+        #
+        # 用户报"从导航窗格打开之后那条是浅灰而不是蓝色"，
+        # 而探针里怎么复现都是蓝的 —— 差别在**他的环境**里。
+        # `FT_DEBUG_PAINT=1` 时把每一次"谁把哪一行改成了什么色"
+        # 记进 `%APPDATA%\File Tracker\paint-trace.txt`，关窗时落盘。
+        # 不看这个环境变量时 `install()` 立刻返回，**一行都不包装**。
+        self._paint_tracer = paint_trace.install(self)
 
         # **自绘表头**：原生 SysHeader32 在深色主题下不采纳任何设色，见 header.py
         self.header = ColumnHeader(
@@ -1352,6 +1413,8 @@ class FileTracker(wx.Frame):
         current = self.list_ctrl.GetColumnWidth(column)
         if current < needed:
             self.list_ctrl.SetColumnWidth(column, needed)
+            # 列宽变了 ⇒ 居中的缓存作废（见 `_centre_cache`）
+            self.invalidate_centre_cache()
             return True
         return True
 
@@ -1439,6 +1502,9 @@ class FileTracker(wx.Frame):
         self._sync_header()
         # **列间竖线也要按新列宽重画**（它画在行的客户区上，不随列宽自动更新）
         self._draw_column_separators()
+        # **居中的缓存也要作废** —— 它缓存了频次列宽与空格宽，
+        # 不作废的话窗口一拉大，频次就按旧列宽居中（偏到一边去）。
+        self.invalidate_centre_cache()
 
     def _on_list_resized(self, event) -> None:
         self.adjust_column_widths()
@@ -1674,11 +1740,49 @@ class FileTracker(wx.Frame):
             return
 
         folder = plan["folder"]
+        # **声明"这次是用户在导航侧发起的操作"。**
+        #
+        # ⚠️ 2026-10-17 用户实测报回来的（与"双击树里的文件"是同一个根因）：
+        #
+        # > "现在**输入路径回车也是这个问题**，一并修了"
+        #
+        # `record_accessed_path` 里"把键盘焦点交给记录列表 + 把选中换到这条"
+        # **整块都由 `from_tree` 把关**：
+        #
+        # ```python
+        # from_tree = getattr(self, "_focus_pane", "") == "tree"
+        # if from_tree:
+        #     self.list_ctrl.SetFocus()      # ← 焦点转移只在这里面
+        # ```
+        #
+        # 而**地址栏回车时焦点在地址栏的 TextCtrl 上**，`reveal_in_tree`
+        # 只 `SelectItem` 树节点、**不碰焦点**（`SelectItem` 也触发不了
+        # `EVT_SET_FOCUS`）⇒ `_focus_pane` 保持上一次的残留值（多半是 `"list"`）
+        # ⇒ `from_tree` 为假 ⇒ **选中与焦点转移一起被跳过**。
+        #
+        # 实测（`tools/probes/probe_pathbar_enter_focus.py`）：回车后
+        # 列表行数 +1（记录成功了）**但选中 = -1、一个像素都没上色、
+        # 焦点仍在 TextCtrl** —— 与用户的描述一致。
+        #
+        # **必须写在 `reveal_in_tree` / `record_accessed_path` 之前**：
+        # 后者读的是调用那一刻的值。
+        self._focus_pane = "tree"
         # 用户的输入是文件夹还是文件，都记"实际访问的那个文件夹"——
         # 与 on_dir_item_activated 对文件的处理保持一致
         self.reveal_in_tree(folder, plan)
-        self.open_folder(folder)
-        self.record_accessed_path(folder)
+        # **打开了才记这次访问**（理由见 `on_open` 的 docstring）
+        if self.open_folder(folder):
+            self.record_accessed_path(folder)
+        else:
+            self._report_resource_error(
+                L(f"打不开：{folder}（资源管理器拒绝了这次请求，"
+                  f"或该位置已不可用）",
+                  f"Could not open: {folder} (Explorer refused the request, "
+                  f"or the location is unavailable)"))
+        # **这两句不能把焦点抢回来。**
+        # `set_value` 只改内容；`select_all` 是**故意**不抢焦点的那个
+        # （区别于 `path_bar.focus()`，见 widgets.py 里它的 docstring）——
+        # 所以焦点留在记录列表上，用户可以立刻用方向键。
         self.path_bar.set_value(folder)
         self.path_bar.select_all()
 
@@ -1759,15 +1863,60 @@ class FileTracker(wx.Frame):
         return current
 
     def on_dir_item_activated(self, event) -> None:
+        """导航窗格里的条目被激活（**双击鼠标 / 回车**）→ 文件则打开并记录其父目录。
+
+        ## ⚠️ 为什么必须同时绑两个事件（2026-10-17 实测）
+
+        用户报："**双击**导航窗格里的文件之后，焦点没有转移到记录窗格。"
+        而我上一轮改的那一行**根本执行不到**，因为：
+
+        **`wx.EVT_TREE_ITEM_ACTIVATED` 在 Windows 上双击时根本不发。**
+
+        实测（`tools/probes/probe_tree_events.py`：给树的窗口发真的
+        `WM_LBUTTONDOWN/UP/DBLCLK/UP`）：
+
+        ```
+        真双击收到的事件 = EVT_LEFT_DOWN, EVT_LEFT_UP, **EVT_LEFT_DCLICK**, EVT_LEFT_UP
+        会发 EVT_TREE_ITEM_ACTIVATED 吗？   **不会**
+        ```
+
+        ⇒ 这条路原来**根本没接线**：双击文件既不打开、也不记录、焦点也不动 ——
+        与用户描述的现象（"焦点一直停留在导航窗格"）完全一致。
+
+        ## 为什么用 `HitTest` 取节点
+
+        鼠标事件（`wx.MouseEvent`）**没有 `GetItem()`**（实测返回 `None`），
+        节点只能由位置反查：
+
+        ```
+        ev.GetItem()                    → None
+        tree.HitTest(ev.GetPosition())  → 正确的 TreeItemId   ✅
+        ```
+
+        所以两个事件共用本方法：带节点的（键盘激活）直接问，不带节点的走 `HitTest`。
+        """
         tree = self.dir_ctrl.GetTreeCtrl()
-        item = event.GetItem()
+        item = self._tree_item_of_event(tree, event)
+        if item is None:
+            event.Skip()
+            return
         path = self.dir_ctrl.GetPath(item)
 
         if os.path.isfile(path):
+            # **必须在 `record_accessed_path` 之前设。**
+            # 它读的是调用那一刻的值，之后再设就晚了。
+            self._focus_pane = "tree"
             folder_to_open = os.path.dirname(path)
             if os.path.exists(folder_to_open):
-                self.open_folder(folder_to_open)
-                self.record_accessed_path(folder_to_open)
+                # **打开了才记这次访问**（理由见 `on_open` 的 docstring）
+                if self.open_folder(folder_to_open):
+                    self.record_accessed_path(folder_to_open)
+                else:
+                    self._report_resource_error(
+                        L(f"打不开：{folder_to_open}（资源管理器拒绝了这次请求，"
+                          f"或该位置已不可用）",
+                          f"Could not open: {folder_to_open} (Explorer refused "
+                          f"the request, or the location is unavailable)"))
                 self._call_later(100, self.reset_dir_ctrl_scroll)
             else:
                 # **先问用户**（见 confirm_remove_invalid_path）
@@ -1775,6 +1924,29 @@ class FileTracker(wx.Frame):
             event.Veto()
         else:
             event.Skip()
+
+    @staticmethod
+    def _tree_item_of_event(tree, event):
+        """从事件里取出被作用的树节点；取不到返回 `None`。
+
+        两种来源**必须都支持**：
+
+        * `EVT_TREE_ITEM_ACTIVATED`（键盘回车）—— 事件自带节点
+        * `EVT_LEFT_DCLICK`（鼠标双击）—— 事件没有节点，只能 `HitTest` 反查
+        """
+        try:
+            item = event.GetItem()
+            if item is not None and getattr(item, "IsOk", lambda: False)():
+                return item
+        except (AttributeError, TypeError):
+            pass
+        try:
+            found, _flags = tree.HitTest(event.GetPosition())
+            if found is not None and getattr(found, "IsOk", lambda: False)():
+                return found
+        except (AttributeError, TypeError):
+            pass
+        return None
 
     # ------------------------------------------------------------------
     # 记录与列表
@@ -1798,7 +1970,64 @@ class FileTracker(wx.Frame):
         所以这里只要调用它一次（`reload_from_store=True` 让它先重读数据库）。
         """
         self.store.record_access(path)
+        # **从导航窗格打开的：选中落到这条记录上，但视角不动。**
+        #
+        # 用户："聚焦对从导航窗格打开并记录的条目不生效。"
+        # 他选定 B："列表视角保持不动，只要**选中对上**就行。"
+        #
+        # ⚠️ **把范围限死在 `"tree"`。**
+        # 双击**列表**里那条路是已经验收过的行为（"位置完全不动、选中不丢"），
+        # 不能顺手改掉。`on_dir_item_activated`（双击树里的文件）也是 `"tree"`，
+        # 两种情况本来就该一致。
+        from_tree = getattr(self, "_focus_pane", "") == "tree"
+        # ── 开关式诊断（只在 FT_DEBUG_FOCUS 存在时打印）──
+        #
+        # 让**程序自己在真实环境里**说出状态，而不是我在探针里复刻场景。
+        # 已经猜了六轮探针，每一轮都"绿"，而用户看到的始终不变 ——
+        # 说明差别藏在我没想到的地方。
+        #
+        # ⚠️ **诊断的文案写在 `paint_trace` 里**，这里只留调用。
+        # 原因是 `tools/verify_gui.py` 会扫本文件里"没包 `L()` 的中文"，
+        # 而诊断输出是开发者看的、不该进双语表；把它放在专管诊断的模块里，
+        # 两边都干净。
+        paint_trace.focus_before(self, path, from_tree)
+        if from_tree:
+            self._keep_scroll_row = True          # 视角：行号口径，不动
+            self._select_path_after_render = path  # 选中：换到这一条
         self.sort_list_items(self.sort_column, reload_from_store=True)
+        # **把键盘焦点给"记录列表"，不是导航树。**
+        #
+        # ## 为什么不能给树
+        #
+        # **只有一个控件能拥有键盘焦点**，而没有焦点的列表控件，
+        # Windows 会把选中行画成浅灰（inactive selection）——
+        # **而且那个灰盖过我们用 `SetItemBackgroundColour` 设的底色。**
+        #
+        # | 谁有焦点 | 记录列表那条 | 导航树那条 |
+        # |---|---|---|
+        # | **列表** | **蓝** | 灰 |
+        # | 树 | 灰 | 蓝 |
+        #
+        # 我上一轮为了让树的灰变蓝，给树 `SetFocus()` ——
+        # **那正好把焦点从列表拿走，让记录器里那条变成了灰。**
+        # 用户报的"从导航窗格打开后那条没有变蓝"就是这么来的。
+        #
+        # ## 为什么选列表
+        #
+        # 记录器那条**变蓝是"记录成功了没有"的反馈**，比树的选中更重要；
+        # 而树失去焦点显示灰色，**是 Windows 标准行为**（资源管理器也一样）。
+        #
+        # ## ⚠️ 这一条只能靠实物判断，探针测不到
+        #
+        # `GetItemBackgroundColour()` 读的是**存进去的颜色**（永远是 `#0078D7`），
+        # **与焦点无关** —— 所以四个探针全绿，用户看到的却始终是灰。
+        # **仪器读的是"存了什么"，用户看的是"画成什么"。**
+        if from_tree:
+            try:
+                self.list_ctrl.SetFocus()
+            except (AttributeError, RuntimeError) as _error:
+                paint_trace.focus_set_focus_failed(_error)
+            paint_trace.focus_after(self)
 
     def load_accessed_paths(self) -> None:
         """从数据库重建列表：先顶置项，再按所选列排序的其余项。
@@ -1848,14 +2077,57 @@ class FileTracker(wx.Frame):
         return ""
 
     def _selected_path(self) -> str:
-        """当前选中行对应的路径；没有选中返回空串。"""
+        """当前**第一条**选中行对应的路径；没有选中返回空串。"""
+        paths = self._selected_paths()
+        return paths[0] if paths else ""
+
+    def _selected_paths(self) -> list[str]:
+        """当前**所有**选中行的路径（升序），从**控件自己的文本**取。
+
+        ## ⚠️ 为什么不能用 `self._rows[index]`（2026-10-17 审计实测的 bug）
+
+        原来这里写的是 `self._rows[index].path` —— 而 `index` 是**控件的行号**。
+        一旦 `self._rows` 已经被换成新表、而控件还没重建，两者就**错位**：
+
+        ```
+        顶置一条记录（它被挪到第 0 行）
+          → `sort_list_items` 先换 `self._rows`（第 0 行已是它）
+          → 再调 `_render_rows`
+            → 这里读控件选中 = 166，却去查**新** `_rows[166]`
+              = 原来第 167 行的那条  ⇒ **选中差了一整行**
+        ```
+
+        实测（`tools/probes/probe_pin_focus.py`）：
+        `顶置前 sel=166 dir-0166` → `顶置后 sel=166 **dir-0165**`。
+        后果不只是高亮停在错的记录上 —— 之后右键「删除」删的是**隔壁那条**。
+
+        ## 为什么"从控件读文本"是对的
+
+        路径与行号的**权威映射就在控件里**：控件第 i 行显示的就是那条路径。
+        `GetItemText` 拿到的是控件**当前真实显示**(的内容)，所以
+        "行号 → 路径"这个转换天然自洽，不依赖 `self._rows` 是否已经换过。
+
+        本方法只在"布局稳定"时被调（重建**之前**记锚点、或排序之后取集合），
+        那时控件内容与 `self._rows` 最多差一次重建，而文本口径两种情况下都对。
+
+        反过来说：**只有"行号 → 行号"的转换才怕错位**，
+        `_index_of_path()`（路径 → 新行号）按定义就该用**新**表，那个不用改。
+        """
+        control = self.list_ctrl
+        paths: list[str] = []
         try:
-            index = self.list_ctrl.GetFirstSelected()
-            if 0 <= index < len(self._rows):
-                return self._rows[index].path
-        except (AttributeError, IndexError):
+            index = control.GetFirstSelected()
+            total = control.GetItemCount()
+            while index != -1:
+                if 0 <= index < total:
+                    text = control.GetItemText(index)
+                    if text:
+                        paths.append(text)
+                index = control.GetNextItem(
+                    index, wx.LIST_NEXT_ALL, wx.LIST_STATE_SELECTED)
+        except (AttributeError, IndexError, RuntimeError):
             pass
-        return ""
+        return paths
 
     def _index_of_path(self, path: str) -> int:
         """路径在新列表里的行号；找不到返回 -1。"""
@@ -1942,6 +2214,32 @@ class FileTracker(wx.Frame):
         anchor, selected = getattr(self, "_view_anchor", None) or (
             self._top_visible_path(), self._selected_path())
         self._view_anchor = None
+        # **把选中换到指定的一条**（用于"从导航窗格打开并记录"）。
+        #
+        # 前三个动作（双击列表、置顶、取消置顶）里，
+        # "选中的那条"和"动作作用的那条"本来就是同一个；
+        # 只有从导航窗格打开时不是 —— 用户在左边点的路径，
+        # 在右边可能是任意一行。用户要的是"**选中对上就行**"（他选的 B）。
+        #
+        # ⚠️ **必须写在外壳这一层**（`_render_rows`）。
+        # 下面恢复选中用的是**外壳的** `selected`；
+        # 我第一次把它写进了内层 `_render_rows_body`，
+        # 那里只是改了个**用不到的局部变量** ——
+        # 探针显示"覆盖值设了、数据也在、选中却没换"，就是这么来的。
+        override = getattr(self, "_select_path_after_render", None)
+        self._select_path_after_render = None
+        if override:
+            selected = override
+
+        # **把"要恢复的选中集"先算出来（用路径，不是行号）。**
+        #
+        # 重建之后行号会变，所以锚点与选中一律走**路径**口径。
+        # `_select_path_after_render`（从导航窗格打开）是**明确只要一条**的
+        # 意图 ⇒ 它覆盖掉多选集，符合用户选的"打开时选中对上就行"。
+        keep_paths = [selected] if override else self._selected_paths()
+        target_rows = [index for index in
+                       (self._index_of_path(path) for path in keep_paths)
+                       if index >= 0]
 
         # **只冻结"重建"这一段。**
         # `try/finally` 是必须的：`Thaw()` 漏掉的话控件会**永久冻结**，
@@ -1955,20 +2253,42 @@ class FileTracker(wx.Frame):
         # **解冻之后**才恢复选中与视角 —— 见 docstring 里那段说明。
         # **顺序有讲究**：先恢复选中，再恢复视角。
         # 反过来做的话，`EnsureVisible(选中行)` 可能又把视角拉走。
-        selected_index = self._index_of_path(selected)
-        if selected_index >= 0:
-            # **先全清，再选。**
-            #
-            # `wx.ListCtrl.Select(i)` 只"把 i 也设为选中"，
-            # **不清掉别的**。重建之后原生控件留着陈旧的选中（通常是第 0 行），
-            # 于是用户看到"选中跳到了很远的另一条"。
-            #
-            # 全清是 O(行数)，但只在重建后跑一次 —— 与 `InsertItem`
-            # （每行一次）相比可以忽略。
-            total = self.list_ctrl.GetItemCount()
+        #
+        # ⚠️ **"全清"必须无条件执行，不能只在 `target_rows` 非空时做。**
+        #
+        # 用户 2026-10-17 报的 bug：
+        #
+        # > "多选并删除后，多选状态会**偏移到另外多条记录**上，不会自然消失。"
+        #
+        # 根因就是原来这两段共用了一个 `if target_rows:`：
+        # 删除之后，原来那些选中行的**路径已经不在库里**了 ⇒
+        # `target_rows` 是**空的** ⇒ 连带"全清"也被跳过 ⇒
+        # 原生控件里那些**陈旧的选中行号**留了下来，而行号已经平移
+        # （后面的行往上补），于是"选中框跑到了隔壁几条记录上"。
+        #
+        # ⇒ 拆开：**先无条件全清**（重建之后任何残留选中都是陈旧的），
+        #   **再**决定要不要恢复。
+        #
+        # ⚠️ 这里**不能**用 `unselect_all_rows()`（那个只清"当前选中的"）——
+        # 重建之后原生控件的选中可能与我们的认知不一致，
+        # 所以这里要**逐行核对**：凡是不在 `wanted` 里的，一律清掉。
+        # 但仍然先问 `GetItemState`（只读、便宜），避免对没选中的行白调 API。
+        #
+        # **拖拽期间要挂起事件**：否则 6000 行里清掉 6000 个选中时，
+        # 每一个 DESELECTED 都可能引起一轮重画。
+        total = self.list_ctrl.GetItemCount()
+        wanted = set(target_rows)
+        selected_state = wx.LIST_STATE_SELECTED
+        self._suspend_selection_events = True
+        try:
             for index in range(total):
-                if index != selected_index:
+                if index in wanted:
+                    continue
+                if self.list_ctrl.GetItemState(index, selected_state) & selected_state:
                     self.list_ctrl.Select(index, False)
+        finally:
+            self._suspend_selection_events = False
+        if target_rows:
             # **用 `SetItemState` 一次设好"选中 + 焦点"，不要用 `Focus()`。**
             #
             # ## 探针实测：`Focus()` 会把视角滚走
@@ -1990,10 +2310,47 @@ class FileTracker(wx.Frame):
             # `SetItemState` 直接写项状态，**不触发 ensure-visible**。
             # 焦点仍然要设 —— 它决定**方向键从哪儿继续**，
             # 只是不能用 `Focus()` 那个会滚动的接口去设。
-            self.list_ctrl.SetItemState(
-                selected_index,
-                wx.LIST_STATE_SELECTED | wx.LIST_STATE_FOCUSED,
-                wx.LIST_STATE_SELECTED | wx.LIST_STATE_FOCUSED)
+            #
+            # **多选：每一条都要设，但 `FOCUSED` 只给一条。**
+            # 原生 ListView 里 `LVIS_FOCUSED` 是**单选**语义（焦点框只有一个），
+            # 全给上会互相顶掉；`SELECTED` 才是可以多条的。
+            focus_row = target_rows[-1]
+            for row in target_rows:
+                states = wx.LIST_STATE_SELECTED
+                if row == focus_row:
+                    states |= wx.LIST_STATE_FOCUSED
+                self.list_ctrl.SetItemState(row, states, states)
+            # **设完选中要再画一次高亮。**
+            #
+            # 这个项目的蓝色选中**不是原生画的** —— 是
+            # `_apply_selection_highlight()` 用 `SetItemBackgroundColour`
+            # 自己画的（原生高亮被逐行显式底色压掉了）。
+            # 而它在**重建过程中**跑，那时上面这个选中还没设。
+            #
+            # 不补这一句的后果：**选中状态对了，但没有蓝色** ——
+            # 用户报的"记录器中这条变更的条目没有被选中为蓝色"。
+            # ⚠️ **先清掉它的记忆键，否则这一句会被早退吃掉。**
+            #
+            # `_apply_selection_highlight()` 里有：
+            #
+            #     key = (selected, hovered)
+            #     if key == self._paint_key:
+            #         return            # ← 一个像素都不画
+            #
+            # 它假设"key 一样 ⇒ 画面已经对了"。但**实际底色会被重建、
+            # Refresh、换主题等重置**，而账本不会 —— 一旦不同步，
+            # 那一行就**永远不变色**。它的 docstring 自己写着：
+            # "账本一旦和渲染逻辑不同步，就会留下永远不变色的行"。
+            #
+            # 用户报的正是这个："选中确实在它身上，但高亮被盖掉了。"
+            #
+            # ⇒ 我这一次调用**明确知道账本可能过期**，所以先清键。
+            # 保留记忆化本身（它挡的是悬停时的高频重设，有必要）。
+            self._paint_key = None
+            try:
+                self._apply_selection_highlight()
+            except (AttributeError, RuntimeError):
+                pass
         # **精确滚回原位，不要用 `EnsureVisible`。**
         #
         # `EnsureVisible` 是"保证可见"（最小滚动）：锚点落在视野**下方**时，
@@ -2190,14 +2547,23 @@ class FileTracker(wx.Frame):
 
         **`event.Skip()` 必须调**：不放手的话原生控件收不到这次事件，
         选中动作本身会被吞掉（那一行根本选不上）。
+
+        ## 拖拽期间挂起
+
+        拖拽时 `_select_range()` 会**逐行** `Select()`，每一行都发一次
+        `EVT_LIST_ITEM_SELECTED` / `DESELECTED` ⇒ 这个方法被连着叫很多次，
+        而它每次都重画一轮（虽然 `_paint_key` 会挡住重复的，但事件处理
+        本身有开销）。拖拽结束时由 `on_list_left_up` 统一补一次重画。
         """
         event.Skip()
+        if getattr(self, "_suspend_selection_events", False):
+            return
         self._apply_selection_highlight()
 
     # -- 预选（悬停跟随）--------------------------------------------------
 
     def on_list_motion(self, event) -> None:
-        """鼠标在列表上移动 → 更新"预选"行（次级高亮）。
+        """鼠标在列表上移动 → **拖拽选择**（按住左键时）或更新"预选"行。
 
         ## 为什么自己做，不用原生热跟踪
 
@@ -2217,8 +2583,17 @@ class FileTracker(wx.Frame):
         用户上一轮指出过"反应特别慢，有近一秒的延迟"。
         这里只在**行号真的变了**的时候才动颜色——
         鼠标在同一行内移动是零成本的，不会每移动一像素就重画整个列表。
+
+        ## 拖拽选择也走这里（2026-10-17）
+
+        原生拖拽框选在本控件上不可用（见 `on_list_left_down` 的说明），
+        所以"按住左键拖动 = 选中一个行区间"由这里实现。
+        **拖拽期间不再画预选**：那一刻用户要的是选中，不是预选。
         """
         event.Skip()
+        if getattr(self, "_drag_origin_row", -1) >= 0:
+            self._handle_drag_motion(event)
+            return
         try:
             x, y = self.list_ctrl.ScreenToClient(wx.GetMousePosition())
             index, _flags = self.list_ctrl.HitTest((x, y))
@@ -2233,9 +2608,208 @@ class FileTracker(wx.Frame):
         self._set_hover_row(index)
 
     def on_list_leave(self, event) -> None:
-        """鼠标离开列表 → 收掉预选高亮。"""
+        """鼠标离开列表 → 收掉预选高亮（**拖拽中不处理**，见下）。"""
         event.Skip()
+        if getattr(self, "_drag_origin_row", -1) >= 0:
+            # 拖拽时鼠标很容易滑出控件边界（尤其往边上拖），
+            # 这时候收掉预选没有任何意义，而且会打断拖拽的视觉反馈。
+            return
         self._set_hover_row(-1)
+
+    # -- 拖拽多选（自己实现）-----------------------------------------------
+
+    #: 判定"这是拖拽"而不是"这是单击"的像素阈值。
+    #: 手会抖，取 4 像素：小于它算单击（交给原生），大于它算拖拽。
+    DRAG_THRESHOLD_PX = 4
+
+    def on_list_left_down(self, event) -> None:
+        """记下拖拽的起点。**不移交事件** —— 单击选择仍由原生处理。
+
+        ## ⚠️ 为什么要自己做
+
+        用户要"按住 CTRL 多选，**并且不止可以点击多选，还可以拖动多选**"。
+
+        Ctrl / Shift 点击是**原生支持**的（清掉 `LVS_SINGLESEL` 之后实测
+        `[1, 4]` / `[2,3,4,5,6]`）。但**拖动框选不行**：
+
+        `tools/probes/probe_multiselect_drag.py` 试了 7 种组合
+        （`MK_LBUTTON` 有无、步数与延时、`SetCapture`、预先选中起点、
+        `LVS_EX_DOUBLEBUFFER`、混合）——**每一种都只选中按下那一行**。
+
+        ⇒ 所以拖拽这一段自己实现：**按下记起点，移动超过阈值后
+        按行区间选中**。单击（没超阈值）时**什么都不做**，
+        让原生的单击/Ctrl 点击/Shift 点击照常工作 —— 两边不打架。
+
+        阈值用**像素距离**而不是"是否移动过"：手会抖，
+        用"移动过就算拖"会把每次单击都变成拖拽。
+        """
+        try:
+            position = event.GetPosition()
+            row, _flags = self.list_ctrl.HitTest(position)
+        except Exception:
+            row, position = -1, None
+        self._drag_origin_row = row
+        self._drag_origin_pos = position
+        self._dragging = False
+        # **差集法要有个干净的起点**：不清的话，上一次拖拽留下的区间
+        # 会被当成"上一帧"，新拖拽第一帧就会去取消一批早就没选中的行
+        # （功能仍对，但白跑一趟，而且拖回头时可能把不该取消的取消掉）。
+        self._drag_prev_rows = None
+        event.Skip()
+
+    def on_list_left_up(self, event) -> None:
+        """结束拖拽；**没进入拖拽就什么都不做**（让原生单击照常）。"""
+        was_dragging = getattr(self, "_dragging", False)
+        self._drag_origin_row = -1
+        self._drag_origin_pos = None
+        self._dragging = False
+        self._drag_prev_rows = None
+        if was_dragging:
+            # 拖拽结束后重画一次：拖拽期间我们直接改了选中集，
+            # 而没有走 `_apply_selection_highlight` 的常规入口。
+            self._paint_key = None
+            self._apply_selection_highlight()
+        event.Skip()
+
+    def _handle_drag_motion(self, event) -> None:
+        """按住左键移动 → 按"起点行 .. 当前行"选中整个区间。"""
+        try:
+            position = event.GetPosition()
+            # **判断"左键还按着"要用事件自带的标志位，不能用
+            # `wx.GetMouseState()`。**
+            #
+            # ⚠️ 实测（2026-10-17）：`wx.GetMouseState()` 读的是**系统级
+            # 真实鼠标状态**，而 `SendMessage` 发的 `WM_MOUSEMOVE`
+            # 并不会改变它 —— 于是拖拽的第一帧就被当成"左键已松开"，
+            # `_drag_origin_row` 被清成 -1，拖拽整个过程一次都没跑起来
+            # （探针读数：`_dragging` 始终 False、只选中按下那一行）。
+            #
+            # 但**真实拖动**时这个标志位是对的：
+            # 真实拖动产生的消息会更新系统鼠标状态，两者一致；
+            # 而探针发的消息不改系统状态，所以只有事件标志位可信。
+            # ⇒ 取事件标志位，取不到再退回系统状态。
+            left_down = None
+            try:
+                left_down = event.LeftIsDown()
+            except Exception:
+                left_down = None
+            if left_down is None:
+                try:
+                    left_down = wx.GetMouseState().LeftIsDown()
+                except Exception:
+                    left_down = True
+            if not left_down:
+                # 左键已经松开（`LEFT_UP` 可能没送到我们这里）——
+                # 收尾，避免"状态卡在拖拽中"导致以后每次移动都在选中。
+                self._drag_origin_row = -1
+                self._drag_origin_pos = None
+                self._dragging = False
+                return
+            origin = self._drag_origin_pos
+            if not self._dragging:
+                if origin is None:
+                    return
+                moved = (abs(position.x - origin.x) + abs(position.y - origin.y))
+                if moved < self.DRAG_THRESHOLD_PX:
+                    return
+                self._dragging = True
+            row, _flags = self.list_ctrl.HitTest(position)
+            if row < 0:
+                return
+            self._select_range(self._drag_origin_row, row)
+        except Exception:
+            # 拖拽是纯交互增强：出错时退化成"原生单击"，不把异常抛到事件循环里
+            self._drag_origin_row = -1
+            self._dragging = False
+
+    def unselect_all_rows(self) -> None:
+        """取消**当前真正被选中**的那些行（不是盲扫全表）。
+
+        ## 为什么不能盲扫全表
+
+        项目的做法原来是"`for i in range(GetItemCount()): Select(i, False)`" ——
+        对于**没选中**的行，这一次调用是纯浪费，而它是**跨语言原生调用**。
+
+        更糟的是：`Select()` 会触发 `EVT_LIST_ITEM_DESELECTED` / `SELECTED`，
+        挂在上面的 `on_selection_changed` 就会去重画高亮。6000 行里只有 3 行
+        选中时，那 5997 次调用**每一次都可能引发一轮重画**。
+
+        ⇒ 先问一句 `GetItemState`（只读、便宜），**只对选中的行**动手。
+        选中集通常是个位数，于是这一步从 O(全表) 降到 O(选中数)。
+        """
+        control = self.list_ctrl
+        try:
+            total = control.GetItemCount()
+            selected_state = wx.LIST_STATE_SELECTED
+            for index in range(total):
+                if control.GetItemState(index, selected_state) & selected_state:
+                    control.Select(index, False)
+        except Exception:
+            # 纯外观操作：失败时退化成"没清掉"，不影响数据
+            pass
+
+    def _select_range(self, row_a: int, row_b: int) -> None:
+        """把 `row_a..row_b` 这一整段设成"选中"，其余取消选中。
+
+        ## ⚠️ 只动"和上一帧不一样"的那几行（性能，2026-10-17 实测）
+
+        第一版是"**每次都把全表 `Select()` 一遍**"（先全清、再选区间）。
+        功能对，但**拖动时每一帧都要全表走一次** —— 6000 行实测：
+
+        ```
+        拖拽一帧 = 888.8ms      ← 一帧 0.9 秒，拖起来是卡死的
+        ```
+
+        优化成"**只改差集**"：维护 `_drag_prev_rows`（上一帧画成选中的行），
+        这一帧只调**需要翻转状态**的那些行。
+
+        * 用户慢慢往下拖：每帧只多一行 ⇒ **O(1)**
+        * 用户往回拖：每帧只少几行 ⇒ O(几行)
+        * 跳着拖（快速划过一大段）：O(那一段)
+
+        ⇒ 复杂度从 **O(全表)** 降到 **O(这一帧真正变化的行数)**。
+
+        ## 为什么不用"先全清再选区间"
+
+        `wx.ListCtrl.Select(i, on)` 底层是 `LVM_SETITEMSTATE` ——
+        **不碰别的行**。所以"取消选中"必须自己逐行做，不能靠一次全清。
+        差集法正好：要取消的本来就只有"上一帧选了、这一帧不该选"的那几行。
+
+        ## 为什么不能只"画颜色"不改选中
+
+        选中状态是**原生的**（Ctrl 点击、Shift 点击都靠它），
+        右键菜单、`selected_paths()` 读的也是它 ——
+        只改颜色会让"看起来选中了、实际没选中"。
+        """
+        total = self.list_ctrl.GetItemCount()
+        low, high = min(row_a, row_b), max(row_a, row_b)
+        low, high = max(low, 0), min(high, total - 1)
+        if low > high:
+            return
+        want = set(range(low, high + 1))
+        previous = getattr(self, "_drag_prev_rows", None) or set()
+        if want == previous:
+            # 区间没变（同一帧内多次移动、或原地抖动）—— 一行都不用碰
+            return
+        for row in previous - want:
+            self.list_ctrl.Select(row, False)
+        # **逐行 Select 期间挂起"选中变化就重画"** —— 见 `on_selection_changed`。
+        # 用 try/finally：中途抛异常时标志位要是留着的，
+        # 之后所有点击都不会再重画高亮了（而且不会有任何报错）。
+        self._suspend_selection_events = True
+        try:
+            for row in want - previous:
+                self.list_ctrl.Select(row, True)
+        finally:
+            self._suspend_selection_events = False
+        self._drag_prev_rows = want
+        # 焦点行给区间末端（决定方向键从哪儿继续）
+        self.list_ctrl.SetItemState(
+            high, wx.LIST_STATE_SELECTED | wx.LIST_STATE_FOCUSED,
+            wx.LIST_STATE_SELECTED | wx.LIST_STATE_FOCUSED)
+        # 拖拽期间不走 `on_selection_changed`（上面挂起了），所以这里直接重画。
+        self._paint_key = None
+        self._apply_selection_highlight()
 
     def _set_hover_row(self, index: int) -> None:
         """只在行号**真的变了**时改颜色（性能，见 `on_list_motion`）。"""
@@ -2281,17 +2855,26 @@ class FileTracker(wx.Frame):
             if count <= 0:
                 self._highlighted_row = self._hover_row = -1
                 return
-            selected = self.list_ctrl.GetFirstSelected()
+            # **多选：一次要画一整**集**，不能只看第一条。**
+            #
+            # 2026-10-17 用户要 Ctrl 多选之后，这里原来那一句
+            # `selected = GetFirstSelected()` 会让**除第一行外的选中行
+            # 全部不上色** —— 而且不报错（用户看到的是"选了却没变蓝"）。
+            selected_rows = self.selected_rows()
+            selected = selected_rows[0] if selected_rows else -1
+            selected_set = set(selected_rows)
             hovered = getattr(self, "_hover_row", -1)
             if not 0 <= hovered < count:
                 hovered = -1
 
             # **行号没变就什么都不做**——这是性能的关键。
             # 鼠标在同一行内移动、或选中项没动时，不再重画整个列表。
-            key = (selected, hovered)
+            #
+            # 键必须用**整个选中集**：只比第一条的话，
+            # "第一条没变、用户又 Ctrl 点了别的行"会被误判成"没变"而跳过重画。
+            key = (tuple(selected_rows), hovered)
             if key == getattr(self, "_paint_key", None):
                 return
-            self._paint_key = key
 
             highlight = wx.SystemSettings.GetColour(wx.SYS_COLOUR_HIGHLIGHT)
             hover_colour = wx.Colour(self.theme.row_hover)
@@ -2306,12 +2889,16 @@ class FileTracker(wx.Frame):
                         else self.theme.card)
                 return wx.Colour(name)
 
-            # 只重画"受影响的那些行"，不是整表
-            touched = {selected, hovered,
-                       getattr(self, "_highlighted_row", -1),
-                       getattr(self, "_hover_painted", -1)}
+            # 只重画"受影响的那些行"，不是整表。
+            # **上一次画过的选中行也要一起进来** —— 否则取消选中时
+            # 那一行会留着上次的蓝，擦不掉。
+            touched = set(selected_set)
+            touched.update({hovered,
+                            getattr(self, "_highlighted_row", -1),
+                            getattr(self, "_hover_painted", -1)})
+            touched.update(getattr(self, "_highlighted_rows", ()) or ())
             for row in sorted(r for r in touched if 0 <= r < count):
-                if row == selected:
+                if row in selected_set:
                     background, text = highlight, normal_text
                 elif row == hovered:
                     background, text = hover_colour, normal_text
@@ -2320,8 +2907,12 @@ class FileTracker(wx.Frame):
                 self.list_ctrl.SetItemBackgroundColour(row, background)
                 self.list_ctrl.SetItemTextColour(row, text)
             self._highlighted_row = selected
+            # **整集**也要记住：取消选中时靠它把旧的那些行还原。
+            self._highlighted_rows = tuple(selected_rows)
             self._hover_painted = hovered
             self.list_ctrl.Refresh()
+            # **记账必须放在"真的画完"之后。**（理由见下面那段长注释）
+            self._paint_key = key
         except Exception:
             # **这里必须静默，不能写日志。**
             #
@@ -2338,12 +2929,66 @@ class FileTracker(wx.Frame):
             pass
 
     def _center_text(self, text: str) -> str:
-        # 把公式改成按真实列宽算
-        column_px = self.list_ctrl.GetColumnWidth(COLUMN_COUNT)
-        text_px   = self.list_ctrl.GetTextExtent(text).width
-        space_px  = max(self.list_ctrl.GetTextExtent(" ").width, 1)
+        """把频次列的文本按**真实列宽**居中（左侧补空格）。
+
+        ## ⚠️ 必须缓存：这一段原来是重建里最大的单项开销
+
+        实测（`tools/probes/probe_perf_detail.py`，6000 行）：
+
+        ==========================  ========  ===========  ======
+        调用                         次数       耗时         占比
+        **`GetTextExtent`**         **6604**  **155.0 ms** **26.3%**
+        `GetColumnWidth`                 5       0.0 ms      0.0%   ← 已缓存
+        ==========================  ========  ===========  ======
+
+        ## 按"位数"缓存，而不是按文本
+
+        频次是**纯数字**。而同**位数**的数字在同一个字体下宽度**相同**
+        （等宽数字）或**几乎相同**（比例字体里数字通常也是等宽的）——
+        精确起见这里仍以**实际文本**为准，只是把量过的结果记住：
+        6000 行里频次的取值通常只有几十种（1/2/3…位数），
+        于是 `GetTextExtent` 从 **6000 次降到几十次**。
+
+        **取整的代价**：若某字体下"1"和"8"宽度不同，居中会差 1 像素 ——
+        这是纯观感，而且本项目列表用的是系统默认字体（数字等宽）。
+        为了**不引入偏差**，缓存键用**文本本身**（不是位数）：
+        取值种类少的时候收益一样，取值种类多的时候也不会算错。
+        """
+        column_px, space_px = self._centre_cache()
+        text_px = self._text_width(text)
         pad = max(column_px - text_px, 0) // space_px // 2
         return " " * pad + text
+
+    def _text_width(self, text: str) -> int:
+        """文本宽度（带缓存）。缓存按**重建周期**作废，见 `invalidate_centre_cache`。"""
+        cache = getattr(self, "_text_width_cache", None)
+        if cache is None:
+            cache = {}
+            self._text_width_cache = cache
+        width = cache.get(text)
+        if width is None:
+            width = self.list_ctrl.GetTextExtent(text).width
+            cache[text] = width
+        return width
+
+    def _centre_cache(self) -> tuple[int, int]:
+        """（频次列宽, 一个空格的宽度）—— 缓存，列宽一变就重算。
+
+        **失效点**：`adjust_column_widths()` 与 `center_frequency_column()`。
+        漏掉失效点的话居中会按**旧列宽**算，窗口拉大后频次就不居中了 ——
+        所以下面那两个方法里都调了 `invalidate_centre_cache()`。
+        """
+        cache = getattr(self, "_centre_metrics", None)
+        if cache is None:
+            space_px = max(self.list_ctrl.GetTextExtent(" ").width, 1)
+            cache = (self.list_ctrl.GetColumnWidth(COLUMN_COUNT), space_px)
+            self._centre_metrics = cache
+        return cache
+
+    def invalidate_centre_cache(self) -> None:
+        """列宽变了 ⇒ 丢弃居中的缓存（列宽与文本宽度都作废）。"""
+        self._centre_metrics = None
+        self._text_width_cache = None
 
     def _ordered_records(self) -> list[PathRecord]:
         pinned_order = {path: index for index, path in enumerate(self.pinned_paths)}
@@ -2357,12 +3002,54 @@ class FileTracker(wx.Frame):
             return ""
         return self.list_ctrl.GetItemText(row)
 
-    def selected_path(self) -> str:
-        """当前选中行的路径；没有选中返回空串。
+    def selected_rows(self) -> list[int]:
+        """当前**所有**选中行的行号（升序）。没有选中返回空列表。
 
-        ``wx.ListCtrl`` 是单选的（``LC_SINGLE_SEL``），所以用 ``GetFirstSelected``。
+        ## 为什么不能再用 `GetFirstSelected()`
+
+        列表在 1.3.x 之前是 `LC_SINGLE_SEL`（单选），到处写
+        `GetFirstSelected()` 就够了。2026-10-17 用户要"按住 Ctrl 多选"
+        之后，**单选假设会静默出错**：高亮只画第一行、删除只删一条、
+        `_render_rows` 重建后只剩一条选中 —— 每一样都不报错。
+
+        ⇒ 凡是要"选中集"的地方一律走这里；只有
+        "**就要一条**"（双击、顶置这种明确单值语义）才用
+        :meth:`selected_path`。
         """
-        return self.row_path(self.list_ctrl.GetFirstSelected())
+        control = self.list_ctrl
+        rows: list[int] = []
+        try:
+            index = control.GetFirstSelected()
+        except Exception:
+            return rows
+        while index != -1:
+            rows.append(index)
+            index = control.GetNextItem(index, wx.LIST_NEXT_ALL,
+                                        wx.LIST_STATE_SELECTED)
+        return rows
+
+    def selected_paths(self) -> list[str]:
+        """当前选中行对应的路径（按行号顺序）。没有选中返回空列表。
+
+        多选场景（右键「删除」/「打开」）用它；
+        :meth:`selected_path` 是它的"只要第一条"版本。
+        """
+        paths: list[str] = []
+        for row in self.selected_rows():
+            path = self.row_path(row)
+            if path:
+                paths.append(path)
+        return paths
+
+    def selected_path(self) -> str:
+        """当前**第一条**选中行的路径；没有选中返回空串。
+
+        ⚠️ **这是"只要一条"的口径**（双击、顶置、取消顶置、复制路径用）。
+        多选时要"所有选中"的地方请用 :meth:`selected_paths` ——
+        用本方法会静默只处理第一条。
+        """
+        rows = self.selected_rows()
+        return self.row_path(rows[0]) if rows else ""
 
     def find_path(self, path: str) -> int:
         """按路径找行号；找不到返回 -1。"""
@@ -2388,12 +3075,32 @@ class FileTracker(wx.Frame):
         """
         index = self.find_path(path)
         if index != -1:
+            # **删之前先清选中**（与 `_remove_paths` 同一个道理）。
+            #
+            # `DeleteItem(index)` 会让**后面所有行的行号往前挪一格**，
+            # 而控件里的选中是按行号记的 —— 清掉之前，那些陈旧行号
+            # 会指向**隔壁的记录**（用户报的"选中偏移到别的记录上"）。
+            self.unselect_all_rows()
             self.list_ctrl.DeleteItem(index)
         removed_a_row = self.store.remove(path)
         if path in self.pinned_paths:
             self.pinned_paths.remove(path)
         self._remember_view()
         self._rows = [r for r in self._rows if r.path != path]
+
+        # **重画一次高亮。**
+        #
+        # 这里走的是"删一行、不整表重建"，所以 `_render_rows` 那套
+        # 清账本 + 重画的逻辑**不会跑**。不补这一句的话：
+        # 删掉的那一行的**蓝色会留着**，而且 `_highlighted_rows` /
+        # `_paint_key` 还指着已经不存在的行号 —— 下一次高亮
+        # 会按陈旧的账本去"还原"一堆错位的行。
+        # 实测（`tools/probes/probe_remove_invalid_row.py`）：
+        # 不修时删完那 30 行里会**留下一条错误的蓝色**。
+        self._highlighted_row = -1
+        self._highlighted_rows = ()
+        self._paint_key = None
+        self._apply_selection_highlight()
 
         if not removed_a_row and index == -1:
             # 界面上没有这一行、数据库里也没有 —— 它从来就不是一条记录。
@@ -2451,8 +3158,15 @@ class FileTracker(wx.Frame):
             self.Refresh()
             return False
         self.remove_invalid_path(path)
+        # **只重建一次。**
+        #
+        # `load_accessed_paths()` 内部就是 `sort_list_items(reload_from_store=True)`
+        # —— "读库 → 排序 → 渲染 → 量列宽"的完整入口。原来这里紧跟着
+        # 又调了一次 `sort_list_items(self.sort_column)`，等于**同一份数据重建两遍**
+        # （几千行时每次数百毫秒白付一遍），而且让"选中按行号恢复"那一步
+        # 多错位一次。见 `load_accessed_paths` 的 docstring ——
+        # 那里已经把"连着调两个"明确记为已修缺陷，这里是漏网的一处。
         self.load_accessed_paths()
-        self.sort_list_items(self.sort_column)
         return True
 
     # ------------------------------------------------------------------
@@ -2674,39 +3388,99 @@ class FileTracker(wx.Frame):
 
         "选中事件"只在选择真的变了时候来，与用户的意图一致。
 
-        ## 为什么每次只返回**一个**
+        ## 为什么记录窗格那条分支**要返回全部选中**
 
-        打开是"打开这一处"，不是"打开所有选中"。原来那个 `for` 循环
-        会一次弹出好几个资源管理器窗口（导航窗格是多选的）——
-        那是另一个没人要的行为，一并收掉。
+        用户 2026-10-17 要"多选打开"，并选定"**打开所有选中项**"：
+        多选了 3 条就打开 3 个资源管理器窗口。
+        单条时它当然只返回一条 —— 与改动前完全一致。
 
-        选中的那一处若为空，**回退到另一处**：用户在右边点了空白取消选中
-        之后按「打开」，打开左边选中的目录，比什么都不做合理。
+        （导航窗格那条分支仍然**只取第一条**：那是 v1.1 起就验收过的行为，
+        用户没要求改，动它属于"顺手改掉已经验收的东西"。）
         """
+        # **导航树的选中项若是"文件"，换成它所在的文件夹。**
+        #
+        # 用户："路径记录的规则是：当你**选中导航窗格里面的文件**时，
+        # 记录的是这个文件的**父级文件夹**。"
+        #
+        # 放在这里是因为 `open_targets()` 是「打开」的唯一取值处，
+        # 它返回什么，`record_accessed_path()` 就记什么 ——
+        # **不需要动 `record_accessed_path` 本身**（那会影响记录窗格那条路）。
+        #
+        # ⚠️ **只换"来自导航树"的路径**：记录窗格里存的本来就是文件夹路径，
+        # 用户在那选什么就打开什么。
+        def _from_tree() -> list[str]:
+            return [self.dir_ctrl.folder_for(p)
+                    for p in self.dir_ctrl.GetPaths() if p]
+
         if self._focus_pane == "list":
-            path = self.selected_path()
-            if path:
-                return [path]
-            return [p for p in self.dir_ctrl.GetPaths() if p]
-        paths = [p for p in self.dir_ctrl.GetPaths() if p]
+            paths = self.selected_paths()
+            if paths:
+                return paths
+            return _from_tree()
+        paths = _from_tree()
         if paths:
             return paths[:1]
-        path = self.selected_path()
-        return [path] if path else []
+        return self.selected_paths()
 
     def on_open(self, event) -> None:
+        """「打开」= 用资源管理器打开目标（多选时逐个打开）。
+
+        ## ⚠️ 顺序：**先打开成功、再记这次访问**（审计查出的缺陷）
+
+        原来是
+
+        ```python
+        if os.path.exists(path):
+            self.record_accessed_path(path)   # ← 先记
+            self.open_folder(path)            # ← 再打开（失败也没人管）
+        ```
+
+        `open_folder` 的失败信号被丢掉，于是"**没打开成功**"的路径
+        照样 +1 上屏、还可能把一条失效记录重新写回库里 ——
+        用户看到的却是"点了打开，什么都没发生"。
+
+        ⇒ 改成：**打开了才记**。打不开就如实告诉用户，
+        并且**不**记这一次访问（没到达的地方不该算访问过）。
+        """
         for path in self.open_targets():
-            if os.path.exists(path):
-                self.record_accessed_path(path)
-                self.open_folder(path)
-            else:
+            if not os.path.exists(path):
                 # **先问用户**，不再直接删（见 confirm_remove_invalid_path）
                 self.confirm_remove_invalid_path(path)
+                continue
+            if self.open_folder(path):
+                self.record_accessed_path(path)
+            else:
+                self._report_resource_error(
+                    L(f"打不开：{path}（资源管理器拒绝了这次请求，"
+                      f"或该位置已不可用）",
+                      f"Could not open: {path} (Explorer refused the request, "
+                      f"or the location is unavailable)"))
         self._call_later(100, self.reset_dir_ctrl_scroll)
 
-    def open_folder(self, path: str) -> None:
+    def open_folder(self, path: str) -> bool:
+        """用资源管理器打开 ``path``（是文件就打开它所在的文件夹）。
+
+        :return: **是否真的打开了。**
+
+        ## ⚠️ 返回值得有人读（审计查出的缺陷，2026-10-17）
+
+        `_open_in_explorer` 的 docstring 早就写着"两条路都如实回报"，
+        但它返回的 `bool` 被 `open_folder` **丢掉了**，
+        而四个调用点又全是裸语句：
+
+        ```
+        self.open_folder(folder)      # ← False 没人看
+        ```
+
+        ⇒ "打开失败静默"这一条**其实从来没修好过** ——
+        用户看到的是"点了打开，什么都没发生"，而程序认为成功。
+        更糟的是 `on_open` 那时是**先记一次访问、再打开**，
+        于是"没打开"的路径照样 +1 上屏。
+
+        现在把结果返回给调用方，由调用方决定怎么提示 / 要不要记这次访问。
+        """
         folder_to_open = os.path.dirname(path) if os.path.isfile(path) else path
-        self._open_in_explorer(folder_to_open)
+        return self._open_in_explorer(folder_to_open)
 
     @staticmethod
     def _open_in_explorer(folder: str) -> bool:
@@ -2743,28 +3517,69 @@ class FileTracker(wx.Frame):
                 return False
 
     def on_item_activated(self, event) -> None:
+        """**双击**记录列表里的一条 → 打开它。
+
+        ## 多选时双击怎么办（用户 2026-10-17 选定）
+
+        > "只打开双击的那一条，并**重置为单选**。"
+
+        所以这里先用 `_focus_pane = "list"` + `_collapse_selection_to()`
+        把选中收成"就这一条"，再走原来的单条逻辑。
+        双击的语义是"**就这一条**"，不该一次弹出 N 个窗口。
+        """
         path = self.selected_path()
         if not path:
             return
+        # 双击 = "就这一条"：把它收成唯一的选中（多选状态随之取消）
+        self._collapse_selection_to(path)
         if os.path.exists(path):
-            self.open_folder(path)
-            self.record_accessed_path(path)
+            # **打开了才记这次访问**（理由见 `on_open` 的 docstring）
+            if self.open_folder(path):
+                self.record_accessed_path(path)
+            else:
+                self._report_resource_error(
+                    L(f"打不开：{path}（资源管理器拒绝了这次请求，"
+                      f"或该位置已不可用）",
+                      f"Could not open: {path} (Explorer refused the request, "
+                      f"or the location is unavailable)"))
             self._call_later(100, self.reset_dir_ctrl_scroll)
         else:
             # **先问用户**（见 confirm_remove_invalid_path）
             self.confirm_remove_invalid_path(path)
 
-    def on_open_selected(self, event) -> None:
-        path = self.selected_path()
-        if not path:
+    def _collapse_selection_to(self, path: str) -> None:
+        """把选中收成"只有 `path` 这一条"（双击时用）。
+
+        `_focus_pane` 一起设成 `"list"`：双击已经表明用户此刻在记录窗格操作，
+        而且 `record_accessed_path` 里"给焦点 + 换选中"那一块由它把关 ——
+        不设的话，多选后双击会走成"从导航树发起"，焦点跑到别处。
+        """
+        row = self._index_of_path(path)
+        if row < 0:
             return
-        if os.path.exists(path):
-            self.open_folder(path)
-            self.record_accessed_path(path)
-            self._call_later(100, self.reset_dir_ctrl_scroll)
-        else:
-            # **先问用户**（见 confirm_remove_invalid_path）
-            self.confirm_remove_invalid_path(path)
+        # 只清"真正选中的"那些（通常就一两条），不盲扫全表
+        self.unselect_all_rows()
+        self.list_ctrl.SetItemState(
+            row, wx.LIST_STATE_SELECTED | wx.LIST_STATE_FOCUSED,
+            wx.LIST_STATE_SELECTED | wx.LIST_STATE_FOCUSED)
+        self._focus_pane = "list"
+        self._paint_key = None
+        self._apply_selection_highlight()
+
+    def on_open_selected(self, event) -> None:
+        """右键菜单里的「打开」——**多选时打开所有选中项**。
+
+        用户 2026-10-17 选定："打开所有选中项"（与「多选打开」的名字一致）。
+
+        实现上**不要再写一遍打开逻辑**：`open_targets()` 已经在
+        `_focus_pane == "list"` 时返回记录窗格的选中集，`on_open` 又是
+        "遍历并打开"——所以直接把 `_focus_pane` 声明成 `"list"` 再转调它。
+        **两条路分头维护迟早会不一致**（本项目已经吃过这个亏）。
+        """
+        if not self.selected_paths():
+            return
+        self._focus_pane = "list"
+        self.on_open(event)
 
     def _notify(self, message: str, title: str) -> None:
         """弹一个**跟主题一致**的提示框（单按钮）。
@@ -2830,17 +3645,32 @@ class FileTracker(wx.Frame):
                 L("复制", "Copy"))
 
     def on_delete_selected(self, event) -> None:
-        path = self.selected_path()
-        if not path:
+        """删除当前选中的记录 —— **多选时一次删掉全部**。
+
+        ## 为什么必须先把"要删哪几条"取下来再弹窗
+
+        弹窗期间用户还能动界面（拖动、点别的行），模态框关掉之后
+        再去读 `selected_paths()` 可能已经不是原来那批了 ——
+        **删错东西是不可逆的**，所以先取快照。
+        """
+        paths = self.selected_paths()
+        if not paths:
             return
         # **用自绘的 ThemedDialog，不用 wx.MessageDialog。**
         #
         # `wx.MessageDialog` 在 Windows 上是**系统对话框**，由系统主题绘制，
         # 深色下永远是浅色面板——用户反馈"警告弹窗的深色主题适配失败"。
         # 系统对话框没有受支持的换肤接口，**只能换成自己画的**。
-        dialog = ThemedDialog(self, self.theme,
-                              f"{WARN} " + L("确定要删除这条记录吗？", "Delete this record?"),
-                              title=L("确认删除", "Confirm delete"))
+        if len(paths) == 1:
+            prompt = L("确定要删除这条记录吗？", "Delete this record?")
+            title = L("确认删除", "Confirm delete")
+        else:
+            # **多选时把条数写进文案**：用户得知道这一下要删掉几条。
+            prompt = L(f"确定要删除这 {len(paths)} 条记录吗？",
+                       f"Delete these {len(paths)} records?")
+            title = L(f"确认删除 {len(paths)} 条", f"Delete {len(paths)} records")
+        dialog = ThemedDialog(self, self.theme, f"{WARN} " + prompt,
+                              title=title)
         # **`try/finally` 保证弹窗一定会被销毁。**
         # `ShowModal()` 抛异常时（少见但不是不可能）原来的写法会把
         # 弹窗留在屏幕上，而且后面的 `Refresh()` 也不会执行。
@@ -2849,14 +3679,80 @@ class FileTracker(wx.Frame):
         finally:
             dialog.Destroy()
         if confirmed:
-            # **只有真的删到了才刷新**：`store.remove` 返回 False 说明
-            # 那一行早就不在库里（例如另一个实例删过），
-            # 此时刷新只会让界面闪一下，数据没有任何变化。
-            if self.store.remove(path):
-                if path in self.pinned_paths:
-                    self.pinned_paths.remove(path)
-                self.load_accessed_paths()
+            self._remove_paths(paths)
         self.Refresh()
+
+    def _remove_paths(self, paths: list[str]) -> bool:
+        """把若干条路径从"记录 + 顶置列表"里删掉，然后重建列表。
+
+        :return: 是否真的删掉了至少一条。
+
+        **只在真的删到东西时才重建**：`store.remove` 返回 False 说明
+        那一行早就不在库里（例如另一个实例删过），
+        此时重建只会让界面闪一下，数据没有任何变化。
+
+        ## ⚠️ 重建之前**必须先清掉陈旧选中**（用户 2026-10-17 报的 bug）
+
+        > "多选并删除后，多选状态会**偏移到另外多条记录**上，不会自然消失。"
+
+        排查出来的机制（`_selected_paths()` 被调了两次，读数不同）：
+
+        ```
+        要删                = [d002, d004, d006]
+        _selected_paths() #1 = [d002, d004, d006]   ← 删除**前**，对的
+        （数据已经删掉）
+        _selected_paths() #2 = [d003, d007, d009]   ← 行号 [2,4,6] 还在，
+                                                      而内容已经平移了
+        ```
+
+        **行号是控件的，路径是 `self._rows` 的** —— 数据一删，两者就错位：
+        控件的选中行号还是 `[2, 4, 6]`，而 `_rows[2]` 已经从 `d002`
+        变成 `d003`（后面的行往上补）。
+
+        ⇒ `_render_rows()` 拿到的 `keep_paths` 是**相邻那几条的路径**，
+        它们当然还在库里、当然匹配得上 ⇒ **选中框"跳"到了旁边几条记录上**。
+
+        所以这里在**删完数据之后、重建之前**先清掉选中：
+        让 `_selected_paths()` 返回空 ⇒ `keep_paths` 为空 ⇒
+        重建后就是"干干净净没有选中"（正是用户要的"自然消失"）。
+
+        **顺带记一笔**：我第一版把修复写在 `_render_rows` 里
+        （"没有可恢复的选中时也要全清"），那一版**不够** ——
+        因为 `keep_paths` 根本不为空，它拿着一批**错位的、却真实存在**的路径。
+        **光清控件清不掉，得让"要恢复什么"这个输入本身变干净。**
+
+        ## ⚠️ 整批一个事务（审计查出的缺陷，2026-10-17）
+
+        原来是 `for path in paths: self.store.remove(path)` —— 而
+        `remove()` **每次自己 commit**。中途失败（磁盘满 / 库被锁 / 只读）
+        会留下"**前面几条已经删掉、撤不回来**，而界面还显示着它们"，
+        用户再点「打开」时 `record_access` 会把它们**重新写回库里**
+        （`access_count` 归 1、顶置状态丢失）。
+
+        现在走 `store.remove_many()` —— 一个事务，要么全成、要么全不成；
+        并且**无论成败都重建列表**，保证界面与库一致。
+        """
+        try:
+            removed_count = self.store.remove_many(paths)
+        except Exception as error:
+            # **失败要说出来**：静默的话界面与库会长期不一致。
+            self._report_resource_error(
+                L(f"删除记录失败：{error!r}（这次删除没有生效）",
+                  f"Could not delete the records: {error!r} (nothing was deleted)"))
+            # 事务已回滚 ⇒ 内存里的顶置列表也不用动，直接重建刷新界面
+            self.load_accessed_paths()
+            return False
+        if not removed_count:
+            # 一条都没删到（库里本来就没有）—— 不重建，省一次全表刷新
+            return False
+        # 内存里的顶置列表跟着库走（库已经提交成功，这里不会再失败）
+        for path in paths:
+            if path in self.pinned_paths:
+                self.pinned_paths.remove(path)
+        # **先清陈旧选中，再重建**（理由见 docstring）
+        self.unselect_all_rows()
+        self.load_accessed_paths()
+        return True
 
     def on_clear(self, event) -> None:
         dialog = ThemedDialog(self, self.theme,
@@ -2961,21 +3857,42 @@ class FileTracker(wx.Frame):
         self.sort_list_items(self.sort_column)
 
     def on_right_click(self, event) -> None:
+        """右键菜单。
+
+        ## 用户定的规则（2026-10-17）
+
+        > "多选后点击右键，**只保留两个选项**，那就是「打开」和「删除」。"
+
+        口径是**只在多选时精简**（用户选的那个）：
+        单选时保持原来的四项（复制路径 / 顶置 / 打开 / 删除）——
+        那四项是已验收的行为，不能顺手砍掉。
+        """
         # 右键点在某一行上时，控件会先把它选中；没有选中就不弹菜单
-        path = self.selected_path()
-        if not path:
+        if not self.selected_paths():
             return
-        is_pinned = path in self.pinned_paths
+        selected_paths = self.selected_paths()
+        multiple = len(selected_paths) > 1
 
         menu = wx.Menu()
-        entries = [
-            (L("复制路径", "Copy path"), self.on_copy),
-            # 顶置与取消顶置共用一格，按当前状态决定绑哪个处理函数
-            (L("取消顶置", "Unpin") if is_pinned else L("顶置", "Pin"),
-             self.on_unpin if is_pinned else self.on_pin),
-            (L("打开", "Open"), self.on_open_selected),
-            (L("删除", "Delete"), self.on_delete_selected),
-        ]
+        if multiple:
+            # **多选：只有两项**（用户明确要求的）
+            entries = [
+                (L(f"打开 {len(selected_paths)} 项",
+                   f"Open {len(selected_paths)} items"), self.on_open_selected),
+                (L(f"删除 {len(selected_paths)} 项",
+                   f"Delete {len(selected_paths)} items"), self.on_delete_selected),
+            ]
+        else:
+            path = selected_paths[0]
+            is_pinned = path in self.pinned_paths
+            entries = [
+                (L("复制路径", "Copy path"), self.on_copy),
+                # 顶置与取消顶置共用一格，按当前状态决定绑哪个处理函数
+                (L("取消顶置", "Unpin") if is_pinned else L("顶置", "Pin"),
+                 self.on_unpin if is_pinned else self.on_pin),
+                (L("打开", "Open"), self.on_open_selected),
+                (L("删除", "Delete"), self.on_delete_selected),
+            ]
         for label, handler in entries:
             item = menu.Append(wx.ID_ANY, label)
             self.Bind(wx.EVT_MENU, handler, item)
@@ -3041,11 +3958,45 @@ class FileTracker(wx.Frame):
         # **只有"跟随系统"才重读注册表。**
         # 用户明确选了浅色/深色时，窗口一激活就被系统主题覆盖回去，
         # 是那种"我明明选了却不生效"的缺陷。
-        if self.config.get_theme() in (None, THEME_SYSTEM):
-            new_theme = theme_from_system()
-            if new_theme != self.theme:
-                self.theme = new_theme
-                self._retheme()
+        #
+        # ⚠️ **设置对话框开着的时候不能重读**（用户 2026-10-17 报的闪烁）：
+        #
+        # 用户原话："一旦从**跟随系统主题**开始，变成与系统主题不同的主题状态，
+        # 那么你在点**确定**的时候，大概率会观察到部分组件的**二次刷新**。"
+        #
+        # 机制（`tools/probes/probe_retheme_twice.py` 实测）：
+        #
+        # ```
+        # ① 预览选了深色        → 界面变深（正确，所见即所得）
+        # ② 点「确定」→ 对话框关闭 → 主窗口重获激活
+        #    → on_activate 跑到这里，而**配置还没落盘、仍是 "system"**
+        #    → 重读系统主题（浅色）⇒ **把界面改回浅色**
+        # ③ on_settings 的自愈再把它改回深色
+        #    ⇒ 中间那次就是用户看到的"二次刷新"
+        # ```
+        #
+        # 而"深浅互切"（配置里本来就是明确的 light/dark）不会走到这里，
+        # **所以只有从"跟随系统"出发时才闪** —— 与用户的观察完全吻合。
+        #
+        # 修法：预览期间挂起。真正的系统主题变化会在关闭设置后补上
+        # （`_resume_system_theme_watch`），所以不丢功能。
+        #
+        # ⚠️ **不要 `return`** —— 本方法后面还有 `Refresh()`、
+        # 按钮重画、以及 `reset_dir_ctrl_scroll()`（`_call_after`）。
+        # 提前返回会把它们一起跳过，那是另一个 bug。
+        if not getattr(self, "_suspend_system_theme", False):
+            if self.config.get_theme() in (None, THEME_SYSTEM):
+                new_theme = theme_from_system()
+                if new_theme != self.theme:
+                    self.theme = new_theme
+                    self._retheme()
+                # **顺手更新"挂起前的基准值"。**
+                #
+                # `_theme_before_settings` 是给 `_resume_system_theme_watch`
+                # 做对比用的。这里的 `self.theme` 已经是"跟随系统应有的值"，
+                # 所以它天然就是正确的基准 —— 系统主题在程序运行期间变化时
+                # 基准跟着走，关闭设置后的"补一次"才不会误判。
+                self._theme_before_settings = new_theme
         self.Refresh()
         for button in (self.open_btn, self.clear_btn, self.path_bar):
             if hasattr(button, "Refresh"):
@@ -3114,6 +4065,52 @@ class FileTracker(wx.Frame):
         for child in target.GetChildren():
             self._repaint_all(child)
         target.Update()
+
+    def _suspend_system_theme_watch(self) -> None:
+        """**设置对话框打开期间**挂起"激活时重读系统主题"。
+
+        见 :meth:`on_activate` 里那段 —— 不挂起的话，
+        对话框关闭（主窗口重获激活）时会把用户刚预览的主题**改回系统主题**，
+        然后 `on_settings` 的自愈再改回来，用户就看到一次闪烁。
+        """
+        self._suspend_system_theme = True
+        # 记下挂起**之前**那个"跟随系统"的主题值。
+        #
+        # 设置期间系统主题可能真的被改了（用户切到系统设置去改了主题），
+        # 这个是拿来做"关闭后要不要补一次"的对比基准 ——
+        # 用预览中途的 `self.theme` 会误判（那时可能已经是用户选的主题）。
+        self._theme_before_settings = (
+            self.theme
+            if self.config.get_theme() in (None, THEME_SYSTEM)
+            else theme_from_system()
+        )
+
+    def _resume_system_theme_watch(self) -> None:
+        """设置对话框关闭后恢复，并**补上**期间真正发生的系统主题变化。
+
+        ## 为什么要补
+
+        挂起是为了不覆盖用户的预览选择。但如果用户在设置期间
+        **真的去系统里改了主题**，那次变化在挂起期间被忽略了 ——
+        不补的话，界面会一直停在旧主题，直到下次窗口激活才纠正。
+
+        ## 怎么判断"真的发生了"
+
+        只有当用户**最终仍选了"跟随系统"**时才需要补 ——
+        他明确选了浅色/深色的话，系统主题本来就不该影响界面
+        （这正是 `on_activate` 里那个 `if` 的用意）。
+        """
+        self._suspend_system_theme = False
+        try:
+            if self.config.get_theme() not in (None, THEME_SYSTEM):
+                return
+            current = theme_from_system()
+            if current != getattr(self, "_theme_before_settings", None):
+                self.theme = current
+                self._retheme()
+        except Exception:
+            # 纯外观纠正：失败时留着旧主题，不影响任何数据
+            pass
 
     def _preview_theme(self, dialog, preference: str) -> None:
         """设置窗口里点了主题按钮 —— **立刻换**（用户要求"所见即所得"）。
@@ -3188,31 +4185,44 @@ class FileTracker(wx.Frame):
             remembered = self.config.get_sort_direction(spec.key)
             if remembered is not None:
                 dialog._sort_directions[spec.key] = remembered
+        # **挂起"激活时重读系统主题"** —— 见 `on_activate` 里那段说明。
+        # 必须在 `ShowModal()` **之前**：对话框一关，主窗口立刻重获激活。
+        self._suspend_system_theme_watch()
+        confirmed = False
         try:
-            if dialog.ShowModal() != wx.ID_YES:
-                # **取消 = 什么都没发生。**
-                #
-                # 预览已经改过界面了，不还原的话：界面停在他最后点的那个，
-                # 而配置里还是旧的 —— 重启一次又跳回去，
-                # 是最难查的那类不一致。
-                if self.config.get_theme() != theme_before \
-                        or self.theme != theme_from_preference(theme_before):
-                    self.theme = theme_from_preference(theme_before)
-                    self._retheme()
-                if self.config.get_language() != before:
-                    apply_language(before)
-                    self.retranslate()
-                # **排序也要还原** —— 预览已经重排过列表了
-                if (self.sort_key, self.sort_reverse) != sort_before:
-                    self.apply_sort(_column_of(sort_before[0]),
-                                    reverse=sort_before[1])
-                    self._repaint_all()
-                return
-            chosen = dialog.selected_preference()
-            sort_key, sort_reverse = dialog.selected_sort()
-            theme_chosen = dialog.selected_theme()
+            confirmed = dialog.ShowModal() == wx.ID_YES
+            if confirmed:
+                chosen = dialog.selected_preference()
+                sort_key, sort_reverse = dialog.selected_sort()
+                theme_chosen = dialog.selected_theme()
         finally:
+            # ⚠️ **顺序**：先恢复、再 `Destroy()`。
+            #
+            # `Destroy()` 会让主窗口重获激活 ⇒ 触发 `on_activate`。
+            # 若那时还挂着，恢复逻辑要等到下一次激活才跑；
+            # 而"先恢复再销毁"能让紧随其后的那次激活按**最终配置**正确判断。
+            self._resume_system_theme_watch()
             dialog.Destroy()
+
+        if not confirmed:
+            # **取消 = 什么都没发生。**
+            #
+            # 预览已经改过界面了，不还原的话：界面停在他最后点的那个，
+            # 而配置里还是旧的 —— 重启一次又跳回去，
+            # 是最难查的那类不一致。
+            if self.config.get_theme() != theme_before \
+                    or self.theme != theme_from_preference(theme_before):
+                self.theme = theme_from_preference(theme_before)
+                self._retheme()
+            if self.config.get_language() != before:
+                apply_language(before)
+                self.retranslate()
+            # **排序也要还原** —— 预览已经重排过列表了
+            if (self.sort_key, self.sort_reverse) != sort_before:
+                self.apply_sort(_column_of(sort_before[0]),
+                                reverse=sort_before[1])
+                self._repaint_all()
+            return
 
         # **确定：只落盘，不重新应用。**
         #
@@ -3336,13 +4346,34 @@ class FileTracker(wx.Frame):
                 pass
         self._pending_timers.clear()
 
+        # **行底色诊断出报告。** 必须在窗口还活着的时候做——
+        # 报告里要读控件的选中行、顶行、以及那三个记忆账本。
+        if getattr(self, "_paint_tracer", None) is not None:
+            try:
+                self._paint_tracer.dump()
+            except Exception as error:      # pragma: no cover - 诊断不能拖垮退出
+                paint_trace.report_failed(error)
+
         try:
             current_dir = self.dir_ctrl.GetPath()
             if current_dir and os.path.exists(current_dir):
                 self.config.set_last_directory(current_dir)
             self.save_scroll_position()
             self.config.save()
-        except OSError as error:
+        except Exception as error:
+            # ⚠️ **这里要兜 `Exception`，不能只兜 `OSError`**（审计查出的
+            # 结构性问题，2026-10-17）：
+            #
+            # 上面这几步（`GetPath` / `save_scroll_position` / `config.save`）
+            # 任何一个抛出**非 OSError** 的异常（典型是 wx 的
+            # `RuntimeError: wrapped C/C++ object ... has been deleted`），
+            # 控制流就会直接跳出本函数 —— 于是：
+            #
+            #   * `event.Skip()`（本函数最后一句）**不执行 ⇒ 窗口关不掉**
+            #   * `self.store.close()` 不执行 ⇒ **数据库连接不关**
+            #
+            # 同一个函数里另外两段（诊断出报告、关库）都用 `except Exception`
+            # 兜住了，唯独这段只兜 `OSError` —— **判据不一致本身就是缺陷**。
             wx.LogError(L(f"无法保存配置: {error}", f"Could not save the config: {error}"))
 
         try:
@@ -3350,6 +4381,7 @@ class FileTracker(wx.Frame):
         except Exception as error:
             wx.LogError(L(f"关闭数据库时出错: {error}", f"Error while closing the database: {error}"))
 
+        # **`event.Skip()` 放最后且不可跳过** —— 它是"真的关掉窗口"那一步。
         event.Skip()
 
     def _call_later(self, delay_ms: int, callback):
@@ -3366,9 +4398,24 @@ class FileTracker(wx.Frame):
         只用 `wx.CallLater` 就没法在 `on_close` 里统一停掉——
         那正是审计查出的问题（十几个挂起回调，一个都没取消）。
         **新代码一律走这里。**
+
+        ## ⚠️ 跑完要把自己从账上划掉（审计查出的内存泄漏，2026-10-17）
+
+        原来 `_pending_timers` **只加不减**（全文只有 `append` 与 `on_close`
+        里的 `clear()`）。而 `on_scroll` 那种去抖每滚一下就建一个新定时器、
+        旧的只是 `Stop()` 掉、**对象仍留在列表里** ⇒ 长会话里无限增长
+        （每个都持有闭包 + 对 frame 的引用），`on_close` 还要逐个 `Stop()`。
+
+        ⇒ 回调跑完（无论是否因 `_closing` 提前返回）就把自己移除。
+        `Stop()` 过的那些由 `on_close` 的 `clear()` 收尾。
         """
 
         def guarded():
+            # **先把自己划掉，再干活** —— 干活时抛异常也不能留垃圾
+            try:
+                self._pending_timers.remove(timer)
+            except ValueError:
+                pass
             if self._closing:
                 return
             callback()

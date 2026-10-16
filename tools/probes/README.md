@@ -13,6 +13,32 @@
 | `GetDC(hwnd)` + `GetPixel` | 返回值自相矛盾（同一段文字在每个 y 都"出现"，按钮位置读到纯白） |
 | `ScreenDC` + `Blit` | 抓到的是**别的窗口**（本进程窗口没被合成） |
 | `wx.WindowDC` / `wx.ClientDC` + `Blit` | 只在**刚建好、已验证为纯色**的窗口上可信 |
+| **`PrintWindow` 打在⚠️子控件⚠️上** | ✅ **可信**（见下） |
+
+#### ✅ 例外：`PrintWindow` 打在**子控件**上能得到真画面
+
+上面第 2 行说的是"打在**顶层 Frame** 上" —— 那样确实只拿到标题栏、
+客户区全白。但**打在 `wx.ListCtrl` 这类子控件上**时，
+控件会把自己的内容**完整重画**进给定 DC，拿到的是**真像素**。
+
+实测校准（`probe_printwindow_capture.py`、`probe_row_paint_pixels.py`）：
+把某行涂成纯红 `#FF0000`、另一行涂成纯绿 `#00FF00`，抓回来
+**就是红和绿**（各占 92% 像素）。
+
+**用它的三条规矩**（少一条结论就不可信）：
+
+1. **必须打在控件上，不要打在 Frame 上** —— 打 Frame 时子控件不被递归画
+2. **抓之前先 `Refresh()` + `Update()`** —— 否则拿到的是上一次的画面
+3. **坐标用该控件的客户区坐标**（`GetItemRect(row)` 就是），不要混屏幕坐标
+
+> ⚠️ 另外两个害过人的坑（都实测过）：
+>
+> * **`wx.ScreenDC` + `Blit` 读不到本进程窗口的真实合成结果** ——
+>   涂成纯红的行，从屏幕抓回来仍是 `#FFFFFF`。**别用屏幕采样判颜色。**
+> * **`wx.GetMousePosition()` 是全局真实鼠标**，而 `on_list_motion` 会
+>   按它改行底色。探针里每 `YieldIfNeeded()` 一次就可能投递一次
+>   `WM_MOUSEMOVE`，于是**测试自己把刚涂的颜色改回主题色**。
+>   量颜色之前先把鼠标挪开（`SetCursorPos`）。
 
 **所以判断"画得对不对"要用另外两条路**：
 
@@ -20,6 +46,9 @@
    把窗口按 Layout 的几何画到自建 `wx.Bitmap`，再数暗像素。
    位图上的 `GetPixel` 是可靠的。
 2. **拦截绘制调用**（如拦 `wx.DC.DrawLine` 看有没有落笔）。
+
+（第 3 条是后来才找到的、最直接的一条：**`PrintWindow` 打在子控件上** ——
+见上面那个例外小节。）
 
 > 我因为轻信抓图，得出过两次错误结论：
 > "三种 DC 都画不出正文"（其实画得出来）、"导航窗格白边 2 像素"（其实取样不可信）。
@@ -79,6 +108,156 @@ python tools/probes/<名字>.py
 `probe_row_colour_set.py` · `probe_row_trackselect.py` · `probe_two_tier_highlight.py` ·
 `probe_hover_time.py` —— **动"预选 / 选中"这两档之前，全部跑一遍**。
 
+### 三之一、⚠️ "存着蓝、看着灰" —— 先读这一节，再动手
+
+用户报「从导航窗格打开之后，记录列表那条是**浅灰**而不是蓝色」。
+前十轮全部**方向错了**，错在两点，都值得记下来：
+
+#### 错误一：拿"存了什么"当"画成什么"
+
+```python
+ctrl.GetItemBackgroundColour(row)     # → 永远是 #0078D7
+```
+
+**这个读数与屏幕上画成什么无关。** 七个探针全绿、用户始终看到灰，
+根子就在这儿。判"画得对不对"必须看像素，而**本环境里能信的是
+`PrintWindow` 打在列表控件上**（见上面「先读这两条」的例外那条）。
+
+#### 错误二：探针复刻的是"我以为的场景"
+
+差一点的地方全是**配置口径**，不是代码：
+
+| 我以为 | 实际（`%APPDATA%\File Tracker\config.json`） |
+|---|---|
+| 按频次降序排 | **`"sort_column": "path"` 升序** |
+| 视角在顶上 | `v_relative: 0.333`（中间） |
+| 走 `on_open` | 可能走 `on_dir_item_activated`（树里双击**文件**） |
+
+**排序口径决定"新记录落在第几行"**，也就决定了它是否在屏幕上。
+用错口径，量到的永远是另一条记录。
+
+| 探针 | 什么时候用 |
+|---|---|
+| `probe_row_paint_pixels.py` | **首选**：从导航窗格打开后，量选中那行**真正被画成**什么色（含仪器自校准） |
+| `probe_printwindow_capture.py` | 先确认 `PrintWindow` 在本机拿得到真像素（涂红/绿自校准） |
+| `probe_paint_order.py` | 记录"改底色 / 改选中 / 重画高亮"三件事的**先后顺序**（判断蓝色有没有画在选中之后） |
+| `probe_pixel_coords.py` | 怀疑采样坐标算错时跑（含"鼠标污染"的现场演示） |
+| `probe_user_shape.py` | 用**用户配置的形状**（path 升序 + 视角居中）复现 |
+| `probe_focus_bit_pixels.py` | 单变量对照：只差原生 `FOCUSED` 位，看画出来有没有区别 |
+| `probe_real_open_pixels.py` | **真的**启动资源管理器（不换桩）后，看激活状态与画面 |
+| `probe_inactive_selection.py` | **未激活窗口里选中行画成什么色**（实测 `#F0F0F0`，Windows 自己的非活动选中色） |
+| `probe_tree_dblclick_focus.py` | **双击导航窗格里的文件**之后焦点/选中对不对（与「打开」按钮**并排比**） |
+| `probe_real_dblclick.py` | **发真的鼠标消息**测双击（不碰事件绑定，只看行为）——**首选** |
+| `probe_tree_events.py` | 真双击时 wx **到底发哪些事件**（实测：`EVT_TREE_ITEM_ACTIVATED` **不发**） |
+| `probe_pathbar_enter_focus.py` | **地址栏输入路径 + 回车**之后焦点/选中对不对 |
+| `probe_paint_invariant.py` | 钉住不变量：选中行变了 ⇒ **必须被上过色**，且账本同步 |
+| `probe_multiselect_feature.py` | **多选功能总验证**（Ctrl 点选 / 拖拽 / 右键两项 / 多选打开 / 多选删除）——**改多选之前先跑** |
+| `probe_multiselect_native.py` | 多选可行性：**必须清原生 `LVS_SINGLESEL`**（只改 wx 侧无效） |
+| `probe_multiselect_drag.py` | 拖拽框选为什么**原生不可用**（7 种组合全试过，都只选中一行） |
+
+### ⚠️ 多选相关的三条硬结论（改之前先读）
+
+1. **`LVS_SINGLESEL` 必须清"原生"那一位。**
+   `ctrl.SetWindowStyleFlag(...)` 只改 wx 侧 ⇒ API 多选能用、
+   **真 Ctrl 点击仍只选一行**。用 `win32.enable_list_multi_select()`。
+
+2. **原生拖拽框选不可用**，7 种组合（`MK_LBUTTON` 有无、步数/延时、
+   `SetCapture`、预先选中起点、`LVS_EX_DOUBLEBUFFER`、混合）
+   **每一种都只选中按下那一行** ⇒ 拖拽是应用**自己实现**的
+   （见 `app.on_list_left_down` / `_handle_drag_motion` / `_select_range`）。
+
+3. **判断"左键还按着"要用 `event.LeftIsDown()`，不能用 `wx.GetMouseState()`。**
+   后者读的是**系统级真实鼠标**，`SendMessage` 发的 `WM_MOUSEMOVE` 不改它 ⇒
+   拖拽第一帧就被判成"左键已松开"、整段拖拽跑不起来。
+
+### ⚠️ `_focus_pane` 是"闸门变量"：每个入口都要有人给它赋值
+
+`record_accessed_path` 里"给记录列表焦点 + 换选中"整块由 `from_tree` 把关，
+而 `from_tree` 看的是 `_focus_pane`。**这个变量有 4 个入口**，
+少写一个那个入口就整块失效（用户已经报回来**两次**）：
+
+| 入口 | 谁设 `_focus_pane` |
+|---|---|
+| 地址栏回车 `on_path_submitted` | 显式 `= "tree"` |
+| 双击树里的文件 `on_dir_item_activated` | 显式 `= "tree"` |
+| 双击列表 / `on_open_selected` | 双击前的 `EVT_SET_FOCUS` → `"list"` |
+| 「打开」按钮 `on_open` | 树的 `EVT_SET_FOCUS` → `"tree"` |
+
+**改任何一个入口之前，先把上表数一遍** —— 靠"上一个事件顺手设了"是隐式契约。
+
+### ⚠️ 一个容易写反的预期：`_focus_pane` 的**终态**
+
+双击导航窗格里的文件之后，`_focus_pane` **最后是 `'list'`，不是 `'tree'`** ——
+那是**正确的**：
+
+```
+① on_dir_item_activated 设 _focus_pane = "tree"   ← 让 from_tree 为真
+② record_accessed_path 里 SetFocus() + 上色
+③ SetFocus() 触发 EVT_SET_FOCUS → on_list_selection_made
+   → _focus_pane = "list"                          ← 正确的终态
+```
+
+`_focus_pane` 的语义是"**用户最后一次在哪里操作**"，而此刻焦点**确实**
+已经在记录列表上了。写探针时要把"过程中的意图"和"终态"分开，
+否则会像我第一版那样把对的判成错的。
+
+> ⚠️ 这几个探针里有**两处必须照做的动作**，否则读数无意义：
+> 抓图前 `Refresh()`+`Update()`、采样前把鼠标挪出列表（见上文两条坑）。
+
+### ✅ 装进程序里的仪器：`FT_DEBUG_PAINT`
+
+探针复刻不了用户的环境，所以**仪器要装进程序本身**，让他跑一次。
+
+**推荐：文件开关**（不依赖启动方式，一眼能看出开着没有）：
+
+```powershell
+# 开
+New-Item "$env:APPDATA\File Tracker\enable-paint-trace" -ItemType File
+cd "D:\Coding\MyGitHub\File-Tracker"
+.\run.ps1
+# 复现一次（从导航窗格「打开」或双击文件），然后关窗口
+# 关掉诊断：删掉那个文件
+```
+
+也可以用环境变量（两者任一即可）：`$env:FT_DEBUG_PAINT = "1"`
+
+> ⚠️ **2026-10-17 实测的坑**：用户设了 `$env:FT_DEBUG_PAINT = "1"` 再跑 `run.ps1`，
+> 而 `[PAINT]` **一行都没出来**。同一个 PowerShell 里查：
+> `python -c "import os; print(os.environ.get('FT_DEBUG_PAINT'))"` → **`None`**。
+> **那个 `python` 不是 `run.ps1` 用的解释器，环境变量没进到被测进程。**
+> ⇒ **开诊断不能依赖某一条特定启动路径**，所以补了文件开关。
+> 另外 `on_close` 不是唯一的退出路径（关控制台 / Ctrl+C 都不走它），
+> 所以还有 `atexit` 兜底 —— 两条都有探针验证：`probe_file_switch.py`。
+
+**装上时会自报一行**（这一行不能省，否则"到底装没装上"查不出来）：
+
+```
+[PAINT] 行底色记录器已装上（开关 = 文件开关 …；已包装 6 个方法：…）
+```
+
+报告落在 `%APPDATA%\File Tracker\paint-trace.txt`，里面是**每一次**外观改动的
+"最后归属"：`(行, 颜色)` + **调用栈** + 当时的焦点/激活/选中/顶行，
+外加三个记忆账本（`_paint_key` / `_highlighted_row` / `_hover_row`）。
+
+**报告末尾有「一句话结论」，不用自己读完整张清单**：
+
+```
+── 一句话结论 ──
+  选中行 30 **最后一次被写成系统高亮蓝**（app.py:2434 _apply_selection_highlight）。
+  若屏幕上仍是灰 ⇒ **问题在程序之外**（窗口未激活 / 被遮挡 / 另一处覆盖）。
+```
+
+可能的三种结论：
+
+| 结论 | 含义 |
+|---|---|
+| 最后写成 `row_hover` | 屏幕上就是浅灰，**调用栈里的函数就是元凶** |
+| 最后写成系统高亮蓝 | 程序画对了 ⇒ **问题在程序之外**，别再改配色 |
+| 选中行没有任何改动记录 | 那行根本没被上过色（重建时的底色留下来了） |
+
+`probe_report_demo.py` 可以**不开窗口**地演示这份报告长什么样。
+`probe_file_switch.py` 验证文件开关 + 退出兜底（8 条）。
+
 ### 三之二、列表：刷新时的**视角、选中、闪烁**
 
 用户报"双击打开一条之后，记录窗格又回到最开头了"时写的三个探针。
@@ -133,6 +312,8 @@ python tools/probes/<名字>.py
 
 | 探针 | 什么时候用 |
 |---|---|
+| `probe_retheme_twice.py` | 改**设置窗口的"所见即所得"**之前必跑：量"预览/确定"两阶段各重上色几次（真实对话框 + 定时器自动点按钮） |
+| `probe_system_theme_watch.py` | 改 `on_activate` 里"跟随系统才重读注册表"那一段之前必跑：验证挂起期间的系统主题变化**不会丢** |
 | `probe_dialog_fonts.py` | 核**弹窗字号**与**导航窗格行高** |
 | `probe_nav_fonts.py` | 核导航窗格里每一处文字的字号 |
 | `probe_settings_font.py` | 核设置窗口的标签会不会被按钮压住 |
@@ -142,6 +323,34 @@ python tools/probes/<名字>.py
 | `probe_dialog_center.py` / `probe_dpi_units.py` | 核居中 / 核 wx 报的坐标单位 |
 
 ### 八、性能与体积
+
+| 探针 | 什么时候用 |
+|---|---|
+| `probe_perf_baseline.py` | **分档量每个操作的耗时**（200/1000/3000/6000 行），看增长倍数是否超线性 —— **优化之前先跑它** |
+| `probe_perf_detail.py` | 把"重建"**逐项拆开**（哪种原生调用多少次、各占多少）—— 优化只能从"减少调用次数"入手 |
+| `probe_insertitem_overload.py` | `InsertItem` 的**多列重载**能不能用（**实测不通**，见下） |
+| `probe_bundle_size.py` / `probe_pyz_contents.py` / `probe_size_candidates.py` / `probe_libcrypto_source.py` / `probe_used_modules.py` | 每轮体积审计 |
+
+#### 2026-10-17 的性能结论（改之前先读）
+
+**优化过的（改前 → 改后，6000 行）：**
+
+| 操作 | 改前 | 改后 | 手法 |
+|---|---|---|---|
+| 拖拽一帧 | 888.8 ms | **4.7 ms** | 差集法：只改和上一帧不同的行 |
+| 重建 | 1180–1195 ms | **626–791 ms** | `GetColumnWidth` 3004→**5** 次、`GetTextExtent` 6604→**605** 次（都是缓存） |
+| 删除 20 条 | 4095 ms | **2138–2804 ms** | 去掉冗余的全清 |
+
+**剩下的下限在哪**：重建的 ~626 ms 主要是 `SetItem` 18000 次 +
+`InsertItem` 6000 次 + `SetItemBackgroundColour` 6000 次，**全是跨语言原生调用**。
+虚拟列表（`LC_VIRTUAL`）能根治但**不支持逐项底色**，而本项目的高亮全靠它
+—— 所以在这个架构下已接近下限。
+
+**试过不通的路**（别重走）：
+
+* `wx.ListCtrl.InsertItem(row, text, imageIndex, values)` 的**多列重载**
+  在 wxPython 4.2.2 里**四个重载全不匹配** —— wx 没暴露它。
+  所以每行那 3 次 `SetItem`（频次/日期/时间）**省不掉**。
 
 | 探针 | 什么时候用 |
 |---|---|

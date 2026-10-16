@@ -46,6 +46,7 @@ from __future__ import annotations
 import ctypes
 import os
 import string
+import sys
 
 import wx
 
@@ -58,6 +59,8 @@ SHGFI_LARGEICON = 0x000000000
 SHGFI_USEFILEATTRIBUTES = 0x000000010
 SHGFI_OPENICON = 0x000000002
 SHGFI_DISPLAYNAME = 0x000000200
+#: `DrawIconEx` 的画法：图标 + 遮罩
+DI_NORMAL = 0x000000003
 
 FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 FILE_ATTRIBUTE_NORMAL = 0x00000080
@@ -96,7 +99,23 @@ def _drive_label(root: str) -> str:
         return root
 
 
-def _shell_icon(path: str, *, directory: bool,
+def _icon_query_path(name: str, is_dir: bool) -> str:
+    """给外壳的**假路径** —— 它按扩展名返回图标，不碰磁盘。
+
+    `SHGFI_USEFILEATTRIBUTES` 会告诉外壳"别去看文件，就按我给的属性判断"，
+    所以这里拼的路径**不需要真实存在**。
+
+    * 目录 → `C:\\folder`
+    * 文件 → `C:\\x` + 它自己的扩展名（**这是关键**：
+      原来写死成 `.txt`，于是所有文件都拿到"文本文件"图标）
+    """
+    if is_dir:
+        return "C:" + os.sep + "folder"
+    ext = os.path.splitext(name)[1]
+    return "C:" + os.sep + "x" + ext
+
+
+def _shell_icon(path: str, *, directory: bool, size: int,
                 open_icon: bool = False) -> wx.Bitmap | None:
     """取 Windows 外壳给这个路径的**大图标**（32×32 @96dpi，按 DPI 放大）。
 
@@ -117,14 +136,48 @@ def _shell_icon(path: str, *, directory: bool,
             ctypes.byref(info), ctypes.sizeof(info), flags)
         if not info.hIcon:
             return None
-        # `wx.IconFromHICON` 之后要**销毁外壳给的 HICON**，否则每次建树都漏一个
-        icon = wx.IconFromHICON(info.hIcon)
-        user32.DestroyIcon(ctypes.c_void_p(info.hIcon))
-        if not icon.IsOk():
+        try:
+            # ⚠️ **不用 wx 那套图标转换接口，直接用 `DrawIconEx` 画。**
+            #
+            # 这个构建（4.2.2 / wxWidgets 3.2.6）实测：
+            #
+            # * `wx.IconFromHICON(hicon)` —— **模块级函数不存在**
+            # * `wx.Bitmap(icon)` —— `TypeError: Expected a list of bytes objects`
+            #
+            # 第一个错被下面那个 `except` 静默吞掉 ⇒ `_shell_icon`
+            # **从写下那天起就一直返回 None**，所有图标都在退回
+            # `wx.ArtProvider`。**用户看到的"文件图标全是空白纸"就是这么来的。**
+            #
+            # 与其再试第三种转换写法，不如**根本不做转换**：
+            # `wx.MemoryDC.GetHandle()` 拿到 HDC（**不是已废弃的 `GetHDC()`**，
+            # 后者会在启动时打 `wxPyDeprecationWarning` —— 用户看到过），
+            # `DrawIconEx` 把 HICON 直接画到位图上，一步到位。
+            bitmap = wx.Bitmap(size, size)
+            memory = wx.MemoryDC(bitmap)
+            try:
+                # 先填**遮罩色**（洋红）——
+                # 加进图列表时把它声明为遮罩，图标背景就透明了。
+                # **用洋红不用黑**：黑色是真实内容里也会出现的颜色，
+                # 拿它当遮罩会把图标自身的黑像素一起挖空。
+                memory.SetBackground(wx.Brush(wx.Colour(255, 0, 255)))
+                memory.Clear()
+                drawn = user32.DrawIconEx(
+                    ctypes.c_void_p(memory.GetHandle()), 0, 0,
+                    ctypes.c_void_p(info.hIcon), size, size, 0, None,
+                    DI_NORMAL)
+            finally:
+                memory.SelectObject(wx.NullBitmap)
+        finally:
+            # 无论成功与否都要**销毁外壳给的 HICON**，否则每次建树漏一个
+            user32.DestroyIcon(ctypes.c_void_p(info.hIcon))
+        if not drawn:
             return None
-        bitmap = wx.Bitmap(icon)
         return bitmap if bitmap.IsOk() else None
-    except (OSError, AttributeError, TypeError):
+    except OSError:
+        # **只兜"环境不支持"**（非 Windows、外壳调用失败）。
+        #
+        # `AttributeError` / `TypeError` 这类**编程错误必须冒出来** ——
+        # 正是它们让上面那两个写错的接口藏了这么久。
         return None
 
 
@@ -183,11 +236,13 @@ def _is_hidden_entry(entry) -> bool:
 
 #: 图标槽位。**顺序即索引**，树里存的就是这些下标。
 #:
-#: 只有两个 —— 导航树**只列目录**（列文件会把它撑爆），
-#: 所以「打开态文件夹」和「文件」两个图标从来没有被画过。
-#: `check_wiring.py` 把之前那三个从未被读取的常量抓了出来，已删。
+#: **必须有"文件"这一格。** 我一度把它当死代码删掉了，理由是
+#: "导航树只列目录" —— 而那个限制是**我自己加的**，不是用户要的。
+#: 用户报："现在它只展示文件夹，不展示文件。这样用户看不到文件夹下
+#: 有什么东西，会很困惑。" 原来的 `wx.GenericDirCtrl` **默认两者都显示**。
 ICON_DRIVE = 0
 ICON_FOLDER = 1
+ICON_FILE = 2
 
 
 # --------------------------------------------------------------------------
@@ -209,6 +264,13 @@ class DirectoryTree(wx.TreeCtrl):
         self._populated: set = set()
         self._images = self._build_images()
         self.AssignImageList(self._images)
+        #: 扩展名（小写）→ 图列表下标。**一个扩展名只取一次图标。**
+        self._icon_cache: dict = {}
+        #: 出错时的上报回调（**由 `app.py` 注入**，避免本模块反向依赖它）。
+        #:
+        #: 接上之前默认打 stderr —— 审计查出的那条"展开失败后目录
+        #: 永久空着、且毫无提示"必须至少留下痕迹。
+        self.on_error = None
 
         self._root = self.AddRoot("root")
         self.Bind(wx.EVT_TREE_ITEM_EXPANDING, self._on_expanding)
@@ -233,11 +295,13 @@ class DirectoryTree(wx.TreeCtrl):
         images = wx.ImageList(size, size)
         # 占满全部槽位，**保证下标与常量一一对应**（缺一个就会整体错位）
         sources = [
-            (_shell_icon("C:" + os.sep, directory=True), wx.ART_HARDDISK),
-            (_shell_icon("C:" + os.sep + "folder", directory=True),
+            (_shell_icon("C:" + os.sep, directory=True, size=size), wx.ART_HARDDISK),
+            (_shell_icon("C:" + os.sep + "folder", directory=True, size=size),
              wx.ART_FOLDER),
+            (_shell_icon("C:" + os.sep + "file.txt", directory=False, size=size),
+             wx.ART_NORMAL_FILE),
         ]
-        for bitmap, fallback in sources:
+        for bitmap, fallback in sources:  # noqa: B007
             if bitmap is None or not bitmap.IsOk():
                 bitmap = wx.ArtProvider.GetBitmap(
                     fallback, wx.ART_OTHER, wx.Size(size, size))
@@ -247,6 +311,45 @@ class DirectoryTree(wx.TreeCtrl):
                 bitmap = wx.Bitmap(image)
             images.Add(bitmap)
         return images
+
+    def _icon_for(self, name: str, is_dir: bool) -> int:
+        """这个子项该用哪张图标 —— **文件按扩展名取**。
+
+        ## 为什么必须按扩展名
+
+        原来所有文件共用一张写死的 `file.txt` 图标，于是
+        `.exe` / `.dll` / `.txt` 全长一样。用户报：
+        "所有文件图标**全部是空白纸**，没有我在 Explorer 里面看到的这种图标。"
+
+        ## 缓存
+
+        键是**小写扩展名**。`wx.ImageList.Add()` 返回新下标，
+        所以图列表可以按需增长。取不到图标时退回 `ICON_FILE`。
+        """
+        if is_dir:
+            return ICON_FOLDER
+        ext = os.path.splitext(name)[1].lower()
+        hit = self._icon_cache.get(ext)
+        if hit is not None:
+            return hit
+        size = self._icon_size()
+        bitmap = _shell_icon(_icon_query_path(name, False), directory=False,
+                        size=size)
+        if bitmap is None or not bitmap.IsOk():
+            self._icon_cache[ext] = ICON_FILE
+            return ICON_FILE
+        if bitmap.GetWidth() != size or bitmap.GetHeight() != size:
+            bitmap = wx.Bitmap(
+                bitmap.ConvertToImage().Scale(size, size, wx.IMAGE_QUALITY_HIGH))
+        index = self._images.Add(bitmap)
+        self._icon_cache[ext] = index
+        return index
+
+    def _icon_size(self) -> int:
+        """图标边长 = `round(树文字高 × METRICS.tree_icon_ratio)`（与建图列表同源）。"""
+        from .theme import METRICS
+        text_height = self.GetTextExtent("Ag").height or 1
+        return max(int(round(text_height * METRICS.tree_icon_ratio)), 8)
 
     # -- 建树 -------------------------------------------------------------
 
@@ -298,7 +401,6 @@ class DirectoryTree(wx.TreeCtrl):
         """
         if not item.IsOk() or item in self._populated:
             return
-        self._populated.add(item)
         # **批量插节点必须冻结重绘。**
         #
         # `AppendItem` 每插一个都会重排 + 重绘一次；插 N 个就是 N 次布局。
@@ -309,8 +411,9 @@ class DirectoryTree(wx.TreeCtrl):
         self.Freeze()
         try:
             self.DeleteChildren(item)
-            for name in self._children_of(item):
-                child = self.AppendItem(item, name, ICON_FOLDER)
+            for name, is_dir in self._children_of(item):
+                child = self.AppendItem(item, name,
+                                        self._icon_for(name, is_dir))
             # **每个子节点也要有占位子节点。**
             #
             # `wx.TreeCtrl` 靠"有没有子节点"决定画不画展开箭头 ——
@@ -320,7 +423,45 @@ class DirectoryTree(wx.TreeCtrl):
                 # 代价是"空目录也显示箭头"：盘根下有没有子目录**只能等展开时
                 # 才知道**（列一次目录的代价不想在建树时付）。这是资源管理器
                 # 同款的取舍。
-                self._add_placeholder(child)
+                #
+                # ⚠️ **只给目录加 —— 文件展开不了。**
+                # 给文件加占位会让它显示一个点不开的箭头。
+                if is_dir:
+                    self._add_placeholder(child)
+            # **记账放在"真的干完之后"。**
+            #
+            # ⚠️ 审计查出的缺陷（2026-10-17）：原来 `self._populated.add(item)`
+            # 写在循环**之前** —— 等于"工作还没做就先记账"。而上面那句
+            # `DeleteChildren(item)` 已经把原子节点**清空**了，于是任何一步
+            # 抛异常就变成：
+            #
+            #   * 这个目录在导航窗格里**永远是空的**（重启才恢复）
+            #   * 之后每次展开都在 `item in self._populated` 处直接返回
+            #   * `reveal_in_tree` / 地址栏定位到它也会**静默失败**
+            #
+            # 而 `_icon_for` → `_shell_icon` 是**故意只兜 `OSError`** 的
+            # （编程错误要露出来）—— 所以这条路径真的可能被走到。
+            #
+            # 这与本项目另一条教训同型：**先记账、后干活 ⇒ 账本一旦脏了，
+            # 就永远不再重试**（`_apply_selection_highlight` 那次也是）。
+            self._populated.add(item)
+        except Exception as error:
+            # **失败时把记账撤掉（下次展开会重试），并如实报出来。**
+            #
+            # 静默吞掉的话用户只看到"这个目录点不开、里面什么都没有"，
+            # 没有任何线索。
+            self._populated.discard(item)
+            try:
+                where = self.path_of_node(item)
+            except Exception:
+                where = repr(item)
+            report = self.on_error
+            if report is not None:
+                report(f"展开目录失败：{where}（{error!r}）")
+            else:
+                # 没接回调也不能静默 —— 至少让它出现在 stderr 上
+                print(f"[dir_tree] 展开目录失败：{where}（{error!r}）",
+                      file=sys.stderr)
         finally:
             self.Thaw()
 
@@ -330,9 +471,16 @@ class DirectoryTree(wx.TreeCtrl):
         event.Skip()
 
     def _children_of(self, item) -> list[str]:
-        """某个**节点**对应目录下、该显示的子目录名。
+        """某个**节点**对应目录下、该显示的子项 —— **(名字, 是不是目录)**。
 
-        只列子**目录**：这个窗格是用来导航的，列文件会把树撑爆。
+        ⚠️ **文件和文件夹都要列。**
+        我一度只列目录，理由写的是"列文件会把树撑爆" ——
+        而用户报："现在它只展示文件夹，不展示文件。这样用户看不到文件夹下
+        有什么东西，会很困惑。" **那个限制是我自己加的，不是用户要的**；
+        原来的 `wx.GenericDirCtrl` 默认两者都显示。
+
+        返回 `(名字, 是否目录)` 而不是纯名字 —— 调用方要据此选图标、
+        并决定要不要加"占位子节点"（**文件展开不了，不能加**）。
 
         ## 两处必须记住的理由
 
@@ -356,18 +504,19 @@ class DirectoryTree(wx.TreeCtrl):
                 for entry in entries:
                     try:
                         # 读的是已缓存的属性，**不发额外系统调用**
-                        if not entry.is_dir():
-                            continue
+                        is_dir = entry.is_dir()
                         if not self._show_hidden and _is_hidden_entry(entry):
                             continue
                     except OSError:
                         # 单个条目读不到（权限、竞态）不该让整个目录列不出来
                         continue
-                    out.append(entry.name)
+                    out.append((entry.name, is_dir))
         except OSError:
             # 目录不存在 / 没权限（U 盘拔了、系统目录）—— 返回空，不抛
             return []
-        out.sort(key=str.lower)
+        # **文件夹在前、文件在后**，各自按名字排 —— 与资源管理器一致。
+        # 混在一起排会让"哪个能展开"变得难看出来。
+        out.sort(key=lambda pair: (not pair[1], pair[0].lower()))
         return out
 
     # -- 路径 ↔ 节点 ------------------------------------------------------
@@ -529,6 +678,29 @@ class DirectoryTree(wx.TreeCtrl):
             return ""
         # **按节点走父链**，不要按文字搜全树（见 `path_of_node` 的说明）
         return self.path_of_node(item)
+
+    @staticmethod
+    def folder_for(path: str) -> str:
+        """选中项是**文件**时返回它所在的文件夹；是目录就原样返回。
+
+        ## 这是 v1.1 就有的规则
+
+        用户："路径记录的规则是：当你**选中导航窗格里面的文件**时，
+        记录的是这个文件的**父级文件夹**。"
+
+        `wx.GenericDirCtrl` 时代这是由调用方（`app.py`）做的；
+        换成自绘树之后**丢了**。放在这里写一次，比在各调用点
+        各写一遍 `os.path.dirname` 更不容易漏。
+
+        ⚠️ `os.path.isfile` 读不到（路径已不存在）时**原样返回** ——
+        此时 `dirname` 会给出一个更没意义的路径。
+        """
+        try:
+            if path and os.path.isfile(path):
+                return os.path.dirname(path)
+        except OSError:
+            pass
+        return path
 
     def GetPaths(self) -> list[str]:
         """所有选中项的路径（本树是单选，所以最多一条）。

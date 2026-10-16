@@ -47,11 +47,12 @@
 
 | | |
 |---|---|
-| **Download** | Get `File.Tracker_v1.3.2.exe` from [Releases](https://github.com/Neus117/File-Tracker/releases/latest) and run it — portable, no installation |
+| **Download** | Get `File.Tracker_v1.3.3.exe` from [Releases](https://github.com/Neus117/File-Tracker/releases/latest) and run it — portable, no installation |
 | **Database** | On first launch it creates `file_tracker.db` under `C:\Users\<you>\` (named `file_access.db` back in v1.0) |
 | **Run at startup** | Press `Win+R`, type `shell:startup`, press Enter, and drop a shortcut into the folder that opens |
 | **Uninstall** | Delete the exe and `file_tracker.db` |
-| **Check the version** | `File.Tracker_v1.3.2.exe --version` prints something like `File Tracker 1.3.2+ae4a6f4` — the part after `+` is the commit it was built from |
+| **Check the version** | `File.Tracker_v1.3.3.exe --version` prints something like `File Tracker 1.3.3+ae4a6f4` — the part after `+` is the commit it was built from |
+| **Multi-select** (since v1.3.3) | Hold **Ctrl** and click to pick several rows, or **hold the left button and drag** across a range; **Shift**-click selects a run. With several rows selected, the context menu keeps only "Open N items" and "Delete N items" |
 
 > **About the asset name**: from v1.2.0 onward it is uniformly
 > `File.Tracker_v<full version>.exe`. The four earlier releases each used a
@@ -70,15 +71,15 @@ v1.1.0 shipped on 2024-10-14; v1.3.0 on 2026-10-16. **More features, smaller dow
 
 | | v1.1.0 | **v1.3.0** |
 |---|---|---|
-| Size | 15.76 MB | **12.96 MB** |
+| Size | 15.76 MB | **12.99 MB** |
 | UI language | Chinese only | **Chinese/English, switchable** |
 | Sorting | Fixed to frequency | **Choose the column and direction; remembered across restarts** |
 | Pin order | Newest pin went last, and moved after a restart | **Newest pin goes first, and stays there** |
 | Settings dialog | None | **Yes** (language + sorting) |
 | Dark theme | Some controls ignored it | **All custom-drawn controls follow it** |
 | Address bar + Enter | Did not open Explorer | **Actually opens it** |
-| Automated tests | **0** (and the test file imported two names that did not exist) | **192 unit tests + 186 GUI checks** |
-| Build pipeline | **None** (no `.spec`, no script, no CI) | `build.ps1` + 9 gates + GitHub Actions |
+| Automated tests | **0** (and the test file imported two names that did not exist) | **197 unit tests + 187 GUI checks** |
+| Build pipeline | **None** (no `.spec`, no script, no CI) | `build.ps1` + 4 build checks + 9 gates in CI |
 | Binary reports its version | No | **Yes** (name / version / commit) |
 | Version info in file properties | Nearly blank | **All five fields filled** |
 
@@ -94,26 +95,35 @@ v1.1.0 shipped on 2024-10-14; v1.3.0 on 2026-10-16. **More features, smaller dow
 
 ## Known limitations
 
-**Opening a record gets slower once you have a lot of them.** Measured on this
-machine at 175% DPI:
+**Opening a record still rebuilds the list when you have a lot of them.**
+v1.3.3 cut that roughly in half:
 
-| Records | Full refresh after one "Open" |
+| Records | Full refresh after one "Open" (v1.3.2 → **v1.3.3**) |
 |---|---|
-| 200 | ~0.12 s |
-| 1000 | ~0.39 s |
-| 3000 | ~0.99 s |
-| 6000 | ~1.9 s |
+| 200 | 0.070 → **0.063 s** |
+| 1000 | 0.136 → **0.099 s** |
+| 3000 | 0.418 → **0.309 s** |
+| 6000 | 1.180 → **0.626 s** |
 
-The cost is `wx.ListCtrl`'s per-row insert (1.53 s of that 1.9 s) — **not** the
-database read (13 ms) and **not** the column-width pass (61 ms). So **capping the
-number of records would not fix it.**
+(Repeat runs on the same machine vary by ±15%; the 6000-row figure measured
+between 0.63 s and 0.79 s — so "roughly half" is the conservative claim.)
 
-The real fix is a virtual list, but that touches row highlighting, hover
-tracking and the pinned-row tint — it deserves its own round of work.
+The database read is only a dozen milliseconds — the cost is `wx.ListCtrl`'s
+per-row insert and attribute writes: about 30 000 cross-language native calls
+for 6000 rows. So **capping the number of records would not fix it.** The real
+fix is a virtual list (`wx.LC_VIRTUAL`), but it does **not** support per-item
+background colours — and full-row highlighting, hover tracking and the pinned
+tint all rely on those. That deserves its own round of work.
 
 **For everyday use (tens to hundreds of records) this is imperceptible.**
-The measurement scripts and full conclusions are in `tools/probes/README.md`,
-under "list scale".
+The measurement scripts and full conclusions are in `tools/probes/README.md`:
+`probe_perf_baseline.py` times each operation, and `probe_perf_detail.py`
+breaks the rebuild down to the call level.
+
+> One road that was tried and **does not work**: the multi-column overload of
+> `wx.ListCtrl.InsertItem` matches none of its four overloads in wxPython
+> 4.2.2 (wx does not expose it), so the three `SetItem` calls per row
+> (count / date / time) cannot be saved. See `probe_insertitem_overload.py`.
 
 ---
 
@@ -203,7 +213,7 @@ powershell -File tools/verify_gui.ps1
 
 | Checker | What it catches |
 |---|---|
-| `pytest` | 192 unit tests, no GUI required |
+| `pytest` | 197 unit tests, no GUI required |
 | `check_wiring.py` | Things that are defined but never read |
 | `check_dialogs.py` | Dialogs given two buttons whose return value is ignored (users once reported "both buttons do the same thing") |
 | `check_duplicate_methods.py` | A method defined twice — Python silently keeps the last one, so **editing the first has no effect** |

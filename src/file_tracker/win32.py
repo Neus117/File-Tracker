@@ -75,6 +75,14 @@ LVS_EX_DOUBLEBUFFER = 0x00010000
 #: 详见 :func:`strip_column_header_style` 的说明。
 LVS_NOCOLUMNHEADER = 0x4000
 
+#: **单选**。清掉它才允许多选（Ctrl / Shift 点击）。
+#:
+#: .. warning::
+#:   决定**鼠标行为**的是**原生这一位**，不是 wx 的 ``wx.LC_SINGLE_SEL``。
+#:   只改 wx 侧时，API 多选能用、真 Ctrl 点击仍然只选一行 ——
+#:   实测见 :func:`enable_list_multi_select`。
+LVS_SINGLESEL = 0x0004
+
 #: 不创建列头。**必须在 ``wx.ListCtrl`` 构造时拼进 style**——
 #: 事后 ``SetWindowLong`` 设它无效（Windows 只在创建时看这个标志），
 #: 详见 :func:`strip_column_header_style` 的说明。
@@ -419,6 +427,47 @@ def strip_column_header_style(hwnd: int) -> bool:
     if native:
         # 已经建好的那个还得藏一次
         ctypes.windll.user32.ShowWindow(ctypes.c_void_p(native), 0)
+    return True
+
+
+def enable_list_multi_select(hwnd: int) -> bool:
+    """让列表控件允许**多选**：清掉原生的 ``LVS_SINGLESEL``。
+
+    ## ⚠️ 必须改**原生**样式位，改 wx 的没用（2026-10-17 实测）
+
+    用户要"按住 Ctrl 多选"。第一版我在探针里用
+    ``ctrl.SetWindowStyleFlag(style & ~wx.LC_SINGLE_SEL)`` ——
+    **API 多选能用（`Select(0)`+`Select(2)` → `[0, 2]`），
+    但真 Ctrl 点击仍然只选中一行。**
+
+    原因：`SetWindowStyleFlag` 只改了 **wx 侧**的记录，
+    原生 ``GWL_STYLE`` 里的 ``LVS_SINGLESEL`` 位还在，
+    而真正决定鼠标行为的是原生那一位。
+
+    改成 ``SetWindowLongW(hwnd, GWL_STYLE, style & ~LVS_SINGLESEL)`` 之后，
+    实测（`tools/probes/probe_multiselect_native.py`）：
+
+    ==========================  ============================
+    Ctrl 点击第 1、4 行         选中 ``[1, 4]`` ✅
+    Shift 点击第 2、6 行        选中 ``[2, 3, 4, 5, 6]`` ✅
+    ==========================  ============================
+
+    本项目对"wx 样式 ≠ 原生样式"已有先例（``LVS_NOCOLUMNHEADER``
+    被 wx 丢掉那次，见 :func:`hide_native_header_by_style`）——
+    **凡是决定原生行为的样式，一律以原生位为准。**
+
+    :return: 是否改成功（非 Windows 或取不到句柄时返回 ``False``）
+    """
+    if not IS_WINDOWS or not hwnd:
+        return False
+    GWL_STYLE = -16
+    user32 = ctypes.windll.user32
+    handle = ctypes.c_void_p(hwnd)
+    style = user32.GetWindowLongW(handle, GWL_STYLE)
+    if not style & LVS_SINGLESEL:
+        # 已经是多选，别再写一次（写 GWL_STYLE 会触发重画）
+        return True
+    user32.SetWindowLongW(handle, GWL_STYLE, style & ~LVS_SINGLESEL)
     return True
 
 

@@ -62,10 +62,24 @@ def open_in_explorer_stub(record: list | None = None):
     验证脚本里凡是要走"地址栏回车"那条路的地方，都必须把
     `frame.open_folder` 换成它，否则每跑一次验证就在用户桌面上
     开一个资源管理器窗口。
+
+    ## ⚠️ **必须返回 `True`**（2026-10-17）
+
+    `open_folder` 现在返回"**是否真的打开了**"，而调用方
+    （`on_open` / `on_item_activated` / `on_path_submitted` /
+    `on_dir_item_activated`）**按它决定要不要记这次访问** ——
+    这是审计查出的缺陷的修法：原来"先记访问、再打开"，
+    打不开也照样 +1 上屏。
+
+    替身返回 `None` 会被判定成"没打开" ⇒ 记录被跳过 ⇒
+    **所有依赖"打开并记录"的探针集体假失败**（实测：4 个探针
+    从全绿变成 0 通过）。所以这里显式返回 `True`，
+    代表"打开成功了"。
     """
 
-    def stub(path: str) -> None:
+    def stub(path: str) -> bool:
         if record is not None:
             record.append(path)
+        return True
 
     return stub

@@ -212,6 +212,36 @@ class PathStore:
         self.conn.commit()
         return changed > 0
 
+    def remove_many(self, paths: list[str]) -> int:
+        """**一次事务**删掉多条记录。返回真正删掉的行数。
+
+        ## 为什么不能用 `for path in paths: self.remove(path)`
+
+        审计查出的缺陷（2026-10-17）：多选删除原来是逐条 `remove()` ——
+        而 `remove()` 每次自己 `commit()`。于是中途失败（磁盘满 /
+        库被别的进程锁住 / 文件只读）就变成：
+
+        * 异常**之前**那几条：已经 DELETE 并提交，**撤不回来了**
+        * 界面上它们还在（因为后续重建没跑）
+        * 用户以为还在 → 再点「打开」→ `record_access` 又把它们
+          **重新 INSERT 回库**（`access_count` 归 1、顶置状态丢失）
+
+        ⇒ 整批放进**一个事务**：要么全成、要么全不成。
+        `sqlite3.Connection` 的上下文管理器在异常时自动回滚
+        （本项目 `_migrate_add_pin_order` 用的也是这个写法）。
+
+        **注意**：单条 `remove()` 保持原样 —— 它的调用方
+        （失效路径删除）本来就只删一条，包事务没有意义。
+        """
+        if not paths:
+            return 0
+        with self.conn:
+            removed = 0
+            for path in paths:
+                self.cursor.execute("DELETE FROM paths WHERE path = ?", (path,))
+                removed += max(self.cursor.rowcount, 0)
+        return removed
+
     def clear(self) -> None:
         """清空全部记录。"""
         self.cursor.execute("DELETE FROM paths")
