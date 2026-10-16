@@ -163,10 +163,33 @@ check("M4", "`remove_invalid_path` 区分『删到了』与『本来就没有』
       "不在记录里，无需删除" in app, "")
 
 # ── M5 ────────────────────────────────────────────────────────────────────
-check("M5", "`on_pin` 用 append（与 `ORDER BY id` 一致）",
-      "pinned_paths.append(path)" in app, "")
-check("M5", "`on_pin` 里不再有 insert(0,",
-      "pinned_paths.insert(0" not in app, "")
+#
+# ⚠️ **这一段被我改过一次方向，两次的原因相同，值得记下来。**
+#
+# 审计 M5 报的是"顶置顺序不持久"：`on_pin` 用 `insert(0, ...)`，
+# 而启动读的是 `ORDER BY id`（**首次访问**的先后），两者不一致
+# ⇒ 用户刚顶置的那条**重启后会跳回原位**。
+#
+# **第一版修法（错）**：改成 `append`，让内存与 `ORDER BY id` 一致。
+# 重启漂移治好了，却把"新顶置的排最前"这个**用户看得见的行为**弄坏了——
+# 用户反馈："新条目置顶后会排在所有已置顶条目最后，不符合使用习惯和直觉"。
+#
+# **现在的修法**：`paths` 表加 `pin_order`，**顺序真的存下来**。
+# 于是"排最前"与"重启不变"可以**同时**满足，不用二选一。
+#
+# 所以判据也换了：不再看"内存与 id 序是否一致"（那是当时那个妥协的判据），
+# 而是看**顺序是不是真的落到了库里**。
+check("M5", "`on_pin` 把新顶置的放在最前（`insert(0, ...)`）",
+      "pinned_paths.insert(0, path)" in app, "")
+check("M5", "`on_pin` 不再用 append（那是「排最后」的错修法）",
+      "pinned_paths.append(path)" not in app, "")
+check("M5", "顶置顺序**存在库里**（`pin_order` 列），不靠 `id` 凑",
+      "pin_order" in store and "ORDER BY pin_order DESC" in store, "")
+check("M5", "老库有迁移（否则升级后 `no such column: pin_order`）",
+      "_migrate_add_pin_order" in store
+      and "ALTER TABLE paths ADD COLUMN pin_order" in store, "")
+check("M5", "迁移按**用户当前看到的顺序**回填（不重排已有顶置）",
+      "WHERE is_pinned = 1 ORDER BY id DESC" in store, "")
 
 # ── m1 ────────────────────────────────────────────────────────────────────
 check("m1", "`on_close` 会停掉挂起的定时器",
