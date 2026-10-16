@@ -1900,6 +1900,14 @@ class FileTracker(wx.Frame):
             return
         self._view_anchor = (self._top_visible_path(),
                              self._selected_path())
+        # **同时记下"当时的顶行行号"。**
+        #
+        # 取消置顶走"按行号保持"（见 `_keep_scroll_row`）——
+        # 路径口径在那时会跟着记录跑到字母序原位，把整块置顶项带出屏幕。
+        try:
+            self._view_anchor_row = self.list_ctrl.GetTopItem()
+        except (AttributeError, IndexError):
+            self._view_anchor_row = 0
 
     def _render_rows(self) -> None:
         """重建列表，**保持视角与选中**，并尽量**不让用户看到中间过程**。
@@ -1994,7 +2002,28 @@ class FileTracker(wx.Frame):
         # 用户要的原话："**它的位置是完全不动的**。"
         # 所以直接算差值滚回去：`delta = 锚点行号 − 当前顶部行号`。
         # **顺序没变时 delta == 0，一行都不滚** —— 那正是理想效果。
-        anchor_index = self._index_of_path(anchor)
+        # **取消置顶走这条：按"行号"保持，不跟路径。**
+        #
+        # 用户："A，这就是 1.3.0 的取消置顶聚焦状态。"
+        # 他要的是**视角完全不动**，而不是跟着那条记录跑到字母序原位
+        # —— 那会把整块置顶项带出屏幕（他报的"大幅变动"）。
+        #
+        # **不能"什么都不做"**：`DeleteAllItems` + 重建本身就把滚动清零了，
+        # 不做等于跳回最顶端，更糟。所以显式把行号设回去。
+        row_mode = bool(getattr(self, "_keep_scroll_row", False))
+        if row_mode:
+            self._keep_scroll_row = False
+            self._focus_path_after_render = None   # 行号口径下不叠加"聚焦到某条"
+            try:
+                want = max(int(getattr(self, "_view_anchor_row", 0)), 0)
+                delta = want - self.list_ctrl.GetTopItem()
+                if delta:
+                    self.list_ctrl.ScrollLines(delta)
+            except (AttributeError, IndexError, TypeError, ValueError):
+                pass
+
+        # 按行号保持时**跳过**路径口径 —— 两个口径只能生效一个
+        anchor_index = -1 if row_mode else self._index_of_path(anchor)
         if anchor_index >= 0:
             try:
                 delta = anchor_index - self.list_ctrl.GetTopItem()
@@ -2920,6 +2949,15 @@ class FileTracker(wx.Frame):
                   f"'{path}' is no longer in the records; removed from pins."),
                 L("取消顶置", "Unpin"))
         self.pinned_paths.remove(path)
+        # **取消置顶：视角完全不动（按行号保持）。**
+        #
+        # 用户报："我一取消置顶，视角突然就进行了一个**大幅的变动**。"
+        # 根因：置顶把视角和那条记录绑在了一起（它此刻正是第 0 行），
+        # 取消置顶时它回到字母序原位，视角就跟着往下走 ——
+        # 整块置顶项因此滚出屏幕。
+        #
+        # 用户选定 A："**这就是 1.3.0 的取消置顶聚焦状态**" —— 即视角不动。
+        self._keep_scroll_row = True
         self.sort_list_items(self.sort_column)
 
     def on_right_click(self, event) -> None:

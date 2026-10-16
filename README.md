@@ -43,11 +43,11 @@
 
 | | |
 |---|---|
-| **下载** | 到 [Releases](https://github.com/Neus117/File-Tracker/releases/latest) 下载 `File.Tracker_v1.3.1.exe`，双击即用，无需安装 |
+| **下载** | 到 [Releases](https://github.com/Neus117/File-Tracker/releases/latest) 下载 `File.Tracker_v1.3.2.exe`，双击即用，无需安装 |
 | **数据库** | 首次运行会在 `C:\Users\<你的用户名>\` 下创建 `file_tracker.db`（v1.0 时代叫 `file_access.db`） |
 | **开机自启** | `Win+R` 输入 `shell:startup` 回车，把程序的快捷方式放进打开的文件夹 |
 | **卸载** | 删掉 exe 和 `file_tracker.db` 即可 |
-| **查看版本** | `File.Tracker_v1.3.1.exe --version` → 打印形如 `File Tracker 1.3.1+ae4a6f4`，`+` 后面是构建它的提交 |
+| **查看版本** | `File.Tracker_v1.3.2.exe --version` → 打印形如 `File Tracker 1.3.2+ae4a6f4`，`+` 后面是构建它的提交 |
 
 > **关于资产名**：从 v1.2.0 起统一为 `File.Tracker_v<完整版本号>.exe`。
 > 此前四个版本各不相同（`File.Tracker_v1.02.exe` 还少一个点），容易下错。

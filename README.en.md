@@ -47,11 +47,11 @@
 
 | | |
 |---|---|
-| **Download** | Get `File.Tracker_v1.3.1.exe` from [Releases](https://github.com/Neus117/File-Tracker/releases/latest) and run it — portable, no installation |
+| **Download** | Get `File.Tracker_v1.3.2.exe` from [Releases](https://github.com/Neus117/File-Tracker/releases/latest) and run it — portable, no installation |
 | **Database** | On first launch it creates `file_tracker.db` under `C:\Users\<you>\` (named `file_access.db` back in v1.0) |
 | **Run at startup** | Press `Win+R`, type `shell:startup`, press Enter, and drop a shortcut into the folder that opens |
 | **Uninstall** | Delete the exe and `file_tracker.db` |
-| **Check the version** | `File.Tracker_v1.3.1.exe --version` prints something like `File Tracker 1.3.1+ae4a6f4` — the part after `+` is the commit it was built from |
+| **Check the version** | `File.Tracker_v1.3.2.exe --version` prints something like `File Tracker 1.3.2+ae4a6f4` — the part after `+` is the commit it was built from |
 
 > **About the asset name**: from v1.2.0 onward it is uniformly
 > `File.Tracker_v<full version>.exe`. The four earlier releases each used a
