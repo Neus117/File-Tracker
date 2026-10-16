@@ -1,6 +1,6 @@
-"""核对中英两版 README 的**结构与数字**是否一致。
+"""核对文档的两类**结构性**缺陷：中英 README 漂移、release 说明里出现重复段。
 
-## 为什么必须自动核
+## 一、中英两版 README 必须同步
 
 用户的要求是"**正确**添加未同步/缺失的英文版描述" —— 关键在"正确"。
 两份 README 最容易出的问题是**悄悄漂移**：
@@ -11,6 +11,19 @@
 * **节标题**：数量与顺序必须一一对应
 * **数字**：两份里出现的同一批关键数字必须相同
 * **切换链接**：两边都要有，且指向对方
+
+## 二、`notes/*.md`（release 说明的本地正本）里不能有重复段
+
+**这一条是补上的**：v1.2.5 的说明一度出现**两个 `**English**` 标题**
+—— 第一轮改写破例给它手写了一个英文块，第二轮"给 v1.2.x 补英文"的脚本
+又追加了一个，于是同一份里并排躺着两块。
+
+**成因是"分两轮改同一份文档、后一轮不知道前一轮做过什么"。**
+判据很简单也很硬：每份说明里
+
+* **恰好一个**一级标题
+* **至多一个** `**English**` 块
+* **恰好一条**指向双语 README 的入口
 """
 import io
 import os
@@ -103,7 +116,28 @@ def main() -> int:
     print(f"    中文 {len(zh.splitlines())} 行｜英文 {len(en.splitlines())} 行")
 
     print()
-    print("  ✅ 两版一致" if ok else "  ❌ 有不一致项，见上")
+    print("=== ⑥ notes/*.md（release 说明的正本）结构 ===")
+    notes_dir = os.path.join(REPO, "notes")
+    if not os.path.isdir(notes_dir):
+        print("    ⚠️ 没有 notes/ 目录，跳过")
+    else:
+        names = sorted(n for n in os.listdir(notes_dir) if n.endswith(".md"))
+        print(f"    {'文件':<14}{'一级标题':>9}{'English':>9}{'README入口':>11}")
+        for name in names:
+            text = io.open(os.path.join(notes_dir, name),
+                           encoding="utf-8").read()
+            h1 = len(re.findall(r"^# ", text, re.M))
+            en_blocks = len(re.findall(r"^\*\*English\*\*$", text, re.M))
+            links = text.count("README](https://")
+            bad = h1 != 1 or en_blocks > 1 or links != 1
+            if bad:
+                ok = False
+            print(f"    {name:<14}{h1:>9}{en_blocks:>9}{links:>11}"
+                  f"{'   ❌' if bad else ''}")
+        print("    判据：一级标题恰好 1、English 块至多 1、README 入口恰好 1")
+
+    print()
+    print("  ✅ 全部一致" if ok else "  ❌ 有不一致项，见上")
     return 0 if ok else 1
 
 
