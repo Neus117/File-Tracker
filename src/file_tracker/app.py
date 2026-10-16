@@ -2004,6 +2004,27 @@ class FileTracker(wx.Frame):
                 # 取不到顶部行号就退回"保证可见"，总比跳回顶部好
                 self.list_ctrl.EnsureVisible(anchor_index)
 
+        # **"强制聚焦到某条"要放在最后 —— 它是覆盖，不是并列。**
+        #
+        # 用于**置顶**：条目跳到了最顶端，光"保持视角"会让用户以为没置顶成功
+        # （他得往上翻才看得见）。所以置顶要走这一条：
+        # 视角**跟着条目走**，落到它现在的位置上。
+        #
+        # **取消顶置不设这个意图** —— 那时条目还在附近，位置不该跳。
+        focus_path = getattr(self, "_focus_path_after_render", None)
+        self._focus_path_after_render = None
+        if focus_path:
+            focus_index = self._index_of_path(focus_path)
+            if focus_index >= 0:
+                try:
+                    # 滚到"该行贴顶"。`EnsureVisible` 只会把它拉进视野
+                    # （可能贴着底边），而置顶后它就在最前面，贴顶才对。
+                    delta = focus_index - self.list_ctrl.GetTopItem()
+                    if delta:
+                        self.list_ctrl.ScrollLines(delta)
+                except (AttributeError, IndexError):
+                    self.list_ctrl.EnsureVisible(focus_index)
+
 
 
     def _render_rows_body(self) -> None:
@@ -2874,6 +2895,17 @@ class FileTracker(wx.Frame):
             return
         # `insert(0, ...)` 与库里的 `pin_order` 最大者一致 —— 都表示"最前"
         self.pinned_paths.insert(0, path)
+        # **置顶之后，视角要跟着它走。**
+        #
+        # 用户报："条目从普通状态变为置顶，现在会因为聚焦而**不同步变化**
+        # —— 用户会疑惑：我置顶的条目呢？怎么不见了？往上翻才看见已经成功置顶了。"
+        #
+        # 根因：`sort_list_items()` 里会 `_remember_view()` 把视角**保持在原处**，
+        # 而置顶把这条记录挪到了**最顶端** —— 两件事方向相反。
+        #
+        # ⚠️ **只有置顶设这个意图。取消顶置不设** ——
+        # 那时条目还在附近，保持视角才是对的（用户明确说过别动它）。
+        self._focus_path_after_render = path
         self.sort_list_items(self.sort_column)
 
     def on_unpin(self, event) -> None:
