@@ -231,7 +231,29 @@ Finally, `build.ps1` actually runs the artifact's `--version` and confirms the
 artifact's **version resource**, confirming those five fields were really
 written.
 
-The release process is documented in `docs/RELEASING.md`.
+**The release chain** (version-bump commit → rebuild → tag → push → create the
+release → download it back and verify the hash) is baked into the scripts and
+checks above, with the rules stated as hard criteria:
+
+- The tag must point at a **code commit**, not a documentation commit.
+- The hash the artifact reports must equal `git rev-parse --short=7 HEAD`.
+- **"Upload succeeded" and "what is online is this exact build" are two
+  different things** — you must download it back and recompute the SHA256.
+- The release notes body has to be **pulled back and compared word for word**
+  with the local copy (once only 2% made it: 1731 characters locally, 42
+  online, and the command still reported success).
+
+> The repository used to carry three **working documents** (a theming/layout
+> cheat sheet, a handover note, and a development log). They recorded *the
+> facts of the moment* rather than *rules* — line numbers drift and version
+> numbers go stale, so **keeping them in the repository is worse than not
+> having them** (the next person edits against outdated line numbers). They
+> have been archived to a development notes collection outside this
+> repository, and `tools/check_doc_lines.py` — written solely to verify those
+> line numbers, and never invoked by any script — was removed along with them.
+> **The `docs/` directory itself is gone**: the release and verification
+> rules now live in the scripts and checkers, whose criteria are
+> **executable** rather than written down in a document that can go stale.
 
 ---
 

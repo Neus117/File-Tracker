@@ -12,7 +12,13 @@
        而不是相信 spec 里那个变量——"我以为我写进去了"和"它真的在里面"
        是两件事。
 
-    这个脚本**不发版**。发版是单独的一步，见 docs/RELEASING.md。
+    这个脚本**不发版**。发版是单独的一步，链条是：
+    版本号提交 → 重建 → 打标签 → 推送 main+标签 → 发 Release → 下载回来核对哈希。
+
+    三条硬约束（都是踩出来的，别省）：
+      ① 标签必须指向**代码提交**，不是文档提交；
+      ② 产物自报的哈希必须 == git rev-parse --short=7 HEAD；
+      ③「上传成功」和「线上那份就是这一份」是两件事——必须下载回来重算 SHA256。
 
 .PARAMETER SkipTests
     跳过 pytest。只在你已经单独跑过测试时用。
@@ -374,7 +380,7 @@ if (-not $hash) {
 }
 Write-Host "SHA256 : $hash"
 Write-Host ''
-Write-Host '构建完成。发版见 docs/RELEASING.md（标签必须指向代码提交）。' -ForegroundColor Green
+Write-Host '构建完成。发版前先改成 File.Tracker_v<版本>.exe，标签必须指向代码提交。' -ForegroundColor Green
 
 [pscustomobject]@{
     Exe      = $exe
