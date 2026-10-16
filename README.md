@@ -1,13 +1,13 @@
 # :star: File Tracker
 - 一个自动跟踪文件路径并根据使用频率和时间排序的工具
 
-- **File Tracker v1.2.4 已发布** —— 更小的体积、可自定义的排序、中英双语界面。
+- **File Tracker v1.2.5 已发布** —— 更小的体积、可自定义的排序、中英双语界面。
 
 <br>
 
 - A tool for automatically tracking file paths and sorting them by usage frequency and time.
 
-- **File Tracker v1.2.4 is out** — smaller, with configurable sorting and a bilingual (Chinese/English) UI.
+- **File Tracker v1.2.5 is out** — smaller, with configurable sorting and a bilingual (Chinese/English) UI.
 
 <div align="center">
 
@@ -45,14 +45,14 @@
 - 频次列数字居中显示 | The frequency column is centre-aligned
 - Ctrl+C 复制路径 | Copy a path with Ctrl+C
 - 右键菜单展开功能选项 | Context menu with expanded options on right-click
-- 路径顶置和取消顶置 | Pin and unpin paths
+- **路径顶置和取消顶置：新顶置的排在最前** | **Pin and unpin paths; newly pinned entries go to the top**
 - 路径的单独或全量删除 | Delete individual records or clear all
 - 浅色 / 深色主题跟随系统 | Light / dark theme follows the system setting
 
 <br><br>
 
 ## :bulb: 使用说明 | How to Use
-- 在 Releases 中下载并运行 `File.Tracker_v1.2.4.exe` 即可使用。
+- 在 Releases 中下载并运行 `File.Tracker_v1.2.5.exe` 即可使用。
   （这个名字从 v1.2.0 起统一为 `File.Tracker_v<完整版本号>.exe`——
   此前四个版本的资产名各不相同，容易下错。）
 
@@ -62,16 +62,16 @@
 - 在 Windows 系统中添加自启动任务的方法：WIN+R 打开运行，然后输入命令
   `shell:startup` 回车。之后将需要添加自启动任务的程序快捷方式放入弹出的窗口即可。
 
-- 如何卸载：直接删除 `File.Tracker_v1.2.4.exe` 和 `file_tracker.db`（或 `file_access.db`）。
+- 如何卸载：直接删除 `File.Tracker_v1.2.5.exe` 和 `file_tracker.db`（或 `file_access.db`）。
 
-- **查看版本**：在命令行里运行 `File.Tracker_v1.2.4.exe --version`，
-  它会打印形如 `File Tracker 1.2.4+a72aed5` 的版本串（`+` 后面是构建它的提交）。
+- **查看版本**：在命令行里运行 `File.Tracker_v1.2.5.exe --version`，
+  它会打印形如 `File Tracker 1.2.5+ae4a6f4` 的版本串（`+` 后面是构建它的提交）。
   没有控制台时（例如双击）它会写一份到 `%APPDATA%\File Tracker\version.txt`，
   并弹一个 6 秒后自动关闭的提示框。
 
 <br><br>
 
-- Download and run `File.Tracker_v1.2.4.exe` from the Releases section to start using the program.
+- Download and run `File.Tracker_v1.2.5.exe` from the Releases section to start using the program.
   (From v1.2.0 onward the asset name is uniformly `File.Tracker_v<full version>.exe` —
   the previous four releases each used a different name.)
 
@@ -81,10 +81,10 @@
 - To add the program to startup in Windows: press WIN+R, type `shell:startup` and press Enter.
   Put a shortcut to the program into the folder that opens.
 
-- To uninstall: simply delete `File.Tracker_v1.2.4.exe` and `file_tracker.db` (or `file_access.db`).
+- To uninstall: simply delete `File.Tracker_v1.2.5.exe` and `file_tracker.db` (or `file_access.db`).
 
-- **Check the version**: run `File.Tracker_v1.2.4.exe --version` in a terminal; it prints a string
-  like `File Tracker 1.2.4+a72aed5` (the part after `+` is the commit it was built from).
+- **Check the version**: run `File.Tracker_v1.2.5.exe --version` in a terminal; it prints a string
+  like `File Tracker 1.2.5+ae4a6f4` (the part after `+` is the commit it was built from).
   Without a console (e.g. a double-click) it also writes `%APPDATA%\File Tracker\version.txt`
   and shows a notice that closes itself after 6 seconds.
 
@@ -92,11 +92,12 @@
 
 ## 与两年前的 v1.1.0 相比 | Compared with v1.1.0 (two years ago)
 
-| | v1.1.0（2024-10-14） | **v1.2.4（2026-10-16）** |
+| | v1.1.0（2024-10-14） | **v1.2.5（2026-10-16）** |
 |---|---|---|
 | 体积 | 15.76 MB | **13.31 MB** |
 | 界面语言 | 仅中文 | **中英双语，可切换** |
 | 排序 | 固定按频次，每次启动都一样 | **可选排序列与方向，跨重启记住** |
+| 顶置顺序 | 新顶置的排最后，且重启后位置会变 | **新顶置的排最前，且跨重启保持** |
 | 地址栏 | 有 | 有（并修好了"回车不打开资源管理器"） |
 | 设置窗口 | 无 | **有**（语言 + 排序） |
 | 深色主题 | 部分控件不跟随 | **自绘控件全程跟随** |
