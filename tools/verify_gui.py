@@ -2353,6 +2353,80 @@ def main() -> int:
             f"{[hex(ord(c)) for c in _app_module.WARN]}",
         )
 
+        # ==============================================================
+        print()
+        print("=== 顶置顺序：新顶置的必须在**最前**（用户反馈）===")
+        print("    用户原话：「新条目置顶后会排在所有已置顶条目最后，")
+        print("    这不符合使用习惯和直觉。请把条目置顶逻辑改成放至顶端」")
+        # ==============================================================
+        #
+        # **必须先清掉现有记录。** 用户的真实库里本来就有顶置项，
+        # 而这里要断言的是"第一条顶置行是谁"，混着旧数据就判不了。
+        frame.store.clear()
+        frame.pinned_paths = []
+        frame.load_accessed_paths()
+        for _ in range(15):
+            wx.YieldIfNeeded()
+
+        order = ["pin-first", "pin-second", "pin-third"]
+        for name in order:
+            folder = os.path.join(scratch.name, "pinorder", name)
+            os.makedirs(folder, exist_ok=True)
+            frame.store.record_access(folder)
+        frame.load_accessed_paths()
+        for _ in range(15):
+            wx.YieldIfNeeded()
+
+        # 走**真实入口**：选中一行 → 调 `on_pin`（右键菜单/按钮走的是它）
+        for name in order:
+            target = os.path.join(scratch.name, "pinorder", name)
+            row = frame.find_path(target)
+            if row < 0:
+                check(f"能在列表里找到 {name}", False, f"find_path 返回 {row}")
+                continue
+            frame.list_ctrl.Select(row)
+            frame.list_ctrl.Focus(row)
+            for _ in range(8):
+                wx.YieldIfNeeded()
+            frame.on_pin(None)
+            for _ in range(8):
+                wx.YieldIfNeeded()
+
+        # **判据取列表第一行**，不是取 `pinned_paths`——
+        # 用户看到的是列表，内存变量对不对不算数。
+        first_row_path = frame.row_path(0)
+        expected_first = os.path.join(scratch.name, "pinorder", "pin-third")
+        check(
+            "最后顶置的那条排在列表第一行（放至顶端）",
+            core.paths_equal(first_row_path, expected_first),
+            f"第一行 = {first_row_path!r}  期望 = {expected_first!r}",
+        )
+
+        # 三条都顶置了，而且整个顶置组的顺序是"最近顶置在最前"
+        listed = [frame.row_path(r) for r in range(3)]
+        want = [os.path.join(scratch.name, "pinorder", n)
+                for n in ("pin-third", "pin-second", "pin-first")]
+        check(
+            "顶置组整体顺序 = 最近顶置的在最前（而不是插入顺序）",
+            all(core.paths_equal(a, b) for a, b in zip(listed, want)),
+            f"前三行 = {[os.path.basename(p) for p in listed]}  "
+            f"期望 = {[os.path.basename(p) for p in want]}",
+        )
+
+        # **阳性对照：重启后顺序不能变。**
+        # 这正是我第一次修这个缺陷时踩的坑——顺序只在内存里对，重启就漂了。
+        reopened = type(frame.store)(frame.store.db_path)
+        try:
+            persisted = [r.path for r in reopened.load_pinned()]
+            check(
+                "阳性对照：重开数据库后顶置顺序不变（不是只在内存里对）",
+                all(core.paths_equal(a, b)
+                    for a, b in zip(persisted, want)),
+                f"库里的顶置顺序 = {[os.path.basename(p) for p in persisted]}",
+            )
+        finally:
+            reopened.close()
+
     except Exception as error:  # noqa: BLE001
         import traceback
 

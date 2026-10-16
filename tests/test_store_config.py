@@ -55,10 +55,16 @@ def test_pin_and_unpin(store):
     store.record_access(r"C:\A")
     store.record_access(r"C:\B")
     store.set_pinned(r"C:\A", True)
-    store.set_pinned(r"C:\B", True)
 
+    # **只顶置一条时它当然在最前。** 这一条是用户报的那个缺陷的判据：
+    # 先顶置 A，再顶置 B，那么 **B 必须在 A 前面**（最近顶置的在最前）。
+    assert [r.path for r in store.load_pinned()] == [r"C:\A"]
+
+    store.set_pinned(r"C:\B", True)
     pinned = [r.path for r in store.load_pinned()]
-    assert pinned == [r"C:\A", r"C:\B"]          # 按插入顺序
+    assert pinned == [r"C:\B", r"C:\A"], (
+        "新顶置的必须排在最前 —— 用户反馈过「新条目置顶后会排在所有"
+        f"已置顶条目最后，不符合使用习惯和直觉」，实际得到 {pinned}")
     assert [r.path for r in store.load_unpinned()] == []
 
     store.set_pinned(r"C:\A", False)
@@ -433,15 +439,24 @@ def test_remove_reports_whether_a_row_was_deleted(store):
 
 
 def test_pin_order_is_the_same_in_memory_and_in_the_store(tmp_path):
-    """顶置顺序**跨重启保持一致**（审计 M5）。
+    """顶置顺序**跨重启保持一致**，而且**新顶置的在最前**。
 
-    缺陷原来是：`on_pin` 用 ``insert(0, ...)``（新的排最前），
-    而启动时读的是 ``ORDER BY id``（首次访问的顺序）。
+    ## 这个功能我改错过两次，两次的原因一样
+
+    **第一次**：`on_pin` 用 ``insert(0, ...)``（新的排最前），
+    而启动时读的是 ``ORDER BY id``（**首次访问**的顺序）。
     两者不一致 ⇒ 用户刚顶置的那条会在重启后跳到别的位置。
 
-    修法是让两处**本来就是同一个顺序**（追加 + `ORDER BY id`），
-    而不是新增一列"顶置时间"——那要多一次数据迁移，
-    也多一处"两份状态要同步"的地方（本项目为那类缺陷修过好几次）。
+    **第二次（我的错）**：为了"不需要迁移"，我把 `on_pin` 改成 ``append``，
+    让内存与 ``ORDER BY id`` 一致——**重启漂移治好了，却弄坏了看得见的行为**。
+    用户反馈：
+
+    > 新条目置顶后会排在所有已置顶条目最后，这不符合使用习惯和直觉。
+
+    **根子是一直没有"顶置顺序"这个东西**，只有 `id`（首次访问的先后）。
+    拿它当顶置顺序，就只能在"新顶置排哪"和"重启后不变"里二选一。
+
+    现在 `pin_order` 把顺序真的存下来了，两个要求可以同时满足。
 
     **必须用真实文件**：`store` fixture 是 ``:memory:``，一关就没了，
     验不了"重启后顺序不变"。
@@ -454,16 +469,88 @@ def test_pin_order_is_the_same_in_memory_and_in_the_store(tmp_path):
         for name in (r"C:\First", r"C:\Second", r"C:\Third"):
             assert store.set_pinned(name, True) is True
 
-        # 记录访问的顺序就是 id 的顺序；顶置组必须按同一个顺序出来
+        # **最近顶置的在最前** —— 与"首次访问顺序"刚好相反
         assert [r.path for r in store.load_pinned()] == [
-            r"C:\First", r"C:\Second", r"C:\Third"]
+            r"C:\Third", r"C:\Second", r"C:\First"]
     finally:
         store.close()
 
-    # 重新打开（模拟重启）之后顺序不变
+    # 重新打开（模拟重启）之后顺序不变 —— 这才是第一版真正的缺陷所在
     reopened = PathStore(path)
     try:
         assert [r.path for r in reopened.load_pinned()] == [
-            r"C:\First", r"C:\Second", r"C:\Third"]
+            r"C:\Third", r"C:\Second", r"C:\First"]
+
+        # 重启之后再顶置一条，它仍然排最前（而不是跑到最后）
+        reopened.record_access(r"C:\Fourth")
+        assert reopened.set_pinned(r"C:\Fourth", True) is True
+        assert [r.path for r in reopened.load_pinned()] == [
+            r"C:\Fourth", r"C:\Third", r"C:\Second", r"C:\First"]
     finally:
         reopened.close()
+
+
+def test_pin_order_migration_preserves_what_the_user_sees(tmp_path):
+    """升级到 `pin_order` 时**不能把用户现有的顶置列表重排**。
+
+    老库没有 `pin_order` 列，而 ``CREATE TABLE IF NOT EXISTS`` 对已存在的表
+    什么都不做——所以必须显式迁移，否则所有带 `pin_order` 的 SQL 都会报
+    ``no such column``，**用户一升级程序就起不来**。
+
+    回填的关键：**按用户升级前看到的顺序**（旧的 ``ORDER BY id``）
+    依次给 1、2、3……，配合新的 ``ORDER BY pin_order DESC``，
+    升级前后看到的顺序完全一样。
+
+    这里手工造一个**旧 schema** 的库，而不是用当前代码建——
+    用当前代码建的库已经有那一列了，测不出迁移。
+    """
+    db = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE paths (
+                id INTEGER PRIMARY KEY,
+                path TEXT UNIQUE,
+                access_count INTEGER DEFAULT 1,
+                last_access_time TEXT,
+                is_pinned INTEGER DEFAULT 0
+            )
+            """
+        )
+        rows = [("p1", 1), ("u1", 0), ("p2", 1), ("u2", 0), ("p3", 1)]
+        for index, (name, pinned) in enumerate(rows, start=1):
+            conn.execute(
+                "INSERT INTO paths (id, path, access_count,"
+                " last_access_time, is_pinned) VALUES (?, ?, 1, ?, ?)",
+                (index, name, "2026-01-01 00:00:00", pinned),
+            )
+        conn.commit()
+        # 旧查询给出的顺序 == 用户升级前看到的顺序
+        before = [r[0] for r in conn.execute(
+            "SELECT path FROM paths WHERE is_pinned = 1 ORDER BY id")]
+    finally:
+        conn.close()
+
+    assert before == ["p1", "p2", "p3"]
+
+    store = PathStore(db)
+    try:
+        # 迁移之后顺序**必须一模一样**
+        assert [r.path for r in store.load_pinned()] == before, (
+            "迁移不得重排用户已有的顶置列表")
+
+        # 而新顶置的仍然排最前
+        assert store.set_pinned("u1", True) is True
+        assert [r.path for r in store.load_pinned()] == [
+            "u1", "p1", "p2", "p3"]
+    finally:
+        store.close()
+
+    # 迁移只跑一次：再开一遍不应改变任何东西
+    again = PathStore(db)
+    try:
+        assert [r.path for r in again.load_pinned()] == [
+            "u1", "p1", "p2", "p3"]
+    finally:
+        again.close()

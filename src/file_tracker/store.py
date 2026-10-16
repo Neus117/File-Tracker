@@ -23,7 +23,17 @@ CREATE TABLE IF NOT EXISTS paths (
     path TEXT UNIQUE,
     access_count INTEGER DEFAULT 1,
     last_access_time TEXT,
-    is_pinned INTEGER DEFAULT 0
+    is_pinned INTEGER DEFAULT 0,
+    -- 顶置顺序：**越大越靠前**。
+    --
+    -- 为什么要单独一列，而不是复用 `id`：
+    -- `id` 是"首次访问的先后"，它与"顶置的先后"是**两件不相干的事**。
+    -- 复用 `id` 的话，要么新顶置的排最后（用户报过：不符合直觉），
+    -- 要么把老顶置项的顺序反过来。
+    --
+    -- 0 表示"没顶置"，或"这一行来自加这一列之前的老数据"
+    -- （老数据由 `_migrate_add_pin_order()` 补齐）。
+    pin_order INTEGER DEFAULT 0
 )
 """
 
@@ -79,6 +89,44 @@ class PathStore:
         self.cursor = self.conn.cursor()
         self.cursor.execute(SCHEMA)
         self.conn.commit()
+        self._migrate_add_pin_order()
+
+    def _migrate_add_pin_order(self) -> None:
+        """给**已存在**的数据库补上 ``pin_order`` 列并回填。
+
+        ## 为什么需要迁移
+
+        `CREATE TABLE IF NOT EXISTS` 对**已经建好的**表什么都不做——
+        所以老用户的库不会自动多出这一列，随后所有带 `pin_order` 的
+        SQL 都会报 `no such column`。
+
+        ## 回填值怎么定
+
+        用户**当前看到的**顶置顺序是 ``ORDER BY id``（旧查询用的）。
+        回填时按 ``id DESC`` 依次给 1、2、3……，配合新的
+        ``ORDER BY pin_order DESC`` —— **升级后顺序与升级前完全一样**，
+        用户不会觉得"顶置列表被重排了"。
+
+        之后再顶置新的，它的 `pin_order` 比谁都大，于是排在最前。
+
+        整个过程放进一个事务：**要么都成，要么都不动**。
+        半途失败留着"有列但没回填"的状态，顺序就会乱。
+        """
+        columns = {
+            row[1] for row in self.cursor.execute("PRAGMA table_info(paths)")
+        }
+        if "pin_order" in columns:
+            return
+        with self.conn:
+            self.cursor.execute(
+                "ALTER TABLE paths ADD COLUMN pin_order INTEGER DEFAULT 0")
+            pinned = self.cursor.execute(
+                "SELECT id FROM paths WHERE is_pinned = 1 ORDER BY id DESC"
+            ).fetchall()
+            for order, (row_id,) in enumerate(pinned, start=1):
+                self.cursor.execute(
+                    "UPDATE paths SET pin_order = ? WHERE id = ?",
+                    (order, row_id))
 
     # -- 生命周期 ---------------------------------------------------------
 
@@ -116,7 +164,7 @@ class PathStore:
         return self.get(path) or PathRecord(path, 1, timestamp, False)
 
     def set_pinned(self, path: str, pinned: bool) -> bool:
-        """设置/取消顶置。``pinned_paths`` 的顺序由调用方维护（``id`` 序）。
+        """设置/取消顶置。**新顶置的排在最前**（`pin_order` 最大）。
 
         :return: **是否真的改到了一行**。
 
@@ -125,11 +173,31 @@ class PathStore:
         用户点顶置 → 界面显示已顶置 → **重启后没了**，而中间没有任何提示。
 
         `cursor.rowcount` 是这里唯一的真话来源：``UPDATE`` 没匹配到行时它返回 0。
+
+        ## 顺序怎么维护
+
+        顶置 → ``pin_order = COALESCE(MAX(pin_order), 0) + 1``（比谁都大 ⇒ 最前）。
+        取消 → 归 0。
+
+        **取消顶置不重排其他项**：它们的相对顺序不受影响，剩下的那个"最大值"
+        仍然有效。所以反复顶置/取消不会让顺序漂移。
         """
-        self.cursor.execute(
-            "UPDATE paths SET is_pinned = ? WHERE path = ?",
-            (1 if pinned else 0, path),
-        )
+        if pinned:
+            self.cursor.execute(
+                """
+                UPDATE paths
+                SET is_pinned = 1,
+                    pin_order = (SELECT COALESCE(MAX(pin_order), 0) + 1
+                                 FROM paths)
+                WHERE path = ?
+                """,
+                (path,),
+            )
+        else:
+            self.cursor.execute(
+                "UPDATE paths SET is_pinned = 0, pin_order = 0 WHERE path = ?",
+                (path,),
+            )
         changed = self.cursor.rowcount
         self.conn.commit()
         return changed > 0
@@ -201,11 +269,17 @@ class PathStore:
         return self._row_to_record(row) if row else None
 
     def load_pinned(self) -> list[PathRecord]:
-        """顶置项，按插入顺序（用户顶置的先后）。"""
+        """顶置项，**最近顶置的在最前**。
+
+        顺序取自 `pin_order`（不是 `id`）。
+
+        原来用的是 ``ORDER BY id``，那是"首次访问的先后"——与顶置顺序无关。
+        后果就是用户报的那条："新条目置顶后会排在所有已置顶条目最后"。
+        """
         self.cursor.execute(
             """
             SELECT path, access_count, last_access_time, is_pinned
-            FROM paths WHERE is_pinned = 1 ORDER BY id
+            FROM paths WHERE is_pinned = 1 ORDER BY pin_order DESC, id DESC
             """
         )
         return [self._row_to_record(row) for row in self.cursor.fetchall()]

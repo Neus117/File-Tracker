@@ -2423,24 +2423,37 @@ class FileTracker(wx.Frame):
         self.Refresh()
 
     def on_pin(self, event) -> None:
-        """顶置当前行。**新顶置的排在顶置组最后。**
+        """顶置当前行。**新顶置的排在最前。**
 
-        ## 为什么是"最后"而不是"最前"
+        ## 这一处我改错过一次，两次都是"顺序来源"没想清楚
 
-        审计查出的缺陷：这里原来是 ``insert(0, path)``（新顶置的排最前），
-        而启动时 `store.load_pinned()` 是 ``ORDER BY id`` ——
-        也就是**首次访问的先后**。两者不一致，于是**重启后顺序会变**：
-        用户刚顶置的那条会从最前跳到它原本的位置。
+        **第一次**：``insert(0, path)``（最前），而启动时读的是
+        ``ORDER BY id``（首次访问的先后）。两者不一致 ⇒ 用户刚顶置的那条
+        **重启后会跳到它原本的位置**。这是真缺陷。
 
-        两个选择：加一列记住顶置时间（要迁移老数据），
-        或者让内存里的顺序与数据库**本来就是同一个**。
+        **第二次（我的错）**：为了"不需要迁移"，我改成 ``append`` 并把
+        数据库也当成"追加序"，还在注释里论证"这样两处本来就是同一个顺序"。
+        **那治好了重启漂移，却弄坏了用户看得见的行为**——用户反馈：
 
-        选了后者：`append` 与 `ORDER BY id` 天然一致，**不需要迁移**，
-        也不会再多出一处"两份状态要同步"的地方——
-        本项目已经因为那类同步缺陷修过好几次了。
+        > 记录窗格条目置顶逻辑现在有点问题，新条目置顶后会排在所有已顶置
+        > 条目最后，这不符合使用习惯和直觉。请把条目置顶逻辑改成放至顶端。
 
-        :meth:`load_accessed_paths` 重建列表时读的是同一个顺序，
-        所以界面上看到的与重启后看到的必然相同。
+        ## 正确的做法：把顺序**真的存下来**
+
+        问题的根子是**一直没有"顶置顺序"这个东西**——只有"首次访问的先后"
+        （`id`）。两者是**两件不相干的事**，硬拿 `id` 当顶置顺序，
+        必然在"新顶置排哪"和"重启后不变"之间二选一。
+
+        现在 `paths` 表有了 `pin_order`（越大越靠前），
+        老数据由 `store._migrate_add_pin_order()` 按**用户当前看到的顺序**回填
+        ——所以升级不会让顶置列表重排。之后：
+
+        * 顶置 → `pin_order` 取最大值 +1 ⇒ **排最前**（用户要的）
+        * 重启 → `load_pinned()` 按 `pin_order DESC` ⇒ **顺序不变**
+        * 内存里的 `pinned_paths` 也用 `insert(0, ...)`，与库一致
+
+        **顺序只保存在一个地方（`pin_order`）**，内存那份是它的映像，
+        不构成第二个"权威来源"。
         """
         path = self.selected_path()
         if not path or path in self.pinned_paths:
@@ -2453,8 +2466,8 @@ class FileTracker(wx.Frame):
                   f"'{path}' is not in the records; cannot pin it."),
                 L("顶置失败", "Pin failed"))
             return
-        if path not in self.pinned_paths:
-            self.pinned_paths.append(path)
+        # `insert(0, ...)` 与库里的 `pin_order` 最大者一致 —— 都表示"最前"
+        self.pinned_paths.insert(0, path)
         self.sort_list_items(self.sort_column)
 
     def on_unpin(self, event) -> None:
