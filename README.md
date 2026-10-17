@@ -50,7 +50,7 @@
 | **数据库** | 首次运行会在 `C:\Users\<你的用户名>\` 下创建 `file_tracker.db`（v1.0 时代叫 `file_access.db`） |
 | **开机自启** | `Win+R` 输入 `shell:startup` 回车，把程序的快捷方式放进打开的文件夹 |
 | **卸载** | 删掉 exe 和 `file_tracker.db` 即可 |
-| **查看版本** | `File.Tracker_v1.4.0.exe --version` → 打印形如 `File Tracker 1.4.0+9700f8f`，`+` 后面是构建它的提交 |
+| **查看版本** | `File.Tracker_v1.4.0.exe --version` → 打印形如 `File Tracker 1.4.0+fa29265`，`+` 后面是构建它的提交 |
 | **多选**（v1.3.3 起） | 记录窗格里按住 **Ctrl** 点选多条，或**按住左键拖动**划选一段；**Shift** 点选可连选。多选后右键菜单只剩「打开 N 项」「删除 N 项」 |
 
 > **关于资产名**：从 v1.2.0 起统一为 `File.Tracker_v<完整版本号>.exe`。

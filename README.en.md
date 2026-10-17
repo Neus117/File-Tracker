@@ -56,7 +56,7 @@
 | **Database** | On first launch it creates `file_tracker.db` under `C:\Users\<you>\` (named `file_access.db` back in v1.0) |
 | **Run at startup** | Press `Win+R`, type `shell:startup`, press Enter, and drop a shortcut into the folder that opens |
 | **Uninstall** | Delete the exe and `file_tracker.db` |
-| **Check the version** | `File.Tracker_v1.4.0.exe --version` prints something like `File Tracker 1.4.0+9700f8f` — the part after `+` is the commit it was built from |
+| **Check the version** | `File.Tracker_v1.4.0.exe --version` prints something like `File Tracker 1.4.0+fa29265` — the part after `+` is the commit it was built from |
 | **Multi-select** (since v1.3.3) | Hold **Ctrl** and click to pick several rows, or **hold the left button and drag** across a range; **Shift**-click selects a run. With several rows selected, the context menu keeps only "Open N items" and "Delete N items" |
 
 > **About the asset name**: from v1.2.0 onward it is uniformly
