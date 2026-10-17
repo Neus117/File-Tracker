@@ -129,7 +129,7 @@ with probe_temp("probe-selection-drift") as scratch:
         # ══ 场景 3：按"访问时间"排序（顺序会变）后打开一条 ═════
         print("\n【按访问时间排序后打开一条】")
         frame.sort_reverse = True
-        frame.sort_list_items(app_mod.COLUMN_CLOCK)
+        frame.sort_list_items(app_mod.COLUMN_TIME)
         pump(30)
         target_row = 80
         target_path = frame.row_path(target_row)

@@ -47,12 +47,125 @@ code, out = run_probe("probe_xxx.py", timeout=120)
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import sys
 
+
+@contextlib.contextmanager
+def client_dc(window):
+    """`wx.ClientDC` 的上下文管理器 —— **必须在窗口销毁前释放**。
+
+    ## 为什么需要它（2026-10-17 查到的偶发访问违例）
+
+    探针里这么写很自然：
+
+    ```python
+    for x in range(...):
+        dc = wx.ClientDC(ctrl)     # 每次迭代新建
+        ...                        # 用完不管
+    frame.Destroy()                # ← 最后一个 dc 还活着！
+    ```
+
+    Python 里 `dc` 是**普通局部变量**，循环结束后最后一个仍然存活，
+    直到函数返回或脚本结束才析构。**如果那时窗口已经 `Destroy()`，
+    析构 DC 会去释放一个指向已销毁窗口的 HDC ⇒ 访问违例**
+    （退出码 `-1073741819` / `0xC0000005`）。
+
+    用户看到的
+    `"python has stopped working / Error launching CrashSender.exe"`
+    就是它 —— `CrashSender.exe` 是 WER 的收尸程序，不是原因。
+
+    ## 用法
+
+    ```python
+    from _probe_guard import client_dc
+
+    with client_dc(frame.list_ctrl) as dc:
+        colour = dc.GetPixel(x, y)
+    # 出了 with，DC 已经释放，之后再 Destroy 也安全
+    ```
+
+    产品代码**不需要**这个：那边 `dc` 都是方法内的局部变量，
+    方法一返回就释放了。
+    """
+    import wx
+
+    dc = wx.ClientDC(window)
+    try:
+        yield dc
+    finally:
+        # 显式删掉，别让它活到窗口销毁之后
+        del dc
+
+
+def pixel_at(window, x: int, y: int) -> tuple[int, int, int] | None:
+    """读一个像素的 RGB；读不到返回 ``None``。
+
+    **内部就用 :func:`client_dc`**，所以调用方不用管 DC 生命周期 ——
+    这是探针里读像素的推荐写法。
+    """
+    try:
+        with client_dc(window) as dc:
+            colour = dc.GetPixel(int(x), int(y))
+        return (colour.Red(), colour.Green(), colour.Blue())
+    except Exception:
+        return None
+
 #: 进程级：只装一次
 _hardened = False
+#: `wx.Frame.Destroy` 的补丁是否已装（同样只装一次）
+_destroy_patched = False
+
+
+def _patch_frame_destroy() -> None:
+    """让 `wx.Frame.Destroy()` 先把 `_closing` 置真，再真正销毁。
+
+    ## 为什么（2026-10-17 查到的偶发崩溃）
+
+    用户看到测试时偶尔弹：
+
+    > "python has stopped working / Error launching CrashSender.exe"
+
+    `CrashSender.exe` **不是我们程序带的**（环境里搜不到），它是
+    **Windows 错误报告（WER）** 在 Python 进程真的崩了之后尝试启动的
+    崩溃收集器 —— 它启动失败才弹出那个框。**所以那个框是"崩了"的
+    二次症状，不是原因。**
+
+    真正的链路：
+
+    1. `_paint_column_separators()` 用 `wx.CallAfter`（异步）画竖线
+    2. 探针直接 `frame.Destroy()`，**从不调用 `on_close`** ⇒ `_closing`
+       永远是 `False`
+    3. `Destroy()` 是**异步**的：排队的 `CallAfter` 可能**在窗口销毁之后**才跑
+    4. 那时 `wx.ClientDC(self.list_ctrl)` 拿到的是**已失效的 HWND**，
+       GDI 调用触发**访问违例** —— 而访问违例是 **C 层崩溃，不是 Python
+       异常**，`try/except Exception` 抓不住它
+
+    ⇒ 探针侧统一在这里补一刀：**销毁前先置 `_closing`**，
+    排队中的绘制回调会自己提前返回（见 `_call_after` 的守卫）。
+
+    产品侧另有独立防御（`:meth:`FileTracker._paint_column_separators``
+    开头的 `IsBeingDeleted` 检查），两者互不依赖。
+    """
+    global _destroy_patched
+    if _destroy_patched:
+        return
+    import wx
+
+    original = wx.Frame.Destroy
+
+    def guarded_destroy(self, *args, **kwargs):
+        # 先关掉"窗口关闭后还会跑的回调"，再销毁
+        try:
+            self._closing = True
+        except Exception:
+            pass
+        return original(self, *args, **kwargs)
+
+    wx.Frame.Destroy = guarded_destroy
+    _destroy_patched = True
 
 
 def harden_wx(need_app: bool = False):
@@ -86,6 +199,10 @@ def harden_wx(need_app: bool = False):
         # 关掉之后断言变成可恢复的失败，探针能继续或立刻报错。
         wx.DisableAsserts()
         _hardened = True
+
+    # 探针都要建/销毁窗口 ⇒ 顺手装好"销毁前关回调"的补丁。
+    # 它解决的是"偶发访问违例"，见 `_patch_frame_destroy` 的说明。
+    _patch_frame_destroy()
 
     if not need_app:
         return None

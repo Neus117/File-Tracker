@@ -98,3 +98,11 @@ accessed_paths.json
 # **图片忽略，但那份 README 要跟踪** —— 它写的是"怎么重新生成、
 # 以哪个统计为准"，那是知识，不是产物。
 /tools/probes/_shots/*.png
+
+# 设计阶段的对比图 / 截图（由 tools/design_*.py 生成）
+#
+# 它们**不是产品资源**，只是"挑方案"时给用户看的临时图。
+# 生成脚本（tools/design_icons.py / design_folder.py）保留，
+# 但产物一律不进仓库 —— 2026-10-17 用户要求：
+#   "不能把开发或调试过程中产生的各种测试文件、废弃的图标资源保留下来。"
+design/

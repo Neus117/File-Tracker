@@ -40,6 +40,52 @@ CREATE TABLE IF NOT EXISTS paths (
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
+def format_time_cell(text: str) -> str:
+    """把 ``2026-10-17 14:43:27`` 变成列表里显示的 ``14:43   26-10-17``。
+
+    ## 用户的要求（2026-10-17）
+
+    > "时间和日期本身就是一类的东西，最开始就不应该分成两列。
+    >   只保留'访问时间'这一列，把日期并进去。
+    >   格式：`14:43   26-10-17`，时间和日期之间用**3 个空格**隔开，
+    >   **秒数在用户界面隐藏掉**，后端计算排序就行了。"
+
+    所以：
+
+    * **秒隐藏**（`14:43`）—— 界面上每次刷新都在变的秒对"这是什么时候访问的"
+      几乎没有信息量，而它占的宽度却能省下来
+    * **两位年份**（`26-10-17`）—— 用户指定
+    * **3 个空格**分隔 —— 用户指定（比任何单字符分隔符都更容易扫读，
+      这是 2026-10-15 那次"日期与时间分不清"的最终解法）
+
+    ## 排序**不受影响**
+
+    排序用的是 `PathRecord.last_access_time` 的**完整字符串**
+    （ISO 格式，字典序 == 时间序），与这里的显示格式无关。
+    也就是说：**显示可以省、可以变，排序键不动。**
+
+    ## 容错
+
+    格式不对（旧版本数据库里的怪值）时**原样返回**，不抛异常、不丢整行。
+    """
+    if not text:
+        return ""
+    parts = str(text).split(" ", 1)
+    if len(parts) != 2:
+        return str(text)
+    date_part, clock_part = parts
+    # 秒：`14:43:27` → `14:43`（只取前两段）
+    clock_bits = clock_part.split(":")
+    clock = ":".join(clock_bits[:2]) if len(clock_bits) >= 2 else clock_part
+    # 年份：`2026-10-17` → `26-10-17`
+    date_bits = date_part.split("-")
+    if len(date_bits) == 3 and len(date_bits[0]) == 4:
+        date = "%s-%s-%s" % (date_bits[0][2:], date_bits[1], date_bits[2])
+    else:
+        date = date_part
+    return "%s   %s" % (clock, date)
+
+
 def split_timestamp(text: str) -> tuple[str, str]:
     """把 ``2026-10-15 13:01:17`` 拆成 ``("2026-10-15", "13:01:17")``。
 

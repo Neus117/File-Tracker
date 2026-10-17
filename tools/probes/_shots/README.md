@@ -7,15 +7,14 @@
 * 抓取方式：`PrintWindow` 打在 `wx.ListCtrl` 上 —— **本环境里唯一可信的取像素方式**
   （理由与三条使用规矩见上一级 `README.md` 的「先读这两条」）
 
-## 文件
+## 图片不入库
 
-| 文件 | 是什么 |
-|---|---|
-| `crop-blue-row-user-shape-A.png` | **选中那一行**的裁剪（按用户配置的形状跑出来的） |
-| `crop-blue-row-open-after.png` | 同上，另一场景（新记录落在视口底部） |
-| `user-shape-A.png` / `user-shape-B.png` | 完整画面（用户配置形状：path 升序 + 视角居中） |
-| `open-before.png` / `open-after.png` / `open-after-live.png` | 从导航窗格打开的前后对照 |
-| `real-open-*.png` | **真的**启动资源管理器之后（不换桩）的画面 |
+**这里不放图。** 需要时跑对应的探针重新生成，看完整就走。
+
+原因：这些是诊断用的画面，对使用者没有意义，
+而它们曾经差一点被 `git add -A` 一起推上线（2026-10-17）。
+`.gitignore` 里已经写了 `tools/probes/_shots/*.png`，
+**只保留本 README**（它是方法说明，不是产物）。
 
 ## 这一批图证明什么
 

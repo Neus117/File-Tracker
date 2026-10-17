@@ -39,20 +39,33 @@ def test_every_spec_has_a_natural_default_direction():
     by_key = {spec.key: spec for spec in core.SORT_SPECS}
     assert by_key["path"].default_reverse is False
     assert by_key["count"].default_reverse is True
-    assert by_key["date"].default_reverse is True
-    assert by_key["clock"].default_reverse is True
+    # 日期与时间已合并成一个 `time`（用户 2026-10-17）——"最近访问的在前"
+    assert by_key["time"].default_reverse is True
 
 
 def test_unknown_key_falls_back_instead_of_raising():
     """配置文件是可以手改的，写错一个字符串不该让程序起不来。"""
-    for bogus in ("", "bogus", "COUNT", None, "0", "time"):
+    # 注意 `"time"` 不在这个列表里 —— 它是**合法键**（两列合并后新增的）
+    for bogus in ("", "bogus", "COUNT", None, "0", "date "):
         assert core.find_sort_spec(bogus).key == core.DEFAULT_SORT_KEY
+
+
+def test_legacy_sort_keys_map_to_time():
+    """旧配置里的 `"date"` / `"clock"` 要映射到 `"time"`。
+
+    两列时代用户可能选过"按访问日期"或"按访问时间"排序。升级后这两个键
+    不存在了 —— **当成未知键丢回默认**会让"我一直按时间排"的人
+    莫名其妙变成按频次排。所以映射，而不是回退。
+    """
+    assert core.find_sort_spec("date").key == "time"
+    assert core.find_sort_spec("clock").key == "time"
+    assert core.LEGACY_SORT_KEYS == {"date": "time", "clock": "time"}
 
 
 def test_sort_keys_are_stable_identifiers():
     """标识是**字符串**而不是列号：列号会因为中间插一列而错位，
     而且写进配置以后没法读。"""
-    assert core.sort_keys() == ("path", "count", "date", "clock")
+    assert core.sort_keys() == ("path", "count", "time")
     for key in core.sort_keys():
         assert isinstance(key, str) and key
 
@@ -159,15 +172,15 @@ def test_sort_direction_is_per_column(tmp_path):
     assert cfg.get_sort_direction("count") is False
     assert cfg.get_sort_direction("path") is True
     # 没设过的列返回 None（表示"用该列的默认"），而不是被别的列带跑
-    assert cfg.get_sort_direction("date") is None
+    assert cfg.get_sort_direction("time") is None
 
 
 def test_sort_direction_round_trips(tmp_path):
     path = str(tmp_path / "c.json")
     cfg = config_module.Config(path)
-    cfg.set_sort_direction("date", False)
+    cfg.set_sort_direction("time", False)
     cfg.save()
-    assert config_module.Config(path).get_sort_direction("date") is False
+    assert config_module.Config(path).get_sort_direction("time") is False
 
 
 def test_sort_direction_rejects_unknown_column(tmp_path):
@@ -204,15 +217,15 @@ def test_setting_sort_does_not_drop_other_keys(tmp_path):
     cfg = config_module.Config(path)
     cfg.set_language("en")
     cfg.set_last_directory("D:\\Work")
-    cfg.set_sort_column("date")
-    cfg.set_sort_direction("date", False)
+    cfg.set_sort_column("time")
+    cfg.set_sort_direction("time", False)
     cfg.save()
 
     reloaded = config_module.Config(path)
     assert reloaded.get_language() == "en"
     assert reloaded._data["last_directory"] == "D:\\Work"
-    assert reloaded.get_sort_column() == "date"
-    assert reloaded.get_sort_direction("date") is False
+    assert reloaded.get_sort_column() == "time"
+    assert reloaded.get_sort_direction("time") is False
 
 
 def test_sort_direction_update_does_not_mutate_shared_dict(tmp_path):

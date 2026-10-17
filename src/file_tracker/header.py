@@ -48,11 +48,62 @@ def _measure_probe() -> str:
     return "频次"
 
 
+#: 排序三角用**字符** `▼` / `▲`（用户 2026-10-17 当天第四次的裁决）。
+#:
+#: ## 这段历史值得留着（两个方向都试过）
+#:
+#: **第一版**：`label += " ▼"` —— 字符当图标。问题是**宽度由字体决定**：
+#: 本机 `▼` 占 **23 物理像素** + 前面空格 7 = **30 物理像素**，
+#: 而这 30 像素挤在"标题"和"列右边界"之间、直接决定列宽。
+#: 中英双语下它让中文的时间列比英文宽 32 像素，**吃掉别的列省下的宽度**。
+#:
+#: **第二版**：`DrawPolygon` 画一个小三角 —— 宽度可控（19 物理像素），
+#: 列宽问题解决了。**但用户否掉了它**：
+#:
+#: > "将自绘的倒三角换成原来的符号倒三角。自绘倒三角有较多的锯齿，
+#: >   视觉效果不如原生的倒三角符号。"
+#:
+#: **`DrawPolygon` 在这台机器上没有抗锯齿**（GDI 的多边形填充是硬边），
+#: 所以看起来比字体里的 `▼` 毛糙。**这是"能控制宽度"换来的代价，
+#: 而用户认为不值。**
+#:
+#: ⇒ **第三版（现在）**：回到字符，但保留第二版解决的两个东西：
+#:
+#: * **列宽预算量"标题 + 三角"**（`app._adjust_column_widths().fitted()`）
+#: * **绘制时钳制三角位置**，永不越过列右边界
+#:
+#: 也就是说：**字符的观感 + 第二版的两道防线**。
+SORT_ARROW_GLYPH = "\u25bc"        # 降序 ▼
+SORT_ARROW_GLYPH_ASC = "\u25b2"    # 升序 ▲
+#: 三角与标题之间、三角与列右边界之间的**逻辑**间距。
+SORT_ARROW_GAP = 3
+
+
+def sort_arrow_width(dc, dpi: int) -> int:
+    """排序三角占的**水平总宽**（间距 + 三角本身），物理像素。
+
+    ## 为什么要导出成函数（而不是两处各算）
+
+    `app._adjust_column_widths().fitted()` 要把它算进列宽预算，
+    `ColumnHeader._on_paint` 要按它定位三角 —— **两边必须用同一个数**。
+
+    ## 为什么现在要传 `dc`
+
+    三角回到**字符**之后，宽度只能靠字体量（`GetTextExtent`），
+    不再是可以算出来的常量。所以要把量具传进来。
+
+    **注意**：这也是"字符当图标"那个老问题的回归 ——
+    宽度由字体决定、跨语言不一致（见上面的长注释）。
+    用户明确选择接受它，换取更好的观感。
+    """
+    return scale_for_dpi(SORT_ARROW_GAP, dpi) + dc.GetTextExtent(SORT_ARROW_GLYPH).width
+
+
 class ColumnHeader(wx.Control):
     """自绘的列表表头。"""
 
     def __init__(self, parent, theme: Theme, titles: list[str], widths: list[int],
-                 on_column_click=None):
+                 on_column_click=None, centered_titles=()):
         super().__init__(parent, style=wx.BORDER_NONE)
         self.theme = theme
         self.titles = list(titles)
@@ -61,6 +112,12 @@ class ColumnHeader(wx.Control):
         self._hover_column = -1
         self._sort_column = -1
         self._sort_reverse = False
+        #: 哪些列的**标题**要水平居中（**数据不受影响**）。
+        #:
+        #: 用户要求（2026-10-17）："'访问日期'这个标题可以让它居中。
+        #: 只要这个标题居中，**实际的日期数据不要居中** —— 现在这个排版
+        #: 就是最合适的，数据也居中三列之间的间隔看着就不均衡了。"
+        self._centered_titles = set(centered_titles)
 
         self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
         self.Bind(wx.EVT_PAINT, self._on_paint)
@@ -193,16 +250,21 @@ class ColumnHeader(wx.Control):
         return positions
 
     def separator_thickness(self) -> int:
-        """竖线的粗细，**物理像素，不按 DPI 缩放**（表头与数据行共用）。
+        """竖线粗细（物理像素，**不按 DPI 缩放**）。
 
-        用户要求"改细，最细"。`METRICS.separator_thickness` 默认 1，
-        而 **1 个物理像素就是能做到的极限**——所以这里**不做 DPI 换算**。
+        全表只有 `METRICS.separator_thickness` **一个旋钮** ——
+        表头、置顶段、普通段都用它（用户 2026-10-17：
+        "我想让它们全部统一起来，这样就可以一起调整"）。
 
-        若按 DPI 缩放，本机 175% 下 `scale_for_dpi(1, 168)` 会算出 **2**，
-        那正是用户嫌粗的样子。
+        ## 历史（一天内改过三次，别急着"改回最细"）
 
-        分界线与"内容尺寸"不同：**1 像素的细线是显示器的属性，
-        不是内容的属性**，所以这里刻意不换算。
+        1 → 2（只加粗掩码线）→ **4 且全部统一**。
+        最后一次的依据是用户看过对比图后说的"粗细不统一"。
+
+        ## 为什么不做 DPI 换算
+
+        分界线是**显示器的属性**，不是内容的属性；按 DPI 换算会在 175%
+        下变成 7，与用户选定的观感不符。
         """
         return max(int(METRICS.separator_thickness), 1)
 
@@ -232,12 +294,44 @@ class ColumnHeader(wx.Control):
                 dc.SetPen(wx.TRANSPARENT_PEN)
                 dc.DrawRectangle(x, 0, column_width, height)
 
-            label = title
-            if index == self._sort_column:
-                label += " ▼" if self._sort_reverse else " ▲"
-
+            # ## 标题 + 排序三角的定位（用户 2026-10-17 反复调整过的三件事）
+            #
+            # 1. **三角单独定位、且钳制在列内** —— 原来是 `label += " ▼"`
+            #    拼进文字，能不能落在列内**完全取决于列宽算得准不准**，
+            #    而字体/DPI/语言任一处与假设不同就差几像素，
+            #    偏偏这条分隔线只有 1 像素宽 ⇒ 差 2 像素就看得见。
+            #    现在三角 x 的上限是"列右边界 − 间距 − 三角宽"，永不越界。
+            #
+            # 2. **三角用字符 `▼`/`▲`，不是自绘多边形**（见模块顶部
+            #    `SORT_ARROW_GLYPH` 的长注释：自绘版宽度可控但**有锯齿**，
+            #    用户明确要求换回字符）。
+            #
+            # 3. **标题（+三角）可以整体居中**（`centered_titles`）：
+            #    用户要求三列的标题全部居中，但**数据不受影响**。
             dc.SetTextForeground(wx.Colour(theme.text))
-            dc.DrawText(label, x + inset, int((height - text_height) / 2))
+            top = int((height - text_height) / 2)
+            dpi = dpi_of(self)
+            title_w = dc.GetTextExtent(title).width
+            show_arrow = index == self._sort_column
+            arrow_total = sort_arrow_width(dc, dpi) if show_arrow else 0
+
+            if index in self._centered_titles:
+                # 标题（+三角）作为**一个整体**居中：这样有没有三角都平衡
+                block_x = x + (column_width - title_w - arrow_total) // 2
+            else:
+                block_x = x + inset
+            dc.DrawText(title, block_x, top)
+
+            if show_arrow:
+                glyph = (SORT_ARROW_GLYPH if self._sort_reverse
+                         else SORT_ARROW_GLYPH_ASC)
+                gap = scale_for_dpi(SORT_ARROW_GAP, dpi)
+                margin = scale_for_dpi(4, dpi)
+                arrow_w = dc.GetTextExtent(glyph).width
+                # 优先紧跟标题；放不下就收到列内右端（**绝不越过 column_width**）
+                arrow_x = min(block_x + title_w + gap,
+                              x + column_width - margin - arrow_w)
+                dc.DrawText(glyph, arrow_x, top)
 
             # 列间竖线（**只画竖线**，用户明确说行之间不要线）。
             #
@@ -251,8 +345,19 @@ class ColumnHeader(wx.Control):
             # 现在**直接取用 :meth:`separator_positions` 的结果**，
             # 不在这里重算——重算出来的第二份算法迟早与那份不同步，
             # 而这个 bug 的成因恰恰就是"两处各算各的"。
+            #
+            # ## 颜色与画法
+            #
+            # 颜色用 `theme.separator_masked`（表头专用值，对比度 1.35）。
+            #
+            # **改用 `DrawRectangle` 而不是 `DrawLine`**：`DrawLine` 用宽 pen
+            # 时"向哪一侧扩展"由 GDI 决定、不可控；矩形能精确覆盖
+            # `[line_x, line_x + thickness - 1]`，与数据行那边用同一套几何，
+            # 右边缘因此**严格重合在列边界上**。
             line_x = positions[index] if index < len(positions) else None
             if line_x is not None:
-                dc.SetPen(wx.Pen(wx.Colour(theme.separator), thickness))
-                dc.DrawLine(line_x, 0, line_x, height)
+                colour = wx.Colour(theme.separator_masked)
+                dc.SetPen(wx.Pen(colour, 1))
+                dc.SetBrush(wx.Brush(colour))
+                dc.DrawRectangle(line_x, 0, thickness, height)
             x += column_width

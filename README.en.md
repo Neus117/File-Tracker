@@ -6,9 +6,9 @@
 
 [简体中文](README.md) ｜ [**English**](README.en.md)
 
-![Light theme](https://raw.githubusercontent.com/Neus117/File-Tracker/main/images/FileTracker_v1.2.4-light.jpg)
+![Light theme](https://raw.githubusercontent.com/Neus117/File-Tracker/main/images/FileTracker_v1.4.0-light.jpg)
 
-![Dark theme](https://raw.githubusercontent.com/Neus117/File-Tracker/main/images/FileTracker_v1.2.4-dark.jpg)
+![Dark theme](https://raw.githubusercontent.com/Neus117/File-Tracker/main/images/FileTracker_v1.4.0-dark.jpg)
 
 [**Download latest**](https://github.com/Neus117/File-Tracker/releases/latest) ·
 [All releases](https://github.com/Neus117/File-Tracker/releases) ·
@@ -30,16 +30,21 @@
 
 ### Right pane · Path logger
 
-- Automatically logs the paths you visit
+- Automatically logs the paths you visit, in **three columns**: path / count / last visit
+- **Date and time share one column** — one line tells the whole story
 - **Click a column header to sort — your choice is remembered** and restored on
-  the next launch
-- **Settings dialog** (the gear button at the bottom right): switch the UI
-  language, pick the sort order
+  the next launch (the header shows a ▲/▼ indicator)
+- **Settings dialog** (the gear button at the bottom right): UI language,
+  theme (follow system / light / dark), sort key, sort direction —
+  **every control is a self-drawn icon button** with its own tooltip
 - Bilingual (Chinese/English): follows the Windows display language, or set it
-  manually — switching takes effect immediately
-- Pin / unpin paths — **a newly pinned entry goes to the top**
+  manually — **switching takes effect immediately**, down to the window title and
+  the icon tooltips, without pressing OK first
+- Pin / unpin paths — **a newly pinned entry goes to the top**, and pinned rows
+  get their own background colour
 - `Ctrl+C` to copy a path · right-click context menu · delete one entry or clear all
-- Light / dark theme follows the system setting
+- Light / dark theme follows the system setting, and every self-drawn control
+  follows it too
 
 ---
 
@@ -47,11 +52,11 @@
 
 | | |
 |---|---|
-| **Download** | Get `File.Tracker_v1.3.3.exe` from [Releases](https://github.com/Neus117/File-Tracker/releases/latest) and run it — portable, no installation |
+| **Download** | Get `File.Tracker_v1.4.0.exe` from [Releases](https://github.com/Neus117/File-Tracker/releases/latest) and run it — portable, no installation |
 | **Database** | On first launch it creates `file_tracker.db` under `C:\Users\<you>\` (named `file_access.db` back in v1.0) |
 | **Run at startup** | Press `Win+R`, type `shell:startup`, press Enter, and drop a shortcut into the folder that opens |
 | **Uninstall** | Delete the exe and `file_tracker.db` |
-| **Check the version** | `File.Tracker_v1.3.3.exe --version` prints something like `File Tracker 1.3.3+ae4a6f4` — the part after `+` is the commit it was built from |
+| **Check the version** | `File.Tracker_v1.4.0.exe --version` prints something like `File Tracker 1.4.0+9700f8f` — the part after `+` is the commit it was built from |
 | **Multi-select** (since v1.3.3) | Hold **Ctrl** and click to pick several rows, or **hold the left button and drag** across a range; **Shift**-click selects a run. With several rows selected, the context menu keeps only "Open N items" and "Delete N items" |
 
 > **About the asset name**: from v1.2.0 onward it is uniformly
@@ -67,21 +72,40 @@
 
 ## Compared with v1.1.0
 
-v1.1.0 shipped on 2024-10-14; v1.3.0 on 2026-10-16. **More features, smaller download.**
+v1.1.0 shipped on 2024-10-14; v1.4.0 on 2026-10-17. **More features, smaller download.**
 
-| | v1.1.0 | **v1.3.0** |
+| | v1.1.0 | **v1.4.0** |
 |---|---|---|
-| Size | 15.76 MB | **12.99 MB** |
+| Size | 15.76 MB | **12.70 MB** |
 | UI language | Chinese only | **Chinese/English, switchable** |
 | Sorting | Fixed to frequency | **Choose the column and direction; remembered across restarts** |
 | Pin order | Newest pin went last, and moved after a restart | **Newest pin goes first, and stays there** |
-| Settings dialog | None | **Yes** (language + sorting) |
+| Settings dialog | None | **Yes** (language / theme / sort key / sort direction, all icon buttons) |
 | Dark theme | Some controls ignored it | **All custom-drawn controls follow it** |
 | Address bar + Enter | Did not open Explorer | **Actually opens it** |
-| Automated tests | **0** (and the test file imported two names that did not exist) | **197 unit tests + 187 GUI checks** |
+| Automated tests | **0** (and the test file imported two names that did not exist) | **200 unit tests + 214 GUI checks** |
 | Build pipeline | **None** (no `.spec`, no script, no CI) | `build.ps1` + 4 build checks + 9 gates in CI |
 | Binary reports its version | No | **Yes** (name / version / commit) |
 | Version info in file properties | Nearly blank | **All five fields filled** |
+
+### What v1.4.0 is about — three things
+
+1. **A lot of visual tuning** — column widths and separators after merging to three
+   columns, header sort arrows, row padding, and every colour pair checked for
+   contrast in both themes. The settings dialog now uses **self-drawn icon buttons**
+   (eight glyphs: monitor / sun / moon / folder / bars / clock / ↑ / ↓).
+
+2. **Three defects fixed** —
+   - **Clearing a large selection froze the app**: 6000 rows went from **166 s** to
+     **0.2 s**. The cause was a per-row "repaint the whole table" cascade — about
+     36 million native calls.
+   - **Double-clicking a record raised `AttributeError`**: `event.Veto()` does not
+     exist on mouse events.
+   - **Switching language left two things stale**: the window title and the icon
+     tooltips (every other string did update).
+
+3. **Date and time merged into one column** — they used to be separate; now one
+   line tells the whole story, and clicking that header sorts by it.
 
 **Where the size reduction comes from** — and it happened while *adding* features:
 
@@ -213,7 +237,7 @@ powershell -File tools/verify_gui.ps1
 
 | Checker | What it catches |
 |---|---|
-| `pytest` | 197 unit tests, no GUI required |
+| `pytest` | 200 unit tests, no GUI required |
 | `check_wiring.py` | Things that are defined but never read |
 | `check_dialogs.py` | Dialogs given two buttons whose return value is ignored (users once reported "both buttons do the same thing") |
 | `check_duplicate_methods.py` | A method defined twice — Python silently keeps the last one, so **editing the first has no effect** |

@@ -36,6 +36,24 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# ## 控制台按 UTF-8 解码子进程输出（否则中文变乱码）
+#
+# Windows PowerShell 5.1 的 `[Console]::OutputEncoding` 默认是**系统 ANSI
+# 代码页**（本机 GBK），而本项目所有 Python 输出都是 UTF-8。结果是打包报告里：
+#
+#     版本资源: 鏂囦欢璇存槑=File Tracker ...     ← "文件说明"
+#
+# 不影响功能，但**"报告本身乱码"会让真正的问题读不出来**。
+#
+# 注意：**不要用 `chcp 65001`** —— 它改的是整个控制台的代码页，
+# 会连带影响用户在同一个窗口里后续跑的命令。
+try {
+    [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+    $OutputEncoding = [Text.UTF8Encoding]::new($false)
+} catch {
+    # 无控制台（被重定向）时设不了，忽略
+}
 Set-StrictMode -Version Latest
 
 $Root = $PSScriptRoot
@@ -172,8 +190,31 @@ foreach ($stale in @('build', 'dist')) {
     }
 }
 
-& $Python -m PyInstaller 'File-Tracker.spec' --noconfirm --log-level WARN
-Assert-Success 'PyInstaller'
+# ## 为什么要把 stderr 并进 stdout 再 `Write-Host`
+#
+# **PyInstaller 把 INFO 日志全部写到 stderr**，而 Windows PowerShell 5.1
+# 会把"外部程序写到 stderr 的每一行"当成 **ErrorRecord** ——
+# 在 `$ErrorActionPreference = 'Stop'` 下，第一条 INFO 就中断整个脚本。
+#
+# 实测（2026-10-17，本机只有 PS 5.1，没有 PS 7）：
+#
+#     直接 `& $Python -m PyInstaller ...`  → 脚本在这里抛异常退出，
+#     而**打包其实成功了**（exe 已经生成）—— 一次"假失败"。
+#
+# 更坑的是 `-SkipTests` 时它发生得更早：前面所有检查都通过了，
+# 唯独这一步"失败"，很容易被当成"spec 写坏了"。
+#
+# `2>&1` + `ForEach-Object { "$_" }` 把每一行**降级成字符串**再输出，
+# 于是不再产生 ErrorRecord。`$LASTEXITCODE` 仍然反映真实退出码。
+$ErrorActionPreference = 'Continue'
+try {
+    & $Python -m PyInstaller 'File-Tracker.spec' --noconfirm --log-level WARN 2>&1 |
+        ForEach-Object { Write-Host "$_" }
+    $buildExit = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = 'Stop'
+}
+if ($buildExit -ne 0) { throw "PyInstaller 失败，退出码 $buildExit" }
 
 $exe = Join-Path $Root 'dist\File Tracker.exe'
 if (-not (Test-Path -LiteralPath $exe)) {
@@ -252,13 +293,22 @@ function Get-ExeOutput {
         throw "产物 $Exe $($Arguments -join ' ') 超过 60 秒没有退出，已强制结束。"
     }
 
+    # ## `-Encoding UTF8` 不能省（2026-10-17）
+    #
+    # Windows PowerShell 5.1 的 `Get-Content` **默认按系统 ANSI 代码页
+    # （本机 GBK）解码文件**，而这些产物都是 UTF-8 写的。于是打包报告里出现：
+    #
+    #     版本资源: 鏂囦欢璇存槑=File Tracker ...     ← "文件说明"
+    #
+    # 那不是控制台的问题（`[Console]::OutputEncoding` 管不到这里），
+    # 是**读文件这一步就解错了**。
     $text = ''
     if (Test-Path -LiteralPath $outFile) {
-        $text = (Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue)
+        $text = (Get-Content -LiteralPath $outFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)
     }
     $errText = ''
     if (Test-Path -LiteralPath $errFile) {
-        $errText = (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)
+        $errText = (Get-Content -LiteralPath $errFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)
     }
     Remove-Item -LiteralPath $outFile, $errFile -Force -ErrorAction SilentlyContinue
 

@@ -258,10 +258,13 @@ for gone in ("requirements_v1.0+.txt", "environment_v1.0+.yml",
     check("清理", f"`{gone}` 已删除",
           not os.path.exists(os.path.join(ROOT, gone)), "")
 
-# README 现在引用两张占位图；**文件名必须与 README 里写的一致**，
+# README 引用两张展示图；**文件名必须与 README 里写的一致**，
 # 否则用户做好真图同名覆盖时会发现"README 还是断图"。
+#
+# ⚠️ **每次换展示图，这里和两份 README 要一起改**（三处）：
+# 只改 README 会让这条判据失败，提示你"图名对不上"。
 readme = read(os.path.join(ROOT, "README.md"))
-for shot in ("FileTracker_v1.2.4-light.jpg", "FileTracker_v1.2.4-dark.jpg"):
+for shot in ("FileTracker_v1.4.0-light.jpg", "FileTracker_v1.4.0-dark.jpg"):
     check("清理", f"`images/{shot}` 存在且 README 引用了它",
           os.path.exists(os.path.join(ROOT, "images", shot))
           and shot in readme, "")

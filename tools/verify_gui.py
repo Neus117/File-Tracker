@@ -36,6 +36,7 @@ import wx  # noqa: E402
 import file_tracker.app as _app_module  # noqa: E402
 from file_tracker import core as _core  # noqa: E402
 from file_tracker import core, win32  # noqa: E402
+from file_tracker import lang as _lang  # noqa: E402
 from file_tracker import theme as _theme  # noqa: E402
 from file_tracker import widgets as _widgets  # noqa: E402
 from file_tracker.store import PathStore  # noqa: E402
@@ -96,6 +97,44 @@ def _colour_hex(colour) -> str:
     return "#{:02X}{:02X}{:02X}".format(
         colour.Red(), colour.Green(), colour.Blue(),
     )
+
+
+def _column_format(ctrl, column: int) -> int:
+    """用 `LVM_GETCOLUMN` 回读某一列的 `fmt`（对齐方式）。
+
+    ## 为什么不用 wx 的 API
+
+    `ctrl.GetColumn(i)` 返回的是 `ListItem`，**没有 `GetFormat()`**
+    （实测 `AttributeError`）。所以要直接问系统。
+
+    `LVCFMT_LEFT=0x0` / `LVCFMT_RIGHT=0x1` / `LVCFMT_CENTER=0x2`，
+    高位还有别的标志（回读常见 `0x4000`），所以判据用**位与**，不是相等。
+    """
+    import ctypes
+
+    class LVCOLUMNW(ctypes.Structure):
+        _fields_ = [
+            ("mask", ctypes.c_uint32),
+            ("fmt", ctypes.c_int32),
+            ("cx", ctypes.c_int32),
+            ("pszText", ctypes.c_void_p),
+            ("cchTextMax", ctypes.c_int32),
+            ("iSubItem", ctypes.c_int32),
+            ("iImage", ctypes.c_int32),
+            ("iOrder", ctypes.c_int32),
+            ("cxMin", ctypes.c_int32),
+            ("cxDefault", ctypes.c_int32),
+            ("cxIdeal", ctypes.c_int32),
+        ]
+
+    LVM_GETCOLUMN = 0x1000 + 25
+    LVCF_FMT = 0x0001
+    info = LVCOLUMNW()
+    info.mask = LVCF_FMT
+    info.iSubItem = column
+    ctypes.windll.user32.SendMessageW(
+        ctrl.GetHandle(), LVM_GETCOLUMN, column, ctypes.byref(info))
+    return info.fmt
 
 
 def select_only(frame, row: int) -> None:
@@ -262,8 +301,8 @@ def main() -> int:
         column_count = frame.list_ctrl.GetColumnCount()
         titles = [frame.list_ctrl.GetColumn(i).GetText() for i in range(column_count)]
         check(
-            "列表共有 4 列（路径 / 频次 / 访问日期 / 访问时间）",
-            column_count == 4,
+            "列表共有 3 列（路径 / 频次 / 访问时间）",
+            column_count == 3,
             f"实际 {column_count} 列: " + ", ".join(repr(t) for t in titles),
         )
         check(
@@ -272,10 +311,34 @@ def main() -> int:
             f"实际 = {titles[1]!r}",
         )
         check(
-            "center_frequency_column() 可调用（它算居中所需的位数）",
+            "center_frequency_column() 可调用（它保证列宽装得下最宽的频次值）",
             frame.center_frequency_column() is True,
-            "原生 LVM_SETCOLUMN 在本环境不可用，居中靠补前导空格——见 _center_text",
+            "频次列的对齐由**原生格式位**负责（见下一条），这个函数只管列宽",
         )
+
+        # **频次列真的是居中的**（用户 2026-10-17："目前的居中算法不是真正的
+        # 居中" —— 原来是补前导空格，有量化误差；现在用原生 `LVCFMT_CENTER`）。
+        #
+        # 判据用 **`LVM_GETCOLUMN` 回读 fmt**，而不是"看它像不像居中"。
+        check(
+            "频次列的格式位 = CENTER（原生居中，不是补空格）",
+            _column_format(frame.list_ctrl, 1) & 0x2 == 0x2,
+            "回读 fmt = 0x%04X，LVCFMT_CENTER = 0x0002"
+            % (_column_format(frame.list_ctrl, 1) & 0xFFFF),
+        )
+        check(
+            "阳性对照：路径列的格式位不是 CENTER（说明不是所有列都被设了）",
+            _column_format(frame.list_ctrl, 0) & 0x2 == 0,
+            "路径列 fmt = 0x%04X" % (_column_format(frame.list_ctrl, 0) & 0xFFFF),
+        )
+        # **数据本身不带前导空格**（补空格的实现删掉了，这是最直接的证据）
+        if frame.list_ctrl.GetItemCount():
+            _count_text = frame.list_ctrl.GetItemText(0, 1)
+            check(
+                "频次数据没有前导空格（居中是画的，不是补出来的）",
+                _count_text == _count_text.lstrip(),
+                "第 0 行频次文本 = %r" % _count_text,
+            )
 
         # **列头点击排序是原版功能，必须还在。**
         # 中间一版我换控件时把它删了，用户实测指出"所有点击功能全部失效"。
@@ -311,15 +374,18 @@ def main() -> int:
 
         # ==============================================================
         print()
-        print("=== 改动 ⑤：日期与时间分成两列（用户反馈「不好区分」）===")
+        print("=== 改动 ⑤（已改两轮）：日期并进时间列 ===")
+        # 2026-10-15：用户说"日期与时间不好区分" ⇒ 拆成两列
+        # 2026-10-17：用户说"日期和时间本来就是一回事，不该分成两列"
+        #             ⇒ 并回一列，格式 `14:43   26-10-17`
         # ==============================================================
         check(
-            "两个时间列的表头分别是「访问日期」与「访问时间」",
-            titles[2] == "访问日期" and titles[3] == "访问时间",
-            f"第 2 列={titles[2]!r} 第 3 列={titles[3]!r}",
+            "时间列表头是「访问时间」（日期已并进来，不再单独成列）",
+            titles[2] == "访问时间",
+            f"第 2 列={titles[2]!r}",
         )
 
-        # 造一条带已知时间戳的记录，确认两列各自拿到正确的半截
+        # 造一条带已知时间戳的记录，确认格式完全符合用户指定
         known_path = os.path.join(scratch.name, "deep", "time-probe")
         os.makedirs(known_path, exist_ok=True)
         frame.store.record_access(known_path, when="2026-10-15 13:01:17")
@@ -332,20 +398,48 @@ def main() -> int:
         if probe_row == -1:
             check("找到探针行", False, "记录未出现在列表里")
         else:
-            got_date = frame.list_ctrl.GetItemText(probe_row, 2)
-            got_clock = frame.list_ctrl.GetItemText(probe_row, 3)
+            got_time = frame.list_ctrl.GetItemText(probe_row, 2)
             check(
-                "日期列只含日期、时间列只含时间",
-                got_date == "2026-10-15" and got_clock == "13:01:17",
-                f"日期列={got_date!r}  时间列={got_clock!r}",
+                "时间列 = `13:01   26-10-15`（秒隐藏、两位年、3 空格）",
+                got_time == "13:01   26-10-15",
+                f"实际 = {got_time!r}",
             )
-            # 阳性对照：数据库里存的仍是整串，说明只是"显示时拆"
+            check(
+                "时间列里**不含秒**（用户要求：秒只在后端参与排序）",
+                "13:01:17" not in got_time,
+                f"实际 = {got_time!r}",
+            )
+            # 阳性对照：数据库里存的仍是整串，说明只是"显示时格式化"
             stored = frame.store.get(known_path)
             check(
-                "阳性对照：数据库里仍存整串时间戳（拆的只是显示）",
+                "阳性对照：数据库里仍存**完整**时间戳（含秒，排序要用）",
                 stored.last_access_time == "2026-10-15 13:01:17",
                 f"库中值={stored.last_access_time!r}",
             )
+            # **排序键不受显示格式影响**：同一分钟内、秒不同的两条也要排对
+            later = os.path.join(scratch.name, "deep", "time-probe-later")
+            os.makedirs(later, exist_ok=True)
+            frame.store.record_access(later, when="2026-10-15 13:01:59")
+            frame.load_accessed_paths()
+            earlier = os.path.join(scratch.name, "deep", "time-probe-earlier")
+            os.makedirs(earlier, exist_ok=True)
+            frame.store.record_access(earlier, when="2026-10-15 13:01:01")
+            frame.load_accessed_paths()
+            frame.sort_column = 2
+            frame.sort_reverse = True
+            frame.sort_list_items(2)
+            for _ in range(20):
+                wx.YieldIfNeeded()
+            rows = [frame.row_path(i) for i in range(min(3, frame.list_ctrl.GetItemCount()))]
+            check(
+                "阳性对照：同一分钟内按**秒**排序仍然正确（显示隐藏了秒，排序没有）",
+                rows[0].endswith("time-probe-later")
+                and rows[1].endswith("time-probe"),
+                "前三行 = %r" % [os.path.basename(r) for r in rows],
+            )
+            frame.sort_column = before_column
+            frame.sort_reverse = before_reverse
+            frame.sort_list_items(frame.sort_column)
 
         # ==============================================================
         print()
@@ -1966,14 +2060,138 @@ def main() -> int:
                 f" vs 客户区中心 {client_w // 2}",
             )
 
-        # **排序方式 2×2**（用户："四个并排看着还是太奇怪了"）。
+        # **排序方式两行**（用户："四个并排看着还是太奇怪了"）。
+        #
+        # 2026-10-17 之后只有**三个**排序方式了（日期与时间并成了一列），
+        # 所以是 `[2, 1]` 两行，而不是 `[2, 2]`。
+        # 判据从"每行恰好 2 个"改成"**不止一行**"——那才是用户要的观感
+        #（不要三个并排挤成一条）。
+        # **2026-10-17 语义反转**：原来要求"排序方式折成多行"（四个文字按钮
+        # 并排太宽）；现在改成**3 个图标按钮**，用户明确要求"像界面主题的
+        # 分类一样" —— 主题那三个是一行，排序也应当是一行。
         sort_chunks = dict(sort_probe._rows).get(sort_probe._sort_label)
         check(
-            "设置窗口：排序方式成两行两列（不是四个并排）",
-            sort_chunks is not None and len(sort_chunks) == 2
-            and all(len(c) == 2 for c in sort_chunks),
-            f"折成 {[len(c) for c in (sort_chunks or [])]}"
-            "（应为 [2, 2] = 两行两列）",
+            "设置窗口：排序方式一行 3 个图标按钮（与主题分类一致）",
+            sort_chunks is not None and len(sort_chunks) == 1
+            and len(sort_chunks[0]) == 3,
+            f"折成 {[len(c) for c in (sort_chunks or [])]}（应为 [3]）",
+        )
+        # 图标按钮的证据：有 painter、正方形、有悬停提示
+        _sort_btns = list(sort_probe._sort_buttons)
+        check(
+            "排序按钮是**图标**按钮（有 icon_painter，不是文字）",
+            len(_sort_btns) == 3
+            and all(getattr(b, "icon_painter", None) is not None for b in _sort_btns),
+            f"{[getattr(b, 'icon_painter', None).__name__ if getattr(b, 'icon_painter', None) else None for b in _sort_btns]}",
+        )
+        check(
+            "排序图标按钮接近**正方形**（约 56×56）",
+            all(abs(b.GetBestSize().width - b.GetBestSize().height) <= 4
+                for b in _sort_btns),
+            f"{[(b.GetBestSize().width, b.GetBestSize().height) for b in _sort_btns]}",
+        )
+        # **主题按钮与排序按钮同尺寸**（用户 2026-10-17）：
+        # "把界面主题的这 3 个按钮形状，也统一成现在排序方式这种正矩形。"
+        #
+        # 根因：主题按钮原来传了 caption（`💻`/`☀`/`☾`），
+        # 而 `💻` 是 emoji、175% 下能到 30+ 物理像素，
+        # `_sync_min_size` 的 `宽 = max(文字宽 + 内边距, min_width)`
+        # 于是把它撑成 56×40 的宽扁矩形。现在 caption 留空（图标由
+        # `icon_painter` 画），两行就都是 56×56 了。
+        _theme_btns = list(getattr(sort_probe, "_theme_buttons", []))
+        # ---- 排序方向：图标 + 顺序互换（用户 2026-10-17）----
+        #
+        # > "降序和升序的这两个按钮，可以换成图形的形式，
+        # >   也就是'箭头向上'和'箭头向下'。"
+        # > "这两个按钮的位置互换一下。"
+        _dir_btns = list(getattr(sort_probe, "_direction_buttons", []))
+        check(
+            "排序方向按钮是**图标**（上/下箭头，不是文字）",
+            len(_dir_btns) == 2
+            and all(getattr(b, "icon_painter", None) is not None for b in _dir_btns),
+            f"painter = {[getattr(b, 'icon_painter', None).__name__ if getattr(b, 'icon_painter', None) else None for b in _dir_btns]}",
+        )
+        check(
+            "排序方向按钮是**正方形**",
+            all(abs(b.GetBestSize().width - b.GetBestSize().height) <= 4
+                for b in _dir_btns),
+            f"{[(b.GetBestSize().width, b.GetBestSize().height) for b in _dir_btns]}",
+        )
+        # **顺序：升序在前（False）、降序在后（True）。**
+        # 这条不只是"好看"—— `_apply_language` 里用 zip 按**位置**刷新文案，
+        # 顺序错了就会"换语言后文案贴到错误的按钮上"。
+        check(
+            "排序方向顺序 = 升序在前 / 降序在后（与箭头上下的直觉一致）",
+            [b._direction_value for b in _dir_btns] == [False, True],
+            f"_direction_value = {[b._direction_value for b in _dir_btns]}",
+        )
+        check(
+            "排序方向按钮也有悬停提示（文字仍可读）",
+            all(b.GetToolTipText() for b in _dir_btns),
+            f"tooltip = {[b.GetToolTipText() for b in _dir_btns]}",
+        )
+
+        # ---- retranslate 必须覆盖**所有**会变的文字（用户 2026-10-17）----
+        #
+        # > "这个主题窗口和窗口的标题栏没有及时跟随刷新变化，但是其他地方
+        # >   又是及时跟随的。这说明不是功能上做不到，而是有一些地方漏接了。"
+        #
+        # 两个真实漏接点：
+        #   ① `_theme_buttons` 的 tooltip（上一版注释还写着"主题是符号、
+        #      与语言无关"—— 早已过时）
+        #   ② 窗口标题（`ThemedDialog.__init__` 传进去后就没人再更新）
+        #
+        # 判据用"**前后快照对比**"：切语言 → retranslate → 逐项比。
+        # 这样以后再加任何"会变的文字"，只要没接上就会被这条抓到。
+        def _texts():
+            return {
+                "title": sort_probe.GetTitle(),
+                "theme_tip": [b.GetToolTipText() for b in _theme_btns],
+                "sort_tip": [b.GetToolTipText() for b in _sort_btns],
+                "dir_tip": [b.GetToolTipText() for b in _dir_btns],
+            }
+
+        _before = _texts()
+        # ⚠️ **`_after` 必须在恢复语言之前取。**
+        # 第一版把它写在 `finally` 之后，于是两次快照都是"原语言"、
+        # 四条判据全失败 —— 而那时**功能其实是对的**，错的是判据。
+        # `lang.preference(chinese)` 是"bool → 偏好值"的转换，
+        # 读当前值要用 `lang.is_chinese()`。
+        _old_chinese = _lang.is_chinese()
+        _after = {}
+        try:
+            _lang.apply(_lang.PREFERENCE_ENGLISH if _old_chinese
+                        else _lang.PREFERENCE_CHINESE)
+            sort_probe.retranslate()
+            _after = _texts()          # ← 在这里取，不是 finally 之后
+        finally:
+            _lang.apply(_lang.preference(_old_chinese))
+            sort_probe.retranslate()
+        for key, label in (("title", "窗口标题"),
+                           ("theme_tip", "主题按钮 tooltip"),
+                           ("sort_tip", "排序按钮 tooltip"),
+                           ("dir_tip", "方向按钮 tooltip")):
+            check(
+                f"retranslate 后 {label} 跟着语言变",
+                _before[key] != _after[key],
+                f"切换前 {_before[key]!r} → 切换后 {_after[key]!r}",
+            )
+
+        check(
+            "主题按钮也是**正方形**，且与排序按钮**同尺寸**",
+            bool(_theme_btns)
+            and all(abs(b.GetBestSize().width - b.GetBestSize().height) <= 4
+                    for b in _theme_btns)
+            and {b.GetBestSize().Get() for b in _theme_btns}
+            == {b.GetBestSize().Get() for b in _sort_btns},
+            "主题 %r / 排序 %r" % (
+                [b.GetBestSize().Get() for b in _theme_btns],
+                [b.GetBestSize().Get() for b in _sort_btns]),
+        )
+        check(
+            "排序图标按钮有**悬停提示**（文字仍然可读 / 无障碍）",
+            all(b.GetToolTipText() for b in _sort_btns),
+            f"{[b.GetToolTipText() for b in _sort_btns]}",
         )
 
         # **用户要求②：三个主题选项必须并排在同一行。**
@@ -1986,12 +2204,24 @@ def main() -> int:
             f"折成了 {0 if theme_chunks is None else len(theme_chunks)} 块"
             "（应为 1 块 = 三个并排）",
         )
+        # **判据从"标签是符号"改成"是自绘图标"**（2026-10-17）：
+        # 原来主题按钮的 caption 是 `💻`/`☀`/`☾`，`_on_paint` 里其实
+        # 早就用 `icon_painter` 画几何图元了（文字只影响尺寸、不会被画）。
+        # 而 `💻` 是 emoji、175% 下宽 30+ 像素，把按钮撑成 56×40；
+        # 用户要求"统一成正矩形" ⇒ caption 留空 ⇒ 尺寸回到 56×56。
+        #
+        # 所以现在该断言的是"三个都有 icon_painter"，不是"label 是符号"。
+        _theme_all = [b for chunk in (theme_chunks or []) for b in chunk]
         check(
-            "设置窗口：三个主题都用符号（💻 / ☀ / ☾）",
-            [b.label for chunk in (theme_chunks or []) for b in chunk]
-            == ["💻", "☀", "☾"],
-            f"实际标签 = "
-            f"{[b.label for chunk in (theme_chunks or []) for b in chunk]}",
+            "设置窗口：三个主题都是**自绘图标**（不是字形）",
+            len(_theme_all) == 3
+            and all(getattr(b, "icon_painter", None) is not None for b in _theme_all),
+            f"painter = {[getattr(b, 'icon_painter', None).__name__ for b in _theme_all]}",
+        )
+        check(
+            "三个主题按钮仍保留**悬停提示**（符号不再承担文案）",
+            all(b.GetToolTipText() for b in _theme_all),
+            f"tooltip = {[b.GetToolTipText() for b in _theme_all]}",
         )
 
         # **阳性对照：组与组之间真的有空行**（这就是用户要的"层次感"）
@@ -2349,96 +2579,171 @@ def main() -> int:
         # 数据行里从来没画过。`_draw_column_separators` 只在注释里被提到，
         # 方法本身一直没写。
         #
-        # 判据：**拦截 `wx.ClientDC.DrawLine`，看真的落笔了没有**——
+        # 判据：**拦截 `wx.ClientDC.DrawRectangle`，看真的落笔了没有**——
         # 不是"方法存在"，也不是"没报错"。
-        drawn_lines: list[tuple] = []
-        original_draw_line = wx.ClientDC.DrawLine
+        #
+        # 2026-10-17 从 `DrawLine` 改为 `DrawRectangle`：宽 pen 的 `DrawLine`
+        # "往哪一侧扩展"由 GDI 决定、不可控；矩形能精确覆盖
+        # `[left, left + thick - 1]`，右边缘才能严格落在列边界上。
+        drawn_rects: list[tuple] = []
+        original_draw_rect = wx.ClientDC.DrawRectangle
 
-        def spy_draw_line(self, *args):
-            drawn_lines.append(args)
-            return original_draw_line(self, *args)
+        def spy_draw_rect(self, *args):
+            try:
+                colour = self.GetBrush().GetColour().GetAsString(wx.C2S_HTML_SYNTAX)
+            except Exception:
+                colour = ""
+            drawn_rects.append(tuple(args) + (colour,))
+            return original_draw_rect(self, *args)
 
-        wx.ClientDC.DrawLine = spy_draw_line
+        wx.ClientDC.DrawRectangle = spy_draw_rect
         try:
             frame._paint_column_separators()
         finally:
-            wx.ClientDC.DrawLine = original_draw_line
+            wx.ClientDC.DrawRectangle = original_draw_rect
 
         column_count = frame.list_ctrl.GetColumnCount()
-        expected = column_count - 1          # 4 列 → 3 条竖线
+        expected = column_count - 1
+
+        def right_edge(rec):
+            return int(rec[0]) + int(rec[2])       # left + width
+
+        def thick_of(rec):
+            return int(rec[2])
+
         check(
             "列间竖线真的画出来了（数据行里，不只是表头）",
-            len(drawn_lines) == expected,
-            f"DrawLine 被调用 {len(drawn_lines)} 次，"
-            f"期望 {expected} 次（{column_count} 列 → {expected} 条竖线）",
+            len(drawn_rects) >= expected,
+            f"DrawRectangle 被调用 {len(drawn_rects)} 次，"
+            f"至少应有 {expected} 次（{column_count} 列 → {expected} 条竖线）",
         )
-        # 阳性对照：竖线的 x 必须落在列边界上，而不是随便画
+        # 阳性对照：竖线的**右边缘**必须落在列边界上（加粗后左边缘会变，
+        # 但右边缘永远是列边界 —— 这才是"对齐"的真正含义）
         boundary = 0
         boundaries = []
         for index in range(column_count - 1):
             boundary += frame.list_ctrl.GetColumnWidth(index)
             boundaries.append(boundary)
-        xs = sorted(int(args[0]) for args in drawn_lines) if drawn_lines else []
+        rights = sorted({right_edge(r) for r in drawn_rects}) if drawn_rects else []
         check(
-            "阳性对照：竖线的 x 落在列边界上",
-            bool(xs) and all(
-                any(abs(x - b) <= 3 for b in boundaries) for x in xs
+            "阳性对照：竖线的右边缘落在列边界上",
+            bool(rights) and all(
+                any(abs(x - b) <= 3 for b in boundaries) for x in rights
             ),
-            f"竖线 x = {xs}；列边界 = {boundaries}",
+            f"右边缘 = {rights}；列边界 = {boundaries}",
         )
-        check(
-            "竖线颜色取的是 theme.separator（改色号应当有变化）",
-            frame.theme.separator in (frame.theme.separator,),
-            f"separator = {frame.theme.separator}（浅色应为 #C9CDD4）",
-        )
-        # **表头那条竖线必须与数据行那条完全重合。**
+
+        # ---- 置顶区与普通区的颜色（粗细已统一，见下）----
         #
-        # 用户反馈："检查列标题和列数据分隔线为什么粗细不一致+未对齐"。
-        # 原来表头画在 `x + width - 1 - gap`（偏移 6 逻辑像素 ≈ 10 物理像素）
-        # 且只占 `4 .. height-4`，而数据行画在**精确边界**、**满高**。
-        header_xs = sorted(frame.header.separator_positions())
-        body_xs = sorted({int(x) for x in xs})
-        check(
-            "表头竖线与数据行竖线 x 一致（不再错位）",
-            bool(header_xs) and header_xs == body_xs,
-            f"表头 x = {header_xs}；数据行 x = {body_xs}"
-            "（原来表头偏移 6 逻辑像素 ≈ 10 物理像素）",
-        )
-        check(
-            "阳性对照：表头与数据行都算出了竖线位置",
-            bool(header_xs) and bool(body_xs),
-            f"表头 {len(header_xs)} 条、数据行 {len(body_xs)} 条",
-        )
-        # 表头与数据行的竖线**粗细**也要一致。
-        # 两边都取 `METRICS.separator_thickness`，所以只要确认表头那边
-        # 用的确实是这个常量（而不是写死的 1）。
+        # 用户 2026-10-17："表头和置顶颜色的粗细，和下面其他记录的粗细不统一。
+        # 我想让它们**全部统一起来**，这样就可以一起调整。"
+        # ⇒ 表头 / 置顶段 / 普通段共用 `METRICS.separator_thickness`。
+        seam_th = max(int(_METRICS.separator_thickness), 1)
+        pin_span = frame._pinned_span()
+        colours = {r[4] for r in drawn_rects if len(r) > 4}
+        if pin_span is None:
+            check(
+                "没有置顶行时，竖线只画灰色一段",
+                colours == {frame.theme.separator}
+                and all(thick_of(r) == seam_th for r in drawn_rects),
+                f"颜色 {colours}，粗细 {[thick_of(r) for r in drawn_rects]}",
+            )
+        else:
+            check(
+                "有置顶行时：竖线分段画（置顶段 + 普通段）",
+                len(drawn_rects) == expected * 2,
+                f"DrawRectangle {len(drawn_rects)} 次，"
+                f"期望 {expected * 2} 次（{expected} 条 × 2 段）",
+            )
+            check(
+                "置顶段的颜色 = separator_pinned（置顶专用 1.35）",
+                frame.theme.separator_pinned in colours,
+                f"颜色集合 = {colours}，"
+                f"separator_pinned = {frame.theme.separator_pinned}",
+            )
+            check(
+                "普通段的颜色 = separator（灰，保持原样）",
+                frame.theme.separator in colours,
+                f"颜色集合 = {colours}，separator = {frame.theme.separator}",
+            )
+            thick_set = sorted({thick_of(r) for r in drawn_rects})
+            check(
+                "置顶段与普通段的**粗细相同**（全部统一）",
+                thick_set == [seam_th],
+                f"粗细集合 = {thick_set}；应全部 = {seam_th}",
+            )
+
+        # ---- 三条线的对比度**全部 1.6**（用户 2026-10-17 明确要求）----
+        #
+        # 这一条把"用户想要的观感"变成了**可计算的数字**：
+        # 六条（3 条线 × 2 个主题）全部落在 1.6 ± 0.05。
+        # **两档目标值不同**（用户 2026-10-17 最后一条要求）：
+        # 浅色 1.20、深色 1.30。
+        for theme_name, theme, target in (("浅色", _theme.Theme.light(), 1.20),
+                                          ("深色", _theme.Theme.dark(), 1.30)):
+            pairs = (
+                ("普通灰线", theme.separator, theme.card),
+                ("表头掩码线", theme.separator_masked, theme.surface_alt),
+                ("置顶掩码线", theme.separator_pinned, theme.pinned_row),
+
+            )
+            for label, fg, bg in pairs:
+                ratio = _contrast_ratio(fg, bg)
+                check(
+                    f"[{theme_name}] {label} 对比度 ≈ {target:.2f}",
+                    abs(ratio - target) <= 0.03,
+                    f"{fg} on {bg} = {ratio:.3f}",
+                )
+
+        # ---- 表头那条竖线用哪个颜色 / 多粗 ----
         from file_tracker.header import ColumnHeader as _ColumnHeader
 
         import inspect as _inspect2
 
+        _header_src = _inspect2.getsource(_ColumnHeader._on_paint)
+        check(
+            "表头竖线的颜色 = separator_masked（表头专用 1.35）",
+            "theme.separator_masked" in _header_src,
+            "表头竖线画的是 `theme.separator_masked`",
+        )
         header_source = _inspect2.getsource(_ColumnHeader.separator_thickness)
         check(
-            "表头竖线粗细取的是 METRICS.separator_thickness（与数据行同一个常量）",
+            "表头竖线粗细取的是 METRICS.separator_thickness（与数据行同一个）",
             "METRICS.separator_thickness" in header_source,
-            "两边共用同一常量 → 粗细必然一致"
-            "（原来表头与行里的**位置**差 10 像素）",
+            "全表只有一个粗细来源 ⇒ 改一个数整张表一起变",
+        )
+        check(
+            "全表粗细只有**一个**常量（没有第二份额外的粗细）",
+            "separator_masked" not in header_source,
+            f"METRICS.separator_thickness = {seam_th}",
+        )
+        # **表头与数据行的线右边缘必须重合**（加粗后左边缘会不同，
+        # 所以判据看右边缘 —— 那才是"对齐"的真正含义）
+        header_xs = sorted(frame.header.separator_positions())
+        header_thick = frame.header.separator_thickness()
+        header_rights = sorted(x + header_thick for x in header_xs)
+        check(
+            "表头竖线与数据行竖线的**右边缘**一致（不再错位）",
+            bool(header_rights) and header_rights == rights,
+            f"表头右边缘 = {header_rights}；数据行右边缘 = {rights}",
         )
         # ---- 竖线必须**最细**：1 物理像素，不按 DPI 缩放 ----
         #
-        # 用户要求"将列分隔线改细。最细。"
-        # 关键点：`separator_thickness` 若按 DPI 换算，本机 175% 下
-        # `scale_for_dpi(1, 168)` = **2**，那正是嫌粗的样子。
-        # **细线是显示器的属性，不是内容的属性**，所以不做换算。
-        # （`_scale` 在这个函数里是**后面**才 import 的，这里不能引用它——
-        #   直接算：物理 = 逻辑 × dpi/96，再取整。）
+        # 用户要求"将列分隔线改细。最细。"→ 后来又要"加粗"→ 最后要
+        # **全部统一**（2026-10-17）。现在只有 `METRICS.separator_thickness`
+        # 一个旋钮（目前 4）。
+        #
+        # 关键点：**不按 DPI 换算**。`scale_for_dpi(4, 168)` 会算出 7，
+        # 与用户选定的观感不符；细线是显示器的属性，不是内容的属性。
         dpi_now = frame.GetDPI()
         dpi_now = dpi_now[0] if hasattr(dpi_now, "__getitem__") else dpi_now
-        scaled_one = max(round(1 * dpi_now / 96), 1)
+        scaled = max(round(_METRICS.separator_thickness * dpi_now / 96), 1)
         check(
-            "竖线 = 1 物理像素（最细，不按 DPI 放大）",
-            frame.header.separator_thickness() == 1,
-            f"表头 {frame.header.separator_thickness()}px；"
-            f"若按 DPI 换算（1 × {dpi_now}/96）会是 {scaled_one}px",
+            "竖线粗细 = METRICS.separator_thickness（不按 DPI 放大）",
+            frame.header.separator_thickness() == seam_th,
+            f"separator_thickness = {_METRICS.separator_thickness}；"
+            f"若按 DPI 换算（{_METRICS.separator_thickness} × {dpi_now}/96）"
+            f"会是 {scaled}px",
         )
         # 真落笔的 pen 宽度也要是 1，不能只是方法返回值
         widths: list[int] = []

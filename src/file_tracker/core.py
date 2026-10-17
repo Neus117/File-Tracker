@@ -18,7 +18,7 @@ import sys
 from dataclasses import dataclass
 
 APP_NAME = "File Tracker"
-APP_VERSION = "1.3.3"
+APP_VERSION = "1.4.0"
 
 #: 用户指定的初始窗口增量：**累计** 32.25%
 #
@@ -363,13 +363,29 @@ class SortSpec:
         return L(self.chinese, self.english)
 
 
-#: 四个可排序列，顺序与列表里的列一致。
+#: **三个**可排序列，顺序与列表里的列一致。
+#:
+#: ## 从四个并成三个（用户 2026-10-17）
+#:
+#: > "时间和日期本身就是一类的东西，最开始就不应该分成两列。
+#: >   只保留'访问时间'这一列，把日期并进去。"
+#:
+#: 原来 `date` 与 `clock` 是**两个排序项**，但它们的比较键**完全一样**
+#: （都是 `datetime.strptime(record.last_access_time, TIME_FORMAT)`）——
+#: 同一份数据支持两个"不同"的排序项，本来就没有意义。
+#: 现在合并成 `time` 一个，并按访问时间排序。
 SORT_SPECS: tuple[SortSpec, ...] = (
-    SortSpec("path", "访问的路径", "Path", default_reverse=False),
+    SortSpec("path", "访问路径", "Path", default_reverse=False),
     SortSpec("count", "频次", "Count", default_reverse=True),
-    SortSpec("date", "访问日期", "Date", default_reverse=True),
-    SortSpec("clock", "访问时间", "Time", default_reverse=True),
+    SortSpec("time", "访问时间", "Time", default_reverse=True),
 )
+
+#: 旧版本用过的排序键 ⇒ 现在对应的键。
+#:
+#: 用户的配置里可能存着 `"date"` / `"clock"`（两列时代的偏好）。
+#: 读出来时**映射到 `"time"`**，而不是当成未知值丢回默认 ——
+#: 否则"我一直按时间降序"的用户升级后会莫名变成按频次排序。
+LEGACY_SORT_KEYS = {"date": "time", "clock": "time"}
 
 #: 没设过偏好时用哪一个。
 #:
@@ -384,7 +400,11 @@ def find_sort_spec(key: str | None) -> SortSpec:
 
     **认不出时回退而不是抛异常**：配置文件可以手改，
     写错一个字符串不该让程序起不来。
+
+    **旧键会先映射**（`date`/`clock` → `time`），见 :data:`LEGACY_SORT_KEYS`。
     """
+    if key in LEGACY_SORT_KEYS:
+        key = LEGACY_SORT_KEYS[key]
     for spec in SORT_SPECS:
         if spec.key == key:
             return spec

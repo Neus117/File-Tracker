@@ -175,6 +175,41 @@ a = Analysis(  # noqa: F821
         #
         # 本项目不渲染任何 HTML，排掉没有功能损失。
         "wx.html", "wx.html2", "wx.richtext", "wx.xrc",
+        # === wx 的另外四块（2026-10-17，实测省 0.29 MB）===
+        #
+        # `wx.adv` / `wx.propgrid` / `wx.aui` / `wx.grid`
+        # —— `grep src/file_tracker/*.py` 全部 **0 处引用**。
+        # 本项目只用 `wx.Frame / Panel / ListCtrl / TreeCtrl / Dialog /
+        # StaticText / Bitmap / DC / GraphicsContext / SplitterWindow`，
+        # 全在 wx 核心里。
+        #
+        # ## 收益：**只有 0.29 MB**（12.99 → 12.70），不是 3.37 MB
+        #
+        # 四个 pyd 在解释器目录里合计 3.37 MB，但用 `CArchiveReader` 查
+        # exe 内部发现 **它们本来就不在包里** —— PyInstaller 的 wx hook
+        # 早就不打这些子模块了。那 0.29 MB 是别的连带效应省出来的。
+        #
+        # 所以这一项属于"**顺手写上、零风险、收益小**"，不是体积优化的
+        # 主要手段。真正的大头（压缩前合计 33.31 MB）省不掉：
+        #
+        #   wx\wxmsw32u_core_vc140_x64.dll   7.99 MB   ← wx 核心
+        #   wx\_core.cp311-win_amd64.pyd     7.22 MB   ← wx 绑定
+        #   python311.dll                    5.74 MB   ← 运行时
+        #   wx\wxbase32u_vc140_x64.dll       2.81 MB   ← wx 基础
+        #   sqlite3.dll                      1.60 MB   ← 数据库
+        #
+        # ⇒ **12.7 MB 已是这套技术栈的地板**，再往下只能换 GUI 框架。
+        #
+        # ## ⚠️ 曾被误判成"是它导致 exe 起不来"
+        #
+        # 我一度判定"加了这四项之后窗口出不来"，回退了改动、删了 dist、
+        # 还写进文档说"打包有未解问题"。**那是误判** —— 真正的错因是
+        # 我的检测方法：`--onefile` 是两层进程（bootloader + 子进程），
+        # 而窗口属于**子进程**，我却按 `Popen` 拿到的父进程 pid 去查。
+        #
+        # 修好检测（按进程树查窗口）后，带这四项的 exe **0.6 秒出窗口**。
+        # 见 `tools/probes/probe_launch_check.py` 的 `descendant_pids()`。
+        "wx.adv", "wx.propgrid", "wx.aui", "wx.grid",
     ],
     noarchive=False,
     optimize=0,

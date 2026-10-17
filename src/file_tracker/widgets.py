@@ -23,7 +23,7 @@ import wx
 from . import win32
 from .core import DEFAULT_SORT_KEY, SORT_SPECS, find_sort_spec, sort_keys
 from .lang import CHOICES, DISPLAY_NAMES, L
-from .theme import (METRICS, THEME_CHOICES, THEME_DARK, THEME_DISPLAY_NAMES,
+from .theme import (METRICS, THEME_CHOICES, THEME_DARK,
                     THEME_LIGHT, THEME_SYSTEM, THEME_TOOLTIPS, Theme,
                     scale_for_dpi)
 
@@ -417,9 +417,12 @@ class RoundedButton(wx.Control):
                 # **不要用 `rect`** —— 这个作用域里没有那个名字，
                 # 上一版写成 `rect.x + rect.width / 2` 把图标算到了
                 # 客户区外面，用户看到的就是"图标没画出来"。
+                # **背景色也要传**：`icon_time` 的指针是用底色"挖"出来的，
+                # 不传的话指针和表盘同色、看不见（见 `icon_time`）。
                 _draw_icon(gc, self.icon_painter,
                            width / 2.0, height / 2.0,
-                           float(th), wx.Colour(foreground))
+                           float(th), wx.Colour(foreground),
+                           wx.Colour(background))
                 return
             gc.SetFont(font, wx.Colour(foreground))
             text_width, text_height = gc.GetTextExtent(self.label)
@@ -1064,7 +1067,7 @@ def _pen_width(stroke) -> int:
 
 
 def _draw_icon(gc, painter, cx: float, cy: float, size: float,
-               colour) -> None:
+               colour, background=None) -> None:
     """按**图元列表**在 `gc` 上画一个图标。
 
     ## 为什么是图元，不是字形
@@ -1083,7 +1086,7 @@ def _draw_icon(gc, painter, cx: float, cy: float, size: float,
 
     **宽高用 `size` 归一**，所以调用方只要给"想画多大"。
     """
-    for item in painter(cx, cy, size, colour):
+    for item in painter(cx, cy, size, colour, background):
         kind = item[0]
         if kind == "rect":
             _k, x0, y0, x1, y1, stroke, item_colour = item[:7]
@@ -1122,6 +1125,21 @@ def _draw_icon(gc, painter, cx: float, cy: float, size: float,
                 if prev is not None:
                     gc.StrokeLine(prev[0], prev[1], point[0], point[1])
                 prev = point
+        elif kind == "ellipse_fill":
+            # **几何精确的实心椭圆**（2026-10-17 新增）。
+            #
+            # 为什么需要它：`polygon` 逼近圆时，`FillPath` 会连着描边一起
+            # 栅格化，在小尺寸（42 物理像素）下圆心会偏移约半像素 ——
+            # 用户看图后说"大圆有点往右下角偏移，和光线没有完全居中"。
+            # `DrawEllipse` 走的是几何路径，圆心就是参数中心，没有这个问题。
+            #
+            # 描边用**同色**而不是 `TRANSPARENT_PEN`：后者在 GC 上不可靠
+            # （见上面 rect 分支的注释）。
+            _k, x0, y0, x1, y1, item_colour = item[:6]
+            x0, y0, x1, y1 = float(x0), float(y0), float(x1), float(y1)
+            gc.SetBrush(wx.Brush(item_colour))
+            gc.SetPen(wx.Pen(item_colour, 1))
+            gc.DrawEllipse(x0, y0, x1 - x0, y1 - y0)
         elif kind == "polygon":
             _k, points, item_colour = item[:3]
             # 多边形是**实心**的（月亮要的就是实心）。
@@ -1139,29 +1157,47 @@ def _draw_icon(gc, painter, cx: float, cy: float, size: float,
             gc.FillPath(path)
 
 
-def icon_sun(cx: float, cy: float, size: float, colour) -> list:
-    """太阳 —— 圆 + 八条光线，各自独立画，**圆心留空**。
+def icon_sun(cx: float, cy: float, size: float, colour,
+             background=None) -> list:
+    """太阳 —— 实心圆盘 + 八个小圆点。
 
-    **由另一个会话的智能体提供**。他特别标注了：
-    "圆心一定要空心（fill=None），实心圆看起来是太阳被云挡了" ——
-    所以这里用的是 `ellipse` 图元（描边），不是实心圆。
-    比例也照抄：圆心半径 0.24、光线内端 0.38、外端 0.50、线宽 size/9。
+    ## 演化（用户 2026-10-17 一天内改了三次）
+
+    1. **空心圆 + 八条细线**（最初，另一个智能体画的）
+       —— 用户："做成实心的吧，周围光芒的线段再粗一些"
+    2. **实心圆 + 八条粗线**
+       —— 用户："光线现在又有点太粗了，你干脆把它们全部各自原地缩小
+       退化成小点"
+    3. **实心圆盘 + 八个小圆点**（现在）
+
+    ## 圆心为什么改走 `ellipse_fill`
+
+    上一版用 40 边形 `polygon` 逼近圆，用户看放大图后指出：
+    "中间的大圆和周围光线的线段没有完全水平垂直居中，
+     里面的大圆有点往右下角偏移"。
+
+    `polygon` 走 `FillPath`，填充与描边一起栅格化，小尺寸下重心会偏半像素。
+    `ellipse_fill` 用 `DrawEllipse`，圆心就是参数中心 —— 几何精确。
+    **八个小点也用它**，否则"点"的中心同样会偏。
+
+    比例：圆盘半径 0.26、光点中心距 0.42、光点半径 0.055。
     """
-    r = size * 0.24
-    st = max(1.0, size / 9)
-    parts = [("ellipse", cx - r, cy - r, cx + r, cy + r, st, colour, None)]
+    r = size * 0.26
+    parts = [("ellipse_fill", cx - r, cy - r, cx + r, cy + r, colour)]
+
+    dot_r = size * 0.07
+    orbit = size * 0.45
     for i in range(8):
         a = math.radians(i * 45)
-        parts.append(("line",
-                      cx + size * 0.38 * math.cos(a),
-                      cy + size * 0.38 * math.sin(a),
-                      cx + size * 0.50 * math.cos(a),
-                      cy + size * 0.50 * math.sin(a),
-                      max(1.0, size / 12), colour))
+        dx = cx + orbit * math.cos(a)
+        dy = cy + orbit * math.sin(a)
+        parts.append(("ellipse_fill", dx - dot_r, dy - dot_r,
+                      dx + dot_r, dy + dot_r, colour))
     return parts
 
 
-def icon_moon(cx: float, cy: float, size: float, colour) -> list:
+def icon_moon(cx: float, cy: float, size: float, colour,
+              background=None) -> list:
     """月亮 —— **实心多边形 = 整圆减去一个偏移的圆**。
 
     **由另一个会话的智能体提供**。他的说明：
@@ -1174,33 +1210,234 @@ def icon_moon(cx: float, cy: float, size: float, colour) -> list:
     a = (r * r - r2 * r2 + dx * dx) / (2 * dx)
     hc = math.sqrt(max(0.0, r * r - a * a))
     th, ph = math.atan2(hc, a), math.atan2(hc, a - dx)
+    # **视觉重心补偿**（用户 2026-10-17）：
+    #   "月亮图标……由于图形本身的视觉重心在左侧，你看能不能在月亮图标
+    #    前面加一个空格，来达到视觉上的居中效果。注意不要把按钮给撑开。"
+    #
+    # 加空格行不通 —— 这个图标是**自绘几何**，不是文字，空格不参与。
+    # 而且真要加进 label 会把按钮撑宽（那正是他担心的）。
+    # 所以把**整条轮廓向右平移** `0.045 × size`：几何中心不变、
+    # 但月牙那块实体落到视觉中央。
+    #
+    # 偏移量取"月牙实体重心相对外接框中心的偏差"的**大部分**：
+    # 0.045 → 0.09 → **0.12**（用户连说两次"还不够居中"）。
+    # 0.12 在 42 物理像素下约 5 像素。
+    shift = size * 0.12
     pts = []
     for i in range(n + 1):
         ang = th + (2 * math.pi - 2 * th) * i / n
-        pts += [cx + r * math.cos(ang), cy + r * math.sin(ang)]
+        pts += [cx + shift + r * math.cos(ang), cy + r * math.sin(ang)]
     for i in range(n + 1):
         ang = (2 * math.pi - ph) - (2 * math.pi - 2 * ph) * i / n
-        pts += [cx + dx + r2 * math.cos(ang), cy + r2 * math.sin(ang)]
+        pts += [cx + shift + dx + r2 * math.cos(ang),
+                cy + r2 * math.sin(ang)]
     return [("polygon", tuple(pts), colour)]
 
 
-def icon_monitor(cx: float, cy: float, size: float, colour) -> list:
+# ---------------------------------------------------------------- 排序方向箭头
+#
+# 用户 2026-10-17："降序和升序的这两个按钮，可以换成图形的形式，
+# 也就是'箭头向上'和'箭头向下'。" 并要**互换位置**（升序在前）。
+#
+# 与主题/排序同一套：`icon_painter` + 图元，caption 留空 ⇒ 正方形。
+
+def _arrow(cx: float, cy: float, size: float, colour, upward: bool) -> list:
+    """竖箭头：一根杆 + 两条斜线组成的箭头。
+
+    `upward=True` 箭头朝上（**升序**），反之朝下（**降序**）。
+    """
+    s = size
+    w = max(1.0, s * 0.13)
+    sign = -1.0 if upward else 1.0        # y 轴向下为正
+    tip_y = cy + sign * 0.34 * s
+    tail_y = cy - sign * 0.34 * s
+    wing_y = cy + sign * 0.04 * s
+    return [
+        ("line", cx, tail_y, cx, tip_y, w, colour),
+        ("line", cx, tip_y, cx - 0.24 * s, wing_y, w, colour),
+        ("line", cx, tip_y, cx + 0.24 * s, wing_y, w, colour),
+    ]
+
+
+def icon_arrow_up(cx: float, cy: float, size: float, colour,
+                  background=None) -> list:
+    """**升序** —— 箭头朝上。"""
+    return _arrow(cx, cy, size, colour, upward=True)
+
+
+def icon_arrow_down(cx: float, cy: float, size: float, colour,
+                    background=None) -> list:
+    """**降序** —— 箭头朝下。"""
+    return _arrow(cx, cy, size, colour, upward=False)
+
+
+def icon_monitor(cx: float, cy: float, size: float, colour,
+                 background=None) -> list:
     """显示器：空心外框 + 底座横线。
 
     **由另一个会话的智能体提供**（他画得好显示器、我画得好月亮，
     用户让我们互相补）。原样保留他的坐标公式，只补上类型标注。
+
+    ``background`` 参数是为"镂空指针"那类画法准备的（见 :func:`icon_time`），
+    这个图标用不到 —— 收下并忽略即可（统一签名，方便 `_draw_icon` 调用）。
     """
     half = size / 2.0
     stroke = max(1.0, size / 9.0)
+    # **收窄显示屏**（用户 2026-10-17）：
+    #   "将中间显示屏的矩形框做窄一点。因为它现在太长了，收窄一点比例
+    #    才接近现代的 16:9 或者 16:10，这样看起来更舒服，
+    #    也不会挤占按钮的空间。"
+    #
+    #   原来宽 = size、高 = size × 0.5 ⇒ **2:1**，比 16:9（1.78）还扁。
+    #   现在宽收到 0.86 × size、高度不变 ⇒ **1.72 ≈ 16:9**。
+    #
+    #   高度刻意不动：动高度会让整个图标变小，而用户要的是"别横向挤占"。
+    half_w = half * 0.86
     top = cy - half * 0.74
     bottom = cy + half * 0.26
     return [
         # 外框：描边色实心，再内缩半个线宽挖空（fill=None 表示空心）
-        ("rect", cx - half, top, cx + half, bottom, stroke, colour, None, stroke),
-        # 底座：比外框略窄，压在外框下沿下方
-        ("line", cx - half * 0.5, bottom + stroke * 1.9,
-         cx + half * 0.5, bottom + stroke * 1.9, stroke, colour),
+        ("rect", cx - half_w, top, cx + half_w, bottom, stroke, colour, None, stroke),
+        # 底座：跟着外框一起收窄，保持居中
+        ("line", cx - half_w * 0.5, bottom + stroke * 1.9,
+         cx + half_w * 0.5, bottom + stroke * 1.9, stroke, colour),
     ]
+
+
+# ---------------------------------------------------------------- 排序方式图标
+#
+# 用户 2026-10-17 从三套方案里选了 **B（实心）**：
+#
+# > "图标方案先试试 B。"
+#
+# 三套方案的对比图在 `design/icons-light.png` / `icons-dark.png`
+# （由 `tools/design_icons.py` 生成，Pillow 画的，仅供设计阶段比对）。
+#
+# **正式绘制用这里的图元**，不是 Pillow —— 图元跟着 `wx.GraphicsContext`
+# 走，能和现有按钮的渲染一致，也跟 DPI 缩放。
+#
+# 为什么三个都用"实心"：24px 下实心块最清晰，线条方案（A）的折线
+# 会糊成一团；`B` 的文件夹/柱状/时钟也是理解成本最低的一组符号。
+
+#: **原生文件夹轮廓**（归一化，±0.44 以内）。
+#:
+#: 用户 2026-10-17 发了 Explorer 的文件夹图标，要求"照着它再画一版，
+#: 让形状更接近原生的文件夹"。特征：
+#:
+#: * **左上有一个凸起的舌片**，右侧**斜切**到主体顶边（最像 Explorer 的地方）
+#: * 主体是圆角矩形，**底部两角比顶部圆得明显**
+#: * 整体略扁（宽 > 高）
+#:
+#: 改造前是"两个实心矩形叠出来"，边角是直角、舌片是方口 ——
+#: 在小尺寸下像一个"带缺口的方块"，不像文件夹。
+#:
+#: 形状在 `tools/design_folder.py` 里用 Pillow 迭代过（出图毫秒级，
+#: 而 wx 窗口改一次要几十秒且截图抓不全）。
+_NATIVE_FOLDER = (
+    # ## 第四版：**全直角**（用户 2026-10-17）
+    #
+    # > "去掉文件夹图标的全部圆角。"
+    #
+    # 前三版都在调圆角/比例，这一版干脆去掉圆角 —— 24px 下圆角本来就
+    # 只剩 1~2 像素，去掉之后反而更"实"、更像一个规整的块。
+    #
+    # 轮廓变成 **6 个点的直角多边形**：
+    #
+    # ```text
+    #  (-0.44,-0.34) ┌──────┐ (-0.14,-0.34)
+    #                │      └╲
+    #                │        ╲  ← 短斜切
+    #                │         └────┐ (0.00,-0.22)
+    #                │              │
+    #                │              │
+    #                └──────────────┘ (-0.44,0.34) .. (0.44,0.34)
+    # ```
+    #
+    # 宽 0.88 / 高 0.68 ⇒ 宽高比 **1.29**（第三版定的比例保持不变）。
+    (-0.44, 0.34),          # 左下
+    (0.44, 0.34),           # 右下
+    (0.44, -0.22),          # 右上
+    (0.00, -0.22),          # 主体顶边左端
+    (-0.14, -0.34),         # 斜切到舌片顶
+    (-0.44, -0.34),         # 舌片顶左端（= 左边缘顶端）
+)
+
+
+def icon_path(cx: float, cy: float, size: float, colour,
+              background=None) -> list:
+    """**路径** —— 文件夹（实心），形状参照 Windows Explorer。
+
+    一个 `polygon` 搞定整条轮廓（圆角用连续点逼近），
+    而不是叠两个矩形 —— 叠矩形做不出"舌片斜切"和圆角。
+
+    `_draw_icon` 的 ``rect`` 图元只描边、不填充，所以填充图形
+    一律走 ``polygon``。
+    """
+    pts = []
+    for nx, ny in _NATIVE_FOLDER:
+        pts += [cx + nx * size, cy + ny * size]
+    return [("polygon", tuple(pts), colour)]
+
+
+def icon_count(cx: float, cy: float, size: float, colour,
+               background=None) -> list:
+    """**频次** —— 三根高低不同的实心柱（柱状图）。
+
+    柱子高度取 0.36 / 0.64 / 0.50，参差是为了让人一眼看出"这是有高低的
+    数量"，而不是三块等高的方块（那样像菜单图标）。
+    """
+    # **放大 1.2**（用户 2026-10-17）：三根柱子本来只占图标框的中间一条，
+    # 视觉上明显比文件夹"小一号"。放大 1.2 后三者重量接近。
+    s = size * 1.15
+    base = cy + 0.34 * s
+    parts = []
+    for dx, h in ((-0.36, 0.36), (-0.10, 0.64), (0.16, 0.50)):
+        x0 = cx + dx * s
+        parts.append(("polygon", (
+            x0, base - h * s,
+            x0 + 0.20 * s, base - h * s,
+            x0 + 0.20 * s, base,
+            x0, base,
+        ), colour))
+    return parts
+
+
+def icon_time(cx: float, cy: float, size: float, colour,
+              background=None) -> list:
+    """**时间** —— 实心圆表盘 + 两根"挖空"的指针。
+
+    ## 指针为什么用 ``background`` 画
+
+    实心圆上画同色的指针等于没画。要让指针看起来是"镂空"的，
+    必须拿**按钮当前的底色**去画它 —— 而底色随主题、hover、pressed、
+    选中态变化，所以只能由调用方（`RoundedButton._on_paint`）传进来。
+
+    拿不到背景色时退回 ``colour``（等于看不见指针）——但那只是兜底，
+    正常路径一定会传。
+    """
+    # **放大 1.1**（用户 2026-10-17）：时钟的圆在三个图标里显得偏小，
+    # 单独放大一点才和柱状图、文件夹"同重量"。按钮 56px、放大后约 46px，
+    # 仍然留得住呼吸空间。
+    s = size * 1.1
+    r = 0.40 * s
+    # 表盘用 `ellipse_fill`（几何精确），不用 40 边形 `polygon`：
+    # 实测多边形版本在 56px 按钮里**纵向偏 1 像素**（`FillPath` 的
+    # 填充+描边一起栅格化）。见 `_draw_icon` 里 `ellipse_fill` 的注释。
+    parts = [("ellipse_fill", cx - r, cy - r, cx + r, cy + r, colour)]
+    hand_colour = background if background is not None else colour
+    w = max(1.0, s * 0.12)
+    # 时针（短、朝上）与分针（长、朝右下）
+    parts.append(("line", cx, cy, cx, cy - 0.24 * s, w, hand_colour))
+    parts.append(("line", cx, cy, cx + 0.18 * s, cy + 0.12 * s, w, hand_colour))
+    return parts
+
+
+#: 排序列标识 → 图标 painter。顺序与 `SORT_SPECS` 一致。
+SORT_ICONS = {
+    "path": icon_path,
+    "count": icon_count,
+    "time": icon_time,
+}
 
 
 def _has_non_bmp(text: str) -> bool:
@@ -1374,9 +1611,21 @@ class SettingsDialog(ThemedDialog):
 
         用户要求："干脆把切换主题也加进设置吧，这样方便用户也方便你测试。"
 
-        与语言那一行同构（标签 + 一排分段按钮，选中的用强调色），
-        显示名从 :data:`THEME_DISPLAY_NAMES` 取 —— **不在界面里另抄一份**，
-        那样加一种主题就要改两处，而漏改的那处不会有任何提示。
+        与语言那一行同构（标签 + 一排分段按钮，选中的用强调色）。
+
+        ## 按钮上**没有文字**，只有自绘图标（2026-10-17）
+
+        原来 caption 是符号 `💻`/`☀`/`☾`，但 `_on_paint` 早就改成用
+        `icon_painter` 画几何图元了（符号只影响尺寸、不会被画）。
+        而 `💻` 是 emoji、175% 下宽 30+ 像素，把按钮撑成 **56×40**，
+        与"排序方式"那三个 56×56 的正方形不齐。
+
+        用户要求"把界面主题的这 3 个按钮形状，也统一成排序方式这种
+        正矩形" ⇒ caption 留空 ⇒ 宽度回落到 `min_width`（= 高度）⇒ 正方形。
+        文案全部落在 tooltip（`THEME_TOOLTIPS`），可读性与无障碍不受影响。
+
+        顺带：`THEME_DISPLAY_NAMES` 因此**没有任何读者**了，已删除
+        （`check_wiring` 会抓"无人读取的常量"，留着就是死代码）。
         """
         self._theme_label = wx.StaticText(
             self, label=L("界面主题", "Theme"))
@@ -1385,17 +1634,25 @@ class SettingsDialog(ThemedDialog):
             wx.Colour(self.theme.background))
 
         for value in THEME_CHOICES:
-            caption = L(*THEME_DISPLAY_NAMES[value])
             button = RoundedButton(
-                self, caption, self.theme,
+                # **caption 留空**（用户 2026-10-17）：
+                #   原来传的是符号 `💻`/`☀`/`☾`，而 `💻` 是 emoji、
+                #   在 175% DPI 下宽度能到 30+ 物理像素，`_sync_min_size`
+                #   里 `宽 = max(文字宽 + 内边距, min_width)` 于是把它撑成
+                #   **宽扁矩形**（约 56×40），和"排序方式"那三个正方形
+                #   （56×56）放在一起明显不齐。
+                #
+                #   图标本来就由 `icon_painter` 画（`_on_paint` 里
+                #   `if icon_painter is not None` 会**跳过文字**），
+                #   caption 只影响尺寸 ⇒ 留空即得正方形。
+                #   文案仍在 tooltip 里，可读性与无障碍不受影响。
+                self, "", self.theme,
                 variant="accent" if value == self._theme_choice else "secondary",
                 height=METRICS.dialog_button_height,
-                # **正方**：最小宽 = 高。用户要求「缩窄成正方圆角矩形，
-                # 这样就不占太多横向空间」。符号本身很窄，所以取等高即可；
-                # 若哪天换成文字标题，它会自己变宽而不会压字。
                 min_width=METRICS.dialog_button_height,
                 on_click=(lambda _event, v=value: self._choose_theme(v)),
             )
+            button._is_icon_button = True
             # 符号说不清"这是什么主题"，完整名称放 tooltip
             button.SetToolTip(L(*THEME_TOOLTIPS[value]))
             # **「跟随系统」不用字形，用画出来的显示器。**
@@ -1504,18 +1761,52 @@ class SettingsDialog(ThemedDialog):
         # 会同时写 `self.label` 并重算宽高）。
         for button in self._sort_buttons:
             spec = find_sort_spec(getattr(button, "_sort_value", None))
-            if spec is not None:
+            if spec is None:
+                continue
+            if getattr(button, "_is_icon_button", False):
+                # **图标按钮不能 SetLabel**：文字会把按钮从正方形撑成宽扁形。
+                # 文案落到悬停提示里（仍然可读、也无障碍可访问）。
+                button.SetToolTip(spec.label())
+            else:
                 button.SetLabel(spec.label())
+        # **顺序必须与 `_build_sort_rows` 里创建时一致**（升序在前），
+        # 否则语言一换、文案就贴到了错误的按钮上。
         for button, descending in zip(
-                self._direction_buttons, (True, False)):
-            button.SetLabel(L("降序", "Descending") if descending
-                            else L("升序", "Ascending"))
+                self._direction_buttons, (False, True)):
+            caption = (L("降序", "Descending") if descending
+                       else L("升序", "Ascending"))
+            if getattr(button, "_is_icon_button", False):
+                # 图标按钮不能 SetLabel（会把正方形撑宽）
+                button.SetToolTip(caption)
+            else:
+                button.SetLabel(caption)
         # 底部那一对：文案与 `ThemedDialog.__init__` 里传的是同一组
         for button, key in zip(getattr(self, "_buttons", []),
                                (("确定", "OK"), ("取消", "Cancel"))):
             button.SetLabel(L(*key))
-        # 主题按钮是符号，与语言无关；语言按钮写的是语言自己的名字，
-        # 也不该跟着翻译（"English" 在中文界面下仍然是 English）。
+        # **主题按钮的 tooltip**（用户 2026-10-17 指出的漏接点）：
+        #
+        # > "图标悬停提示：鼠标悬停在图标上显示的提示信息，
+        # >   '主题'那三栏仍然是中文提示。"
+        #
+        # 上一版这里写着"主题按钮是符号，与语言无关" —— 那句**已经过时**：
+        # 按钮现在是**自绘图标 + tooltip**（caption 留空），
+        # 而 tooltip 的文案是会随语言变的，必须一起刷新。
+        #
+        # 顺序与 `_build_theme_row` 里 `for value in THEME_CHOICES` 一致。
+        for button, value in zip(getattr(self, "_theme_buttons", []),
+                                 THEME_CHOICES):
+            button.SetToolTip(L(*THEME_TOOLTIPS[value]))
+
+        # **窗口标题**（同一个漏接点的另一半）：
+        #
+        # > "窗口标题：设置窗口左上角的标题仍然是中文。"
+        #
+        # 标题是 `ThemedDialog.__init__` 传进去的，之后没人再更新它。
+        self.SetTitle(L("设置", "Settings"))
+
+        # 语言按钮写的是语言自己的名字，**不该跟着翻译**
+        # （"English" 在中文界面下仍然是 English）。
         self._layout()
         self.Refresh()
         self.Update()
@@ -1558,16 +1849,31 @@ class SettingsDialog(ThemedDialog):
         self._sort_label.SetBackgroundColour(
             wx.Colour(self.theme.background))
 
+        # ## 排序方式用**图标按钮**（用户 2026-10-17）
+        #
+        # > "排序方式现在也按照界面主题的分类一样，使用 3 个小按钮，
+        # >   里面用图形来代表路径、频次和时间。"
+        #
+        # 与主题那三个（显示器 / 太阳 / 月亮）同一套机制：`icon_painter`
+        # + `_draw_icon` 的几何图元 —— 不受字体有没有该字形的影响。
+        #
+        # **label 留空**：文字会把按钮撑成"宽扁"的，而图标按钮要接近正方形。
+        # 空 label + `min_width = 高度` ⇒ 正方形（见 `_sync_min_size`）。
+        # 原来的文字改成**悬停提示**，所以仍然可读、也无障碍可访问。
         for spec in SORT_SPECS:
             button = RoundedButton(
-                self, spec.label(), self.theme,
+                self, "", self.theme,
                 variant=("accent" if spec.key == self._sort_key
                          else "secondary"),
                 height=METRICS.dialog_button_height,
-                min_width=METRICS.dialog_button_width,
+                min_width=METRICS.dialog_button_height,
                 on_click=(lambda _event, s=spec: self._choose_sort(s.key)),
             )
+            button.icon_painter = SORT_ICONS.get(spec.key)
+            button.SetToolTip(spec.label())
             button._sort_value = spec.key
+            #: 图标按钮不需要文字，语言切换时只更新提示
+            button._is_icon_button = True
             self._sort_buttons.append(button)
 
         self._direction_label = wx.StaticText(
@@ -1578,19 +1884,31 @@ class SettingsDialog(ThemedDialog):
 
         # 顺序固定为「降序 / 升序」：两列里"大→小"都是更常用的那一个
         # （频次最高、时间最近），所以把它们放前面。
-        for descending, caption in (
-                (True, L("降序", "Descending")),
-                (False, L("升序", "Ascending"))):
+        # **图标 + 顺序互换**（用户 2026-10-17）：
+        #
+        # > "降序和升序的这两个按钮，可以换成图形的形式，
+        # >   也就是'箭头向上'和'箭头向下'。"
+        # > "这两个按钮的位置互换一下，视觉上看着会更符合直觉一些。"
+        #
+        # 顺序改成 **升序在前**（↑ 升序、↓ 降序）—— 与"上小下大"的
+        # 空间直觉一致。`_apply_direction_labels` 里的 zip 顺序要同步改，
+        # 那边用的是位置而不是 `_direction_value`。
+        for descending in (False, True):
             button = RoundedButton(
-                self, caption, self.theme,
+                self, "", self.theme,
                 variant=("accent" if descending == self._sort_reverse
                          else "secondary"),
                 height=METRICS.dialog_button_height,
-                min_width=METRICS.dialog_button_width,
+                min_width=METRICS.dialog_button_height,
                 on_click=(lambda _event, d=descending:
                           self._choose_direction(d)),
             )
+            button.icon_painter = (icon_arrow_down if descending
+                                   else icon_arrow_up)
+            button.SetToolTip(L("降序", "Descending") if descending
+                              else L("升序", "Ascending"))
             button._direction_value = descending
+            button._is_icon_button = True
             self._direction_buttons.append(button)
 
     def _preview_sort(self) -> None:
@@ -1753,9 +2071,10 @@ class SettingsDialog(ThemedDialog):
         #
         # 用户要求「排序方式还是成**两行两列**吧，四个并排看着还是太奇怪了」。
         # 其它三组不限制（语言 2 个、主题 3 个、方向 2 个，本来就排得下）。
-        per_row_caps = {
-            id(self._sort_label): 2,
-        }
+        # **不再限制每行 2 个**：那是文字按钮时代的规则（四个并排太宽）。
+        # 现在排序是 3 个**图标**按钮，一行放得下，而且用户明确要求
+        # "像界面主题的分类一样" —— 主题那三个就是一行。（2026-10-17）
+        per_row_caps = {}
 
         self._rows = tuple(
             (label, _wrap_buttons(buttons, content_width, gap,

@@ -37,13 +37,14 @@ from .core import (
     scaled_window_size,
     version_string,
 )
-from .store import TIME_FORMAT, PathRecord, PathStore, default_db_path, split_timestamp
+from .store import (TIME_FORMAT, PathRecord, PathStore, default_db_path,
+                    format_time_cell)
 from .dir_tree import DirectoryTree
-from .header import ColumnHeader
+from .header import ColumnHeader, sort_arrow_width
 from . import paint_trace
 from .lang import (L, PREFERENCE_CHINESE, PREFERENCE_ENGLISH,
                    apply as apply_language, is_chinese)
-from .theme import (METRICS, THEME_CHOICES, THEME_DISPLAY_NAMES, THEME_SYSTEM,
+from .theme import (METRICS, THEME_CHOICES, THEME_SYSTEM,
                     Theme, from_preference as theme_from_preference,
                     from_system as theme_from_system, scale_for_dpi)
 from .tree_nav import TreeWalker, build_walk_plan, find_child_by_label, pick_fallback_item
@@ -51,12 +52,13 @@ from .widgets import (BorderLine, IconButton, PathBar, RoundedButton,
                       NO_BUTTON, SettingsDialog, ThemedDialog, dpi_of)
 from .widgets import body_font as widgets_body_font
 
-#: 列表列定义：(标题, 初始宽, 是否居中)
+#: 列表列定义：(初始宽, 是否居中)
 #:
-#: **"最后访问时间"拆成两列。** 用户反馈日期与时间挤在一起、不好区分；
-#: 拆成"访问日期"+"访问时间"之后两者之间有真正的列间距，比换用任何分隔符
-#: 都明确——同一个分隔符在不同字号、不同 DPI 下观感差别很大。
-#: 数据库里仍存整串，只在显示时拆（见 :func:`store.split_timestamp`）。
+#: **"最后访问时间"曾经拆成两列**（2026-10-15，为了让日期与时间能区分），
+#: **2026-10-17 又并回一列** —— 用户指出"日期和时间本来就是一回事，
+#: 不该分成两列"，而当年那个"分不清"的问题，**一个 3 空格的分隔就能解决**。
+#: 合并后显示成 `14:43   26-10-17`（见 :func:`store.format_time_cell`）。
+#: 数据库里始终存整串 `2026-10-17 14:43:27`，**排序用完整值**。
 #:
 #: **宽度与居中标记是"结构"，列标题是"文案"——两者分开。**
 #:
@@ -65,13 +67,78 @@ from .widgets import body_font as widgets_body_font
 #: 双语判断就会永远用系统的默认答案，用户在设置里选了也不生效。
 #: 所以标题走 `column_labels()`，**每次用的时候现取**。
 COLUMNS = (
-    (400, False),
-    (90, True),
-    (120, True),
-    (110, True),
+    (400, False),   # 路径 —— 数据左对齐（左边距靠文本前缀实现，见 `PATH_LEFT_PAD`）
+    (90, True),     # 频次 —— **数据居中**（原生 `LVCFMT_CENTER`）
+    (190, True),    # 访问时间 —— 日期并进来了；**数据也居中**（用户 2026-10-17）
 )
 
-COLUMN_PATH, COLUMN_COUNT, COLUMN_DATE, COLUMN_CLOCK = 0, 1, 2, 3
+#: 第 2 个元素 = "**这一列的**数据是否居中"。它直接变成 `InsertColumn` 的
+#: `format` 位（`wx.LIST_FORMAT_CENTER`），**不再靠补前导空格**。
+#:
+#: 只有频次列是 `True`：频次是纯数字、宽度固定，居中好看。
+#: 日期/时间数据明确左对齐 —— 用户 2026-10-17："数据也居中三列之间的间隔
+#: 看着就不均衡了。"
+#:
+#: ## 从四列并成三列（用户 2026-10-17）
+#:
+#: > "时间和日期本身就是一类的东西，最开始就不应该分成两列。
+#: >   只保留'访问时间'这一列，把日期并进去。具体格式：`14:43   26-10-17`，
+#: >   时间和日期之间用 3 个空格隔开，秒数在用户界面隐藏掉，
+#: >   后端计算排序就行了。"
+#:
+#: 原来 `访问日期` + `访问时间` 两列：两者的**排序键完全一样**、
+#: 又都只服务于"这条是什么时候访问的"这一个问题 —— 拆开是当年为了
+#: "日期与时间分不清"（2026-10-15），而**一个 3 空格的分隔已经解决那件事**。
+#:
+#: 显示格式见 `store.format_time_cell()`。
+
+COLUMN_PATH, COLUMN_COUNT, COLUMN_TIME = 0, 1, 2
+
+#: **时间列（居中）的左右内边距**，以"几个空格宽"为单位。
+#:
+#: 时间列的数据是**居中**的，所以"列宽 − 数据宽"会平均分到左右两侧。
+#: `extra = 2 × CELL_PADDING_SPACES × 空格宽` ⇒ 每侧正好
+#: `CELL_PADDING_SPACES` 个空格宽。
+#:
+#: **为什么以"空格"而不是逻辑像素为单位**：与之对齐的路径列左内边距
+#: 只能用**整数个前导空格**实现（原生 `LVM_SETITEMINDENT` 返回 1 却不生效），
+#: 空格是它的最小刻度。用像素定值会落在一个加不出来的位置上。
+CELL_PADDING_SPACES = 2
+
+#: **路径列的左内边距**用几个空格。**与时间列共用同一个数**。
+#:
+#: ## 这一条来回改过一次，最终定为"与时间列相等"
+#:
+#: 用户先要求"路径左边距 == 时间左右边距"（为了微调时视觉规整）⇒ 设 2；
+#: 随后他指着列表最左边那条空白问"这是什么，能去掉吗" ⇒ 归零；
+#: 但那条空白**其实不是它**（是 `card_panel` 的四周留白，见下面 `InitUI`
+#: 里 `right_sizer.Add(...)` 的注释），所以去掉它只是让路径文字贴了边、
+#: 反而破坏了与时间列的一致性。用户看了效果后要求回到这一版。
+#:
+#: ⇒ **恢复成 2，与 `CELL_PADDING_SPACES` 相等**。两个常量仍然分开写着
+#: （而不是直接复用），因为将来"路径列左边是列表边界、不需要呼吸感"
+#: 这个判断可能又成立；那时只改这一个数即可。
+PATH_LEFT_PAD_SPACES = 2
+
+#: 路径列数据的**左内边距**（用前导空格实现）。
+#:
+#: ## 为什么不用原生缩进
+#:
+#: 用户 2026-10-17："访问路径（path）列的数据左边增加一点间距，
+#: 怎么实现（直接加空格还是其他方式）你来定。"
+#:
+#: 试过 `LVM_SETITEMINDENT`（Win32 的"项缩进"）：**返回 1（成功），
+#: 但 `LVM_GETITEMRECT` 回读的文本矩形 `left` 一直是 2 —— 根本没生效。**
+#: 又一个"看起来成功"（同类：`SetHeaderAttr` 返回 True 但表头不变色）。
+#:
+#: 所以用**前导空格**。代价是控件里存的文本不再等于路径，
+#: 所有"从控件读路径"的地方都要走 :meth:`FileTracker._path_from_cell`。
+#: **这个代价是可控的**：全项目只有三处读它（`row_path` / `_selected_paths`
+#: / `find_path`），都列在下面那个方法的 docstring 里。
+#:
+#: 用**固定前缀**（而不是 `ljust`）：读取时按同样的前缀剥掉，
+#: 不会误伤"真实路径本身以空格开头"的极端情况（Windows 允许，但罕见）。
+PATH_LEFT_PAD = " " * PATH_LEFT_PAD_SPACES
 
 
 def column_labels() -> tuple[str, ...]:
@@ -81,9 +148,8 @@ def column_labels() -> tuple[str, ...]:
     验证脚本会断言两者长度一致、顺序对应。
     """
     return (
-        L("访问的路径", "Path"),
+        L("访问路径", "Path"),
         L("频次", "Count"),
-        L("访问日期", "Date"),
         L("访问时间", "Time"),
     )
 
@@ -92,7 +158,7 @@ def column_labels() -> tuple[str, ...]:
 #: 两张表必须同序：列的顺序就是可排序列的顺序。
 #: 一致性由 `tests/test_sort_preference.py` 断言——**用测试而不是
 #: 模块级 `assert`**：`-O` 会去掉 assert，而测试不会。
-_COLUMN_SORT_KEYS = ("path", "count", "date", "clock")
+_COLUMN_SORT_KEYS = ("path", "count", "time")
 
 
 def _column_of(sort_key: str) -> int:
@@ -108,9 +174,7 @@ def _sort_key_of(column: int) -> str:
     if 0 <= column < len(_COLUMN_SORT_KEYS):
         return _COLUMN_SORT_KEYS[column]
     return DEFAULT_SORT_KEY
-# 注：曾经还有一个 `COLUMN_TIME = COLUMN_DATE`，给"切换排序"按钮在两个
-# 排序列之间切换用。那个按钮已按用户要求删除（"没什么用"），
-# 排序列改由列头点击直接指定，所以这个别名没有读者了——已删。
+
 
 #: 所有警告/确认弹窗标题的统一前缀。
 #:
@@ -556,9 +620,28 @@ class FileTracker(wx.Frame):
         # 都是**原生支持**的，不用自己实现。
         win32.enable_list_multi_select(self.list_ctrl.GetHandle())
         self.list_ctrl.SetBackgroundColour(wx.Colour(self.theme.card))
-        for index, (width, _centered) in enumerate(COLUMNS):
-            self.list_ctrl.InsertColumn(index, column_labels()[index],
-                                        width=width)
+        for index, (width, centered) in enumerate(COLUMNS):
+            # **列对齐用原生格式位**（用户 2026-10-17 报"居中算法不对"）。
+            #
+            # 历史：本项目长期用"补前导空格"实现频次列居中，理由是
+            # "原生 `LVM_SETCOLUMN` 在本环境不可用（一律返回 0）"。
+            # **但那条测的是"修改已存在列"**（`LVM_SETCOLUMN`），
+            # 而 `InsertColumn` 走的是**另一条消息**（`LVM_INSERTCOLUMN`）——
+            # 它在创建时就带上 `fmt`，实测**完全可用**：
+            #
+            #   `tools/probes/probe_native_center.py`（ctypes 回读 `LVM_GETCOLUMN`）
+            #   左列 0x4000 / 居中列 0x4002（LVCFMT_CENTER）/ 右列 0x4001
+            #   渲染层交叉验证：居中列文字左边距 74，左对齐列 9
+            #
+            # 用空格凑居中的问题是**量化误差**：空格是离散单位，
+            # 只能对齐到它的整数倍，再加上两次整除的取整误差，
+            # 最多偏半个空格 —— 而中文列宽是奇数时（89）误差最明显。
+            self.list_ctrl.InsertColumn(
+                index, column_labels()[index],
+                format=(wx.LIST_FORMAT_CENTER if centered
+                        else wx.LIST_FORMAT_LEFT),
+                width=width,
+            )
         # **恢复原版 1.1 的三条接线。** 中间一版换成 DataViewListCtrl 时，
         # 列头点击排序被删掉了——用户实测指出"所有点击功能全部失效"。
         self.list_ctrl.Bind(wx.EVT_LIST_COL_CLICK, self.on_column_click)
@@ -643,6 +726,12 @@ class FileTracker(wx.Frame):
             titles=list(column_labels()),
             widths=[width for width, _c in COLUMNS],
             on_column_click=self.on_header_clicked,
+            # **三个列标题全部居中**（用户 2026-10-17）：
+            # "访问路径 / 频次 / 访问时间 每个列标题全部居中"。
+            #
+            # 注意：这是**标题**居中，数据各自另有对齐方式
+            #（频次与时间居中、路径左对齐，见 `COLUMNS` 的第 2 个元素）。
+            centered_titles=(COLUMN_PATH, COLUMN_COUNT, COLUMN_TIME),
         )
         # 注意：**这里不能马上藏原生表头**——此刻它还没被创建。
         # 藏它的动作在 apply_window_theme 的最后（布局走完之后）。
@@ -650,6 +739,31 @@ class FileTracker(wx.Frame):
         card_sizer.Add(self.header, 0, wx.EXPAND)
         card_sizer.Add(self.list_ctrl, 1, wx.EXPAND)
         card_panel.SetSizer(card_sizer)
+        # ## 卡片四周的留白：**左边那份去掉了**（用户 2026-10-17）
+        #
+        # 原来四边各 `padding_gap`（8 逻辑像素），左右对称。
+        #
+        # 用户指着列表左缘问："这条空出来的边是什么？……以前是一条黑色的
+        # 竖线，上一个智能体把它修掉了，但只是把它隐藏了，实际上它还存在。"
+        #
+        # **实测澄清**（`splitter.GetSashSize()` 等）：
+        #
+        # ```
+        # sash 宽 = 0            ← 那条"黑线"真的没了，不是隐藏
+        # 右窗格 [400, 1076)
+        # card_panel 在右窗格内 (8, 8)，宽 660
+        # ⇒ 左 8、上 8、右 8  —— 四边对称的**卡片留白**
+        # ```
+        #
+        # 所以用户看到的是**卡片留白**，不是残留的 line。它四边都有，
+        # 只是左侧紧邻导航窗格、旁边没有滚动条遮挡，所以最显眼。
+        #
+        # **最终：恢复默认（四边各 `padding_gap`）** —— 用户 2026-10-17
+        # 看过"只去左边"的效果之后要求回默认对称留白。
+        #
+        # 中间试过 `wx.EXPAND | wx.TOP | wx.BOTTOM | wx.RIGHT`（去掉左那份）：
+        # 卡片贴到左窗格、左右不对称，观感并不更好。
+        # ⇒ 回到 `wx.ALL`，四边相等。
         right_sizer.Add(card_panel, 1, wx.EXPAND | wx.ALL, METRICS.padding_gap)
 
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -1341,8 +1455,41 @@ class FileTracker(wx.Frame):
         self._call_after(self._paint_column_separators)
 
     def _paint_column_separators(self) -> None:
-        """真正落笔：按当前列宽在可见行区域画竖线（**只画竖线，不画横线**）。"""
+        """真正落笔：按当前列宽在可见行区域画竖线（**只画竖线，不画横线**）。
+
+        ## ⚠️ 第一件事是"窗口还活着吗"（2026-10-17 加的防御）
+
+        用户看到测试时偶尔弹：
+
+        > "python has stopped working / Error launching CrashSender.exe"
+
+        `CrashSender.exe` 不是本项目带的（环境里搜不到），它是
+        **Windows 错误报告**在进程真的崩了之后尝试启动的收集器 ——
+        它启动失败才弹那个框。**那是"崩了"的二次症状。**
+
+        真实链路：本方法由 `wx.CallAfter` 异步调度，而 `Destroy()`
+        也是异步的 —— 排队的回调可能**在窗口销毁之后**才跑。
+        那时 `wx.ClientDC(self.list_ctrl)` 拿到已失效的 HWND，
+        GDI 调用触发**访问违例**（C 层崩溃，`except Exception` 抓不住）。
+
+        所以进来先做两道检查：`_closing`（业务层已关闭）+ `IsBeingDeleted()`
+        （窗口正在销毁）。**两道都要**：前者管"用户关了程序"，
+        后者管"控件已提到销毁队列里"。
+        """
         if not getattr(self, "show_column_separators", True):
+            return
+        # ① 业务层已关闭（`on_close` 设的）
+        if getattr(self, "_closing", False):
+            return
+        # ② 控件已在销毁队列里 / 已经没了
+        try:
+            control = self.list_ctrl
+            if control is None or control.IsBeingDeleted():
+                return
+            if not control.GetHandle():
+                return
+        except RuntimeError:
+            # wx 的 C++ 对象已释放 —— 正是这里要防的那种情况
             return
         try:
             handle = self.list_ctrl.GetHandle()
@@ -1368,16 +1515,112 @@ class FileTracker(wx.Frame):
             top = 0
             bottom = client.height
             dc = wx.ClientDC(self.list_ctrl)
-            dc.SetPen(wx.Pen(wx.Colour(self.theme.separator), thickness))
+
+            # ## 颜色按区域区分 + 掩码线加粗（用户 2026-10-17 的最终形态）
+            #
+            # > "置顶条目和标题栏之间的分隔线、以及置顶条目的分隔线，
+            # >   改成背景色……其他条目的分隔线就保持灰色不变。"
+            # > "掩码线 vs 表头、置顶、普通灰线，它们的对比度我想全部统一成 1.6。"
+            # > "请将掩码线适当加粗。"
+            #
+            # 于是竖线**按区域分段**，两段**只有颜色不同、粗细完全相同**：
+            #
+            # ==========  =====================  ========================
+            # 区域        颜色                    粗细
+            # ==========  =====================  ========================
+            # 置顶段      `separator_pinned`      `METRICS.separator_thickness`
+            # 普通段      `separator`             `METRICS.separator_thickness`
+            # ==========  =====================  ========================
+            #
+            # **粗细统一是用户 2026-10-17 明确要求的**：
+            # "表头和置顶颜色的粗细，和下面其他记录的粗细不统一。
+            #  我想让它们全部统一起来，这样就可以一起调整。"
+            # ⇒ 全表只有一个 `separator_thickness` 旋钮。
+            #
+            # ## 为什么用 `DrawRectangle` 而不是 `DrawLine`
+            #
+            # `DrawLine` 用宽 pen 时"往哪一侧扩展"由 GDI 决定、不可控。
+            # 矩形能精确覆盖 `[left, left + thickness - 1]`，而 `left` 取
+            # `列边界 − thickness` ⇒ **右边缘严格落在列边界上**。
+            #
+            # 这对加粗尤其重要：线宽 ≥ 2 时覆盖
+            # `[列边界-thick, 列边界-1]`，**正好盖住那里露出的 1 像素
+            # `theme.card` 杂色**（实测见 `probe_edge_pixel.py`）。
+            # **粗细全部统一**（用户 2026-10-17）：
+            # 表头、置顶段、普通段都用 `METRICS.separator_thickness`，
+            # 改一个数整张表一起变。
+            seam_th = thickness
+            pin_span = self._pinned_span()
+
+            def paint(left: int, y1: int, y2: int, colour: str, thick: int):
+                if y2 <= y1:
+                    return
+                c = wx.Colour(colour)
+                dc.SetPen(wx.Pen(c, 1))
+                dc.SetBrush(wx.Brush(c))
+                dc.DrawRectangle(left, y1, thick, y2 - y1)
+
             x = 0
             for index, width in enumerate(widths[:-1]):
                 x += width
                 if x <= 0 or x >= client.width:
                     continue
-                dc.DrawLine(x - thickness, top, x - thickness, bottom)
+                if pin_span is None:
+                    # 没有置顶行 ⇒ 一整条灰线，与旧行为一致
+                    paint(x - seam_th, top, bottom,
+                          self.theme.separator, seam_th)
+                    continue
+                pinned_top, pinned_bottom = pin_span
+                # 置顶段（裁到可见范围）：掩码色
+                seg_top = max(pinned_top, top)
+                seg_bottom = min(pinned_bottom, bottom)
+                paint(x - seam_th, seg_top, seg_bottom,
+                      self.theme.separator_pinned, seam_th)
+                # 普通段：灰色
+                rest_top = max(pinned_bottom, top)
+                paint(x - seam_th, rest_top, bottom,
+                      self.theme.separator, seam_th)
         except Exception:
             # 自绘失败不该让整个列表坏掉
             pass
+
+    def _pinned_span(self) -> tuple[int, int] | None:
+        """置顶行在列表客户区里的**像素范围** ``(top, bottom)``；没有置顶行返回 None。
+
+        用于 :meth:`_paint_column_separators` 分段画竖线：置顶段用置顶底色
+        （线看不见），其余段用灰色。
+
+        ## 为什么不用"行号 × 行高"算
+
+        行高由系统决定（`LVS_GETITEMSPACING`），而且**滚动之后第一行的 y
+        不再是 0**。直接用 `GetItemRect` 拿首尾两行的真实矩形最稳。
+
+        ## 置顶行一定在顶部且连续
+
+        `_ordered_records()` 保证：先 pinned、再 unpinned。所以只需从第 0 行
+        往后找到**最后一个属于置顶集的连续行**，遇到非置顶就停 ——
+        扫描次数上界是 `len(self.pinned_paths)`（通常个位数），不是 6000。
+        """
+        pinned = set(self.pinned_paths)
+        if not pinned:
+            return None
+        total = self.list_ctrl.GetItemCount()
+        if total <= 0:
+            return None
+        limit = min(len(pinned), total)
+        last = -1
+        for row in range(limit):
+            if self.row_path(row) in pinned:
+                last = row
+            else:
+                break
+        if last < 0:
+            return None
+        first_rect = self.list_ctrl.GetItemRect(0)
+        last_rect = self.list_ctrl.GetItemRect(last)
+        if not first_rect or not last_rect or last_rect.height <= 0:
+            return None
+        return first_rect.y, last_rect.y + last_rect.height
 
     def _theme_header(self, dark: bool) -> bool:
         """给自绘表头配色。
@@ -1397,25 +1640,35 @@ class FileTracker(wx.Frame):
         return True
 
     def center_frequency_column(self) -> bool:
-        """改动 ③：确认"频次"列的数字是居中的。
+        """确认"频次"列的**对齐方式**与列宽都合适。
 
-        **判据是"最宽的频次值与列宽的关系"**，不是调用某个 API 有没有报错。
-        原生 ``LVM_SETCOLUMN`` 在本环境上完全不可用
-        （见 :meth:`_center_text`），所以居中靠补前导空格实现。
-        这里算出一份"当前最大位数"供 :meth:`_center_text` 使用，
-        并确认列宽装得下。
+        ## 对齐：原生格式位（不再补空格）
+
+        用户 2026-10-17："频次这一列的数据是需要居中的，但是目前的算法不是
+        真正的居中算法……切换中英文的时候会特别明显。"
+
+        根因是"补前导空格"这个做法本身有**量化误差**：空格是离散单位，
+        只能对齐到它的整数倍，再加上两次整除的取整 —— 中文列宽是奇数（89）时
+        偏差最明显。
+
+        现在居中由 `InsertColumn(format=wx.LIST_FORMAT_CENTER)` 的**格式位**
+        负责，精确到像素。实测（`probe_native_center.py`，用 `LVM_GETCOLUMN`
+        回读）：居中列 `0x4002`（`LVCFMT_CENTER`）、左列 `0x4000`、右列 `0x4001`
+        —— 三种格式能区分，且渲染层文字位置确实不同。
+
+        **历史上放弃原生居中的理由不成立**：当年测的是
+        `LVM_SETCOLUMN`（改**已存在**的列，本环境返回 0），
+        而 `InsertColumn` 走 `LVM_INSERTCOLUMN`，**创建时就带上 fmt，可用**。
+
+        ## 列宽：仍要保证装得下最宽的频次值
+
+        这条与对齐无关，是"数字不能被截断"。居中的列更不该被截断
+        （截断会从右侧切掉，看着像偏了）。
         """
-        self._center_field_width = max(
-            (len(str(r.access_count)) for r in self._rows), default=1,
-        )
-        column = COLUMN_COUNT
-        needed = self.list_ctrl.GetTextExtent("8" * self._center_field_width).width + 20
-        current = self.list_ctrl.GetColumnWidth(column)
-        if current < needed:
-            self.list_ctrl.SetColumnWidth(column, needed)
-            # 列宽变了 ⇒ 居中的缓存作废（见 `_centre_cache`）
-            self.invalidate_centre_cache()
-            return True
+        widest = max((len(str(r.access_count)) for r in self._rows), default=1)
+        needed = self.list_ctrl.GetTextExtent("8" * widest).width + 20
+        if self.list_ctrl.GetColumnWidth(COLUMN_COUNT) < needed:
+            self.list_ctrl.SetColumnWidth(COLUMN_COUNT, needed)
         return True
 
     #: 量列宽时**最多采样多少行**。
@@ -1475,8 +1728,83 @@ class FileTracker(wx.Frame):
         sample = min(row_count, self.COLUMN_WIDTH_SAMPLE)
 
         def fitted(column: int, header: str, extra: int = 40) -> int:
-            """列宽 = max(表头宽, 采样到的单元格宽) + 边距。"""
-            widths = [extent(header).width]
+            """列宽 = max(表头宽, 采样到的单元格宽) + 边距。
+
+            ## ⚠️ 表头宽**必须连"排序三角"一起量**（用户报的 2026-10-17）
+
+            用户截图：英文界面下 `Count` 是当前排序列，标题后面那个 `▼`
+            **压在了"Count"与"Date"之间的分隔线上**，甚至更右。
+
+            **根因不是文案长**，是两处口径不一致：
+
+            * 表头绘制那边：三角是**拼进文字**画的
+              （`header._on_paint` 里 `label += " ▼"`）
+            * 列宽计算这边：只量了**标题本身**
+
+            ⇒ 三角那一段宽度**从来没进过列宽预算**。
+
+            **为什么中文下看不出来**：中文"频次"只有 26px，英文"Count" 有 38px
+            （100% DPI），而三角要再加 17px。所以列宽一紧，先溢出的总是英文。
+
+            **为什么在高 DPI 更严重**：`extra` 是**固定物理像素**，
+            而文字宽度随 DPI 线性放大。实测（本机两档对照）：
+
+            ========  ======  ======  ======
+            DPI       列宽    需要    余量
+            100%      78      62      **+16**
+            175%      106     108     **−2** ← 溢出
+            ========  ======  ======  ======
+
+            ⇒ 两个 DPI 下"看起来一样紧"，实际 175% 已经越界了。
+
+            **修法必须动"量什么"，不能只改文案**：把标题换成更短的词
+            （`Count` → `Freq`）只是**碰巧**盖住这 −2px，换个语言或调大字号
+            就会再露出来。下面改为量"标题 + 三角"——**任何一列都可能变成
+            排序列**，所以每一列都预留这段宽度。
+
+            ## ⚠️ 但 `extra` 不能太大（用户随即报的第二个问题）
+
+            > "可是现在 Count 这列又太宽了，会挤占本就很长的 Path 空间。
+            >   中文'频次'本就很短，为英文多留的列宽换中文后就显得多余。"
+
+            **`extra` 的几何含义就是"三角右缘到分隔线的空白"**
+            （列宽 = `缩进 + 标题+三角 + extra`，余量恰等于 `extra`）。
+            原来的物理 **40 ≈ 23 逻辑像素**，视觉上就是空了一大块，
+            而这一列的数据只有 1~3 位数字，本不需要那么宽。
+
+            实测（175% DPI，`probe_column_extra.py`）：
+
+            ======  ==========  ==========  ======  ==============
+            extra   英文频次宽   中文频次宽   余量    三列合计让给 Path
+            40      137         116         28      0（原值）
+            **20**  **117**     **96**      8       **80 物理像素**
+            16      113         92          4       96
+            12      109         88          0（贴线）112
+            ======  ==========  ==========  ======  ==============
+
+            取 **20**：余量 8 物理像素（≈5 逻辑）仍能呼吸、不贴线；
+            三列合计还给 Path **80 物理像素（≈46 逻辑）**。
+            再小三角就要贴着分隔线了 —— 那是拿观感换空间，不值。
+            """
+            # 三角的宽度取 `header.sort_arrow_width()` —— **唯一来源**。
+            #
+            # 早先这里是 `extent(header + " ▼")`，即"把字符三角拼进标题一起量"。
+            # 那有两个问题：
+            #   ① 字符宽度由字体决定（本机 23 物理 + 空格 7 = **30**），
+            #      是纯开销，而且完全改不动；
+            #   ② 一旦表头改成"画出来的三角"（`header.SORT_ARROW_SIZE`），
+            #      这里就与绘制**不是同一个数**了 —— 两处口径再次分叉。
+            #
+            # **为什么必须压掉这 30 像素**（用户 2026-10-17）：
+            # 中文"访问时间"(92) + 三角(30) = 122 → 时间列由**标题**定宽；
+            # 英文 "Time"(54) + 三角(30) = 84 < 数据(90) → 由**数据**定宽。
+            # 于是中文的这一列比英文宽 32 像素，**把频次列省下的宽度全吃掉**，
+            # 切到中文时路径列反而变窄 —— 用户一眼就看出来了。
+            # 三角现在是**字符**（用户要求换回，见 `header.SORT_ARROW_GLYPH`），
+            # 宽度只能靠字体量 —— 所以把量具传进去。
+            header_width = (extent(header).width
+                            + sort_arrow_width(self.list_ctrl, dpi_of(self)))
+            widths = [header_width]
             for row in range(sample):
                 widths.append(extent(self.list_ctrl.GetItemText(row, column)).width)
             return max(widths) + extra
@@ -1485,26 +1813,75 @@ class FileTracker(wx.Frame):
         # 标题要从 `column_labels()` 取——用 `COLUMNS[i][0]` 会拿到一个整数
         # （实测报 `GetTextExtent(): argument 1 has unexpected type 'int'`）。
         labels = column_labels()
-        frequency_width = fitted(COLUMN_COUNT, labels[COLUMN_COUNT])
-        date_width = fitted(COLUMN_DATE, labels[COLUMN_DATE])
-        clock_width = fitted(COLUMN_CLOCK, labels[COLUMN_CLOCK])
+        # **每列给不同的边距**（用户 2026-10-17 报的第二轮问题）。
+        #
+        # 余量（三角右缘到分隔线）= `extra − 左缩进`。所以：
+        #
+        # * 频次列的数据只有 1~3 位数字、标题也短 ⇒ 边距可以小
+        #   （用 24：右留白 12，与左缩进 12 对称）
+        # * **日期列不能跟着降** —— 它的数据本身就宽，边距一缩就
+        #   "数据贴着分隔线、两列挤在一起"（用户原话"这两列的数据挨太近
+        #   不能呼吸了"）
+        #
+        # 一刀切改 `extra` 正是我上一版犯的错：**为了让频次列变窄，
+        # 把另外两列的呼吸空间也砍了。**
+        #
+        # ## 时间列是**最右一列**，右边没有分隔线要避让（用户 2026-10-17）
+        #
+        # > "访问时间（time）后面不需要留余量，因为这个数据本身就是最靠边的。
+        # >   如果一定要留余量，也要留窄一些（比如只留 2 个或 4 个像素）。"
+        #
+        # 它右边是列表边缘（滚动条），不像其它列那样需要"别贴着竖线"。
+        # 拿掉这 40 物理像素的留白，**全部让给路径列**（路径是唯一
+        # "吃掉剩余宽度"的列，所以这里省下的会原样转到它身上）。
+        #
+        # ⚠️ **`extra` 不等于右留白**：`extra = 左缩进 + 右留白`
+        # （列宽 = 内容 + extra，而内容从"左缩进"处开始画）。
+        # 所以这里必须写成 `缩进 + 想要的留白`，直接写 4 会让
+        # `右留白 = 4 − 12 = −5` —— **内容反而越界**，只是被绘制时的
+        # 钳制掩盖了（三角被拉回列内、与标题重叠）。
+        # 实测踩过：`probe_header_final` 的判据 2/4 同时报错才暴露出来。
+        edge_pad = scale_for_dpi(METRICS.header_text_inset + 4, dpi_of(self))
+        frequency_width = fitted(COLUMN_COUNT, labels[COLUMN_COUNT],
+                                 extra=24)
+        # 时间列现在同时含日期（`14:43   26-10-17`），并且**数据也居中了**。
+        #
+        # ## 边距与路径列**共用同一个单位**（用户 2026-10-17）
+        #
+        # 路径列靠"前导空格"撑出左边距、时间列靠"居中后自动对半分"，
+        # 两套机制各算各的必然跑偏（实测 14 vs 15 像素）。
+        #
+        # 所以都以 `CELL_PADDING_SPACES` 个**空格宽**为单位：
+        #
+        # ```text
+        # 路径左内边距 = 1 × pad        （PATH_LEFT_PAD 就是那么多个空格）
+        # 时间列 extra = 2 × pad        （居中 ⇒ 左右各一半 = 1 × pad）
+        # ```
+        #
+        # ⇒ 两边**恒等**。改 `CELL_PADDING_SPACES` 一个数，两处同时缩放。
+        #
+        # 注：`fitted` 的 extra 是"内容宽 + extra = 列宽"，而时间列的内容
+        # 取 `max(标题+三角, 数据)`。实测两档语言下都是**数据更宽**，
+        # 所以"居中后左右各 extra/2"这个推算是成立的。
+        cell_pad = max(extent(" ").width * CELL_PADDING_SPACES, 1)
+        time_width = fitted(COLUMN_TIME, labels[COLUMN_TIME],
+                            extra=2 * cell_pad)
 
         self.list_ctrl.SetColumnWidth(COLUMN_COUNT, frequency_width)
-        self.list_ctrl.SetColumnWidth(COLUMN_DATE, date_width)
-        self.list_ctrl.SetColumnWidth(COLUMN_CLOCK, clock_width)
+        self.list_ctrl.SetColumnWidth(COLUMN_TIME, time_width)
 
         # 路径列吃掉剩下的宽度，但保留一个可读的下限（原版是 300）
         path_min_width = 300
-        fixed_total = frequency_width + date_width + clock_width
+        fixed_total = frequency_width + time_width
         path_width = max(list_width - fixed_total - 24, path_min_width)
         self.list_ctrl.SetColumnWidth(COLUMN_PATH, path_width)
         # 列宽变了，自绘表头必须跟着同步，否则与下面的列对不齐
         self._sync_header()
         # **列间竖线也要按新列宽重画**（它画在行的客户区上，不随列宽自动更新）
         self._draw_column_separators()
-        # **居中的缓存也要作废** —— 它缓存了频次列宽与空格宽，
-        # 不作废的话窗口一拉大，频次就按旧列宽居中（偏到一边去）。
-        self.invalidate_centre_cache()
+        # 注：频次列的居中现在由**原生列格式位**负责（`InsertColumn` 的
+        # `format`），改列宽之后原生会自己按新宽度重新居中 ——
+        # 不再需要"作废居中缓存"这一步（补空格的实现已删除）。
 
     def _on_list_resized(self, event) -> None:
         self.adjust_column_widths()
@@ -1921,7 +2298,30 @@ class FileTracker(wx.Frame):
             else:
                 # **先问用户**（见 confirm_remove_invalid_path）
                 self.confirm_remove_invalid_path(folder_to_open)
-            event.Veto()
+            # ## `Veto()` 只对 `wx.TreeEvent` 有（2026-10-17 修）
+            #
+            # 用户实测报错：
+            #
+            # ```text
+            # File "app.py", line 2301, in on_dir_item_activated
+            #     event.Veto()
+            # AttributeError: 'MouseEvent' object has no attribute 'Veto'
+            # ```
+            #
+            # 根因：本方法被**两个事件**共用（见它的 docstring）：
+            #
+            # * `EVT_TREE_ITEM_ACTIVATED`（键盘回车）→ `wx.TreeEvent`，**有** `Veto`
+            # * `EVT_LEFT_DCLICK`（鼠标双击）→ `wx.MouseEvent`，**没有** `Veto`
+            #
+            # 结果：**每次双击文件都往 PowerShell 打一段 traceback**，
+            # 但双击本身是好的（打开、记录都执行了，`Veto` 只是最后一句）。
+            # 所以这是"噪音级"缺陷 —— 不影响功能，但会让人以为出事了，
+            # 而且真出别的问题时会被这段刷掉的异常掩盖。
+            #
+            # `Veto()` 的意图是"别让树再做默认处理"。鼠标事件没有这个能力，
+            # 也不需要有：文件节点没有子节点，"展开"本身无副作用。
+            if hasattr(event, "Veto"):
+                event.Veto()
         else:
             event.Skip()
 
@@ -2120,7 +2520,8 @@ class FileTracker(wx.Frame):
             total = control.GetItemCount()
             while index != -1:
                 if 0 <= index < total:
-                    text = control.GetItemText(index)
+                    # **必须剥掉左内边距**（见 `_path_from_cell`）
+                    text = self._path_from_cell(control.GetItemText(index))
                     if text:
                         paths.append(text)
                 index = control.GetNextItem(
@@ -2489,13 +2890,15 @@ class FileTracker(wx.Frame):
         self.list_ctrl.DeleteAllItems()
         pinned_set = set(self.pinned_paths)
         for record in self._rows:
-            date_text, clock_text = split_timestamp(record.last_access_time)
+            # **日期并进时间列**（用户 2026-10-17）：
+            # `2026-10-17 14:43:27` → `14:43   26-10-17`
+            # （秒隐藏、两位年份、3 空格分隔 —— 见 `store.format_time_cell`）
+            time_text = format_time_cell(record.last_access_time)
             index = self.list_ctrl.InsertItem(self.list_ctrl.GetItemCount(),
-                                              record.path)
+                                              PATH_LEFT_PAD + record.path)
             self.list_ctrl.SetItem(index, COLUMN_COUNT,
-                                   self._center_text(str(record.access_count)))
-            self.list_ctrl.SetItem(index, COLUMN_DATE, date_text)
-            self.list_ctrl.SetItem(index, COLUMN_CLOCK, clock_text)
+                                   str(record.access_count))
+            self.list_ctrl.SetItem(index, COLUMN_TIME, time_text)
             colour = self.theme.pinned_row if record.path in pinned_set \
                 else self.theme.card
             self.list_ctrl.SetItemBackgroundColour(index, wx.Colour(colour))
@@ -2736,8 +3139,18 @@ class FileTracker(wx.Frame):
 
         ⇒ 先问一句 `GetItemState`（只读、便宜），**只对选中的行**动手。
         选中集通常是个位数，于是这一步从 O(全表) 降到 O(选中数)。
+
+        ## ⚠️ 但"选中集很大"时上一条还不够（2026-10-17 实测）
+
+        `Ctrl+A` 全选之后，选中集就是全表 —— 那 6000 次 `Select(False)`
+        每一次都会触发 `on_selection_changed` → 重画全表 = **O(n²)**。
+        实测 **166414 ms（166 秒）**，表现为"Ctrl+A 之后按 Esc 卡死三分钟"。
+
+        ⇒ 循环期间挂起选中事件（与 `_select_range` 同一个标志），
+        循环结束**统一重画一次**。修完降到 **约 200 ms**（三个数量级）。
         """
         control = self.list_ctrl
+        self._suspend_selection_events = True
         try:
             total = control.GetItemCount()
             selected_state = wx.LIST_STATE_SELECTED
@@ -2747,6 +3160,11 @@ class FileTracker(wx.Frame):
         except Exception:
             # 纯外观操作：失败时退化成"没清掉"，不影响数据
             pass
+        finally:
+            # **必须复位**：留着的话之后所有点击都不再重画高亮（且不报错）
+            self._suspend_selection_events = False
+        # 挂起期间没人重画 —— 这里补一次，否则那几行的蓝底会留在屏上
+        self._apply_selection_highlight()
 
     def _select_range(self, row_a: int, row_b: int) -> None:
         """把 `row_a..row_b` 这一整段设成"选中"，其余取消选中。
@@ -2791,13 +3209,22 @@ class FileTracker(wx.Frame):
         if want == previous:
             # 区间没变（同一帧内多次移动、或原地抖动）—— 一行都不用碰
             return
-        for row in previous - want:
-            self.list_ctrl.Select(row, False)
-        # **逐行 Select 期间挂起"选中变化就重画"** —— 见 `on_selection_changed`。
-        # 用 try/finally：中途抛异常时标志位要是留着的，
-        # 之后所有点击都不会再重画高亮了（而且不会有任何报错）。
+        # ## ⚠️ 取消与选中**必须一起挂起**（2026-10-17 性能缺陷）
+        #
+        # 上一版只把 `Select(True)` 那半包进了挂起，`Select(False)` 那半
+        # 留在**外面** —— 于是"缩小选区"这一支是 **O(k × n)**：
+        # 每取消一行都触发一次 `on_selection_changed` → 重画全表。
+        #
+        # 实测（6000 行）：全选后再清空要 **166414 ms（166 秒）**。
+        # 而"全选"只有 209 ms —— 两支差了三个数量级，差别就在这个标志。
+        #
+        # 现在两支都挂起，循环结束后由调用方统一重画一次。
+        # 用 try/finally：中途抛异常时标志位必须复位，
+        # 否则之后所有点击都不会再重画高亮（而且不会有任何报错）。
         self._suspend_selection_events = True
         try:
+            for row in previous - want:
+                self.list_ctrl.Select(row, False)
             for row in want - previous:
                 self.list_ctrl.Select(row, True)
         finally:
@@ -2928,67 +3355,12 @@ class FileTracker(wx.Frame):
             # 列表画不出来"）——两处判断不一致本身就是个缺陷。
             pass
 
-    def _center_text(self, text: str) -> str:
-        """把频次列的文本按**真实列宽**居中（左侧补空格）。
-
-        ## ⚠️ 必须缓存：这一段原来是重建里最大的单项开销
-
-        实测（`tools/probes/probe_perf_detail.py`，6000 行）：
-
-        ==========================  ========  ===========  ======
-        调用                         次数       耗时         占比
-        **`GetTextExtent`**         **6604**  **155.0 ms** **26.3%**
-        `GetColumnWidth`                 5       0.0 ms      0.0%   ← 已缓存
-        ==========================  ========  ===========  ======
-
-        ## 按"位数"缓存，而不是按文本
-
-        频次是**纯数字**。而同**位数**的数字在同一个字体下宽度**相同**
-        （等宽数字）或**几乎相同**（比例字体里数字通常也是等宽的）——
-        精确起见这里仍以**实际文本**为准，只是把量过的结果记住：
-        6000 行里频次的取值通常只有几十种（1/2/3…位数），
-        于是 `GetTextExtent` 从 **6000 次降到几十次**。
-
-        **取整的代价**：若某字体下"1"和"8"宽度不同，居中会差 1 像素 ——
-        这是纯观感，而且本项目列表用的是系统默认字体（数字等宽）。
-        为了**不引入偏差**，缓存键用**文本本身**（不是位数）：
-        取值种类少的时候收益一样，取值种类多的时候也不会算错。
-        """
-        column_px, space_px = self._centre_cache()
-        text_px = self._text_width(text)
-        pad = max(column_px - text_px, 0) // space_px // 2
-        return " " * pad + text
-
-    def _text_width(self, text: str) -> int:
-        """文本宽度（带缓存）。缓存按**重建周期**作废，见 `invalidate_centre_cache`。"""
-        cache = getattr(self, "_text_width_cache", None)
-        if cache is None:
-            cache = {}
-            self._text_width_cache = cache
-        width = cache.get(text)
-        if width is None:
-            width = self.list_ctrl.GetTextExtent(text).width
-            cache[text] = width
-        return width
-
-    def _centre_cache(self) -> tuple[int, int]:
-        """（频次列宽, 一个空格的宽度）—— 缓存，列宽一变就重算。
-
-        **失效点**：`adjust_column_widths()` 与 `center_frequency_column()`。
-        漏掉失效点的话居中会按**旧列宽**算，窗口拉大后频次就不居中了 ——
-        所以下面那两个方法里都调了 `invalidate_centre_cache()`。
-        """
-        cache = getattr(self, "_centre_metrics", None)
-        if cache is None:
-            space_px = max(self.list_ctrl.GetTextExtent(" ").width, 1)
-            cache = (self.list_ctrl.GetColumnWidth(COLUMN_COUNT), space_px)
-            self._centre_metrics = cache
-        return cache
-
-    def invalidate_centre_cache(self) -> None:
-        """列宽变了 ⇒ 丢弃居中的缓存（列宽与文本宽度都作废）。"""
-        self._centre_metrics = None
-        self._text_width_cache = None
+    # 【已删除】_center_text / _text_width / _centre_cache / invalidate_centre_cache
+    #
+    # 频次列的居中改由**原生列格式位**负责（`InsertColumn(format=LIST_FORMAT_CENTER)`，
+    # 见 `InitUI` 与 `COLUMNS` 的注释）：不补前导空格 ⇒ 没有量化误差，
+    # 也省掉每行两次 `GetTextExtent`（曾是重建里 26% 的耗时）。
+    # 实测依据：`tools/probes/probe_native_center.py`。
 
     def _ordered_records(self) -> list[PathRecord]:
         pinned_order = {path: index for index, path in enumerate(self.pinned_paths)}
@@ -2996,11 +3368,37 @@ class FileTracker(wx.Frame):
         pinned.sort(key=lambda r: pinned_order[r.path])
         return pinned + self.store.load_unpinned()
 
+    @staticmethod
+    def _path_from_cell(text: str) -> str:
+        """把控件里的路径单元格文本还原成**真正的路径**（剥掉左内边距）。
+
+        ## 为什么需要它
+
+        路径列的"左内边距"是用**前导空格**实现的（见 :data:`PATH_LEFT_PAD`
+        的长注释：原生 `LVM_SETITEMINDENT` 返回成功但不生效）。
+        于是控件里的文本是 `"  D:\\Folder"` 而不是 `"D:\\Folder"`。
+
+        **凡是"从控件读路径"的地方都必须过这一道**，否则拿到的是带空格的串
+        —— 拿它去 `store.get()` / `os.path.exists()` / 比较，全都会失败，
+        而且**不会报错**（只是"找不到"）。
+
+        全项目只有三处读路径单元格，都已改为走这里：
+
+        * :meth:`row_path`
+        * :meth:`_selected_paths`
+        * :meth:`find_path`
+
+        （`:meth:`selected_paths`` 走的是 `_selected_paths`，间接覆盖。）
+        """
+        if text.startswith(PATH_LEFT_PAD):
+            return text[len(PATH_LEFT_PAD):]
+        return text
+
     def row_path(self, row: int) -> str:
         """取某一行的路径；行号越界返回空串。"""
         if row is None or row < 0 or row >= self.list_ctrl.GetItemCount():
             return ""
-        return self.list_ctrl.GetItemText(row)
+        return self._path_from_cell(self.list_ctrl.GetItemText(row))
 
     def selected_rows(self) -> list[int]:
         """当前**所有**选中行的行号（升序）。没有选中返回空列表。
@@ -3054,7 +3452,10 @@ class FileTracker(wx.Frame):
     def find_path(self, path: str) -> int:
         """按路径找行号；找不到返回 -1。"""
         for row in range(self.list_ctrl.GetItemCount()):
-            if self.list_ctrl.GetItemText(row) == path:
+            # **必须剥掉左内边距再比**（见 `_path_from_cell`）——
+            # 不剥的话 `"  D:\Folder" == "D:\Folder"` 永远为假，
+            # 于是 `find_path` 恒返回 -1（选中、删除、顶置全都会找不到行）。
+            if self._path_from_cell(self.list_ctrl.GetItemText(row)) == path:
                 return row
         return -1
 
@@ -3200,7 +3601,7 @@ class FileTracker(wx.Frame):
         ``toggle=True`` 表示"点同一列就翻方向"（表头的行为）；
         设置窗口改方向时传 ``reverse`` 直接指定。
         """
-        if column not in (COLUMN_PATH, COLUMN_COUNT, COLUMN_DATE, COLUMN_CLOCK):
+        if column not in (COLUMN_PATH, COLUMN_COUNT, COLUMN_TIME):
             return False
         key = _sort_key_of(column)
 
@@ -3283,7 +3684,10 @@ class FileTracker(wx.Frame):
 
         if column == COLUMN_PATH:
             unpinned.sort(key=lambda r: r.path.lower(), reverse=self.sort_reverse)
-        elif column in (COLUMN_DATE, COLUMN_CLOCK):
+        elif column == COLUMN_TIME:
+            # **时间列同时管日期**（两列已合并，见 `COLUMNS` 的注释）。
+            # 排序用 `last_access_time` 的**完整值**——界面上隐藏的秒
+            # 与年份都在里面，所以同一分钟内访问的两条也能排对。
             def time_key(record: PathRecord):
                 try:
                     return datetime.strptime(record.last_access_time, TIME_FORMAT)
@@ -4261,9 +4665,9 @@ class FileTracker(wx.Frame):
                   f"Could not save the settings: {error}"))
 
     def retranslate(self) -> None:
-        """把界面上所有文案按**当前语言**重取一遍。
+        """把界面上所有文案按**当前语言**重取一遍，**并重算列宽**。
 
-        ## 只改文字，不动尺寸
+        ## 只改文字，不动控件结构
 
         按钮宽度是按文字算的不是写死的（`RoundedButton` 会 `SetMinSize`），
         所以换语言后 `Layout()` 一次就够，不需要重建控件。
@@ -4274,6 +4678,27 @@ class FileTracker(wx.Frame):
         只支持改文字，但 wx 的 `InsertColumn` 是追加语义，原地改要靠
         `SetColumnText`）——所以列表那四列直接调它，表头是自绘的、
         改 `titles` 再 `Refresh` 即可。
+
+        ## ⚠️ 但列宽**必须重算**（用户 2026-10-17 报的）
+
+        > "英文启动：Count 列计算得比较宽。此时换成中文，程序没有重新计算，
+        >   就会导致切换后的中文界面里'频次'这一列**过宽**。
+        >   中文启动再换成英文，同样不会重新测量，英文的 Count
+        >   **和三角重叠在一起**。"
+
+        **这确实是"只在启动时算一次"的缺陷**：原来这里只换了标题文字
+        （`set_titles`），列宽还是**上一种语言**算出来的。于是两边的错都出现：
+
+        | 切换方向 | 现象 |
+        |---|---|
+        | 英文（宽 121）→ 中文 | "频次"占着 `Count` 的宽度 ⇒ **过宽、空一大块** |
+        | 中文（窄 100）→ 英文 | `Count` 装不下自己的宽度+三角 ⇒ **重叠/压线** |
+
+        ⇒ 换完标题**必须重算列宽**（`adjust_column_widths` 会同时刷新
+        自绘表头、列间竖线、居中缓存，这几件事是绑在一起的）。
+
+        **这一条也是前面几轮"三角压线"反复出现的真凶之一**：
+        我用探针量的是"启动后立刻"的几何，而用户是**切换语言之后**看的。
         """
         labels = column_labels()
         for index, title in enumerate(labels):
@@ -4287,6 +4712,13 @@ class FileTracker(wx.Frame):
             column.SetText(title)
             self.list_ctrl.SetColumn(index, column)
         self.header.set_titles(labels)
+
+        # **换语言 ⇒ 列宽要按新语言的标题重新量。**
+        #
+        # 顺序：先换标题（上面），再重算（这里）——
+        # `_adjust_column_widths` 里的 `fitted()` 读的是 `column_labels()`，
+        # 所以它量到的一定是新语言的文字。
+        self.adjust_column_widths()
 
         self.open_btn.SetLabel(L("打开", "Open"))
         self.clear_btn.SetLabel(L("清空", "Clear"))
