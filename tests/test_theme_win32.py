@@ -414,7 +414,8 @@ def test_warning_badge_exclamation_sits_inside_and_is_lifted():
         dot_bottom = geometry["dot"][1] + geometry["dot"][2]
         middle = (bar_top + dot_bottom) / 2
         lift = geometry["centroid_y"] - middle        # 正 = 上移
-        assert abs(lift - 0.05 * size) < 1e-9, (size, lift)
+        expected = max(0.0, 0.05 * size - theme.EXCLAMATION_NUDGE_PX)
+        assert abs(lift - expected) < 1e-9, (size, lift, expected)
         assert middle < geometry["centroid_y"]         # 确实在重心之上
         assert bar_top > geometry["apex"][1]           # 在顶点之下
         assert dot_bottom < geometry["left"][1]        # 在底边之上
@@ -430,7 +431,9 @@ def test_warning_badge_bar_is_a_plain_thick_bar():
     """
     for size in (24, 43, 75):
         geometry = theme.warning_badge_geometry(size)
-        assert geometry["bar_width"] > geometry["stroke"] * 1.2, size
+        # 比外框线**粗**（用户："中间的竖线又很细"），但仍是"一条线"
+        assert geometry["bar_width"] > geometry["stroke"], size
+        assert geometry["bar_width"] <= 0.09 * size, size
         assert geometry["bar_width"] < geometry["bar"][3] - geometry["bar"][1], size
 
 
@@ -441,3 +444,21 @@ def test_warning_badge_is_bigger_than_body_text():
     """
     assert 1.2 <= theme.METRICS.dialog_alert_ratio <= 2.0
     assert theme.METRICS.dialog_alert_gap >= 4
+
+
+def test_process_dark_mode_uses_force_modes():
+    """进程级深色模式必须用 **Force** 档，浅色不能用 `Default(0)`。
+
+    用户 2026-10-26："浅色主题菜单错误保持深色。"
+
+    `SetPreferredAppMode` 的取值（未公开枚举）：
+    `0 = Default（跟随系统）`、`1 = AllowDark`、`2 = ForceDark`、`3 = ForceLight`。
+    浅色若传 0，系统是深色时菜单仍是深的 —— 用户报的就是这个。
+    """
+    from file_tracker import win32
+
+    assert win32.PREFERRED_APP_MODE_DEFAULT == 0
+    assert win32.PREFERRED_APP_MODE_ALLOW_DARK == 1
+    assert win32.PREFERRED_APP_MODE_FORCE_DARK == 2
+    assert win32.PREFERRED_APP_MODE_FORCE_LIGHT == 3
+    assert win32.PREFERRED_APP_MODE_FORCE_LIGHT != win32.PREFERRED_APP_MODE_DEFAULT

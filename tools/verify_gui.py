@@ -35,7 +35,9 @@ import wx  # noqa: E402
 
 import file_tracker.app as _app_module  # noqa: E402
 from file_tracker import core as _core  # noqa: E402
-from file_tracker import core, win32  # noqa: E402
+from file_tracker import core  # noqa: E402
+from file_tracker import win32  # noqa: E402
+from file_tracker import win32 as _win32_module  # noqa: E402
 from file_tracker import lang as _lang  # noqa: E402
 from file_tracker import theme as _theme  # noqa: E402
 from file_tracker import tree_nav  # noqa: E402
@@ -3461,6 +3463,21 @@ def main() -> int:
             "set_process_dark_mode(self.theme.is_dark)" in
             _inspect.getsource(_app_module),
             "在 `_retheme` 里，菜单是按需创建的，所以对后续弹出的菜单有效",
+        )
+        # 浅色必须用 **ForceLight(3)**，不能传 0（Default=跟随系统）。
+        # 用户 2026-10-26："浅色主题菜单错误保持深色。" —— 那条就是传 0 造成的：
+        # 系统深色时 Default 会让菜单变深。实测（`probe_menu_dark.py`）：
+        # 深色主题启动 → 菜单 (44,44,44)；切成浅色后 → 菜单 (249,249,249)。
+        check(
+            "浅色用 ForceLight(3) 而不是 Default(0)（否则系统深色时菜单仍深）",
+            "PREFERRED_APP_MODE_FORCE_LIGHT" in _inspect.getsource(
+                _win32_module)
+            and "PREFERRED_APP_MODE_DEFAULT" not in
+            _inspect.getsource(_win32_module).split(
+                "def set_process_dark_mode")[1].split("def ")[0],
+            f"ForceDark={_win32_module.PREFERRED_APP_MODE_FORCE_DARK}，"
+            f"ForceLight={_win32_module.PREFERRED_APP_MODE_FORCE_LIGHT}，"
+            f"Default={_win32_module.PREFERRED_APP_MODE_DEFAULT}",
         )
 
         # ---- 弹窗尺寸照抄 Roboc 的固定公式 ----

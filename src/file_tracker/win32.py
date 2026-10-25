@@ -631,6 +631,16 @@ def find_child_window(hwnd: int, class_name: str) -> int:
     return found[0] if found else 0
 
 
+#: `uxtheme.SetPreferredAppMode` 的取值（未公开枚举）。
+#:
+#: **浅色必须用 `FORCE_LIGHT`，不能用 `DEFAULT`。**
+#: `DEFAULT` 的语义是"跟随系统"，系统是深色时浅色主题的程序会得到**深色菜单**
+#: （用户 2026-10-26："浅色主题菜单错误保持深色"）。
+PREFERRED_APP_MODE_DEFAULT = 0
+PREFERRED_APP_MODE_ALLOW_DARK = 1
+PREFERRED_APP_MODE_FORCE_DARK = 2
+PREFERRED_APP_MODE_FORCE_LIGHT = 3
+
 #: 最近一次成功设置的进程级深色模式（`None` = 从没设过 / 系统不支持）。
 #:
 #: **留一个可读回的值**：用户报的"深色主题下右键菜单还是浅色"就是
@@ -654,10 +664,22 @@ def set_process_dark_mode(dark: bool) -> bool:
     控件都会跟着变深**。不用它的话，`SetBackgroundColour` 对它们无效，
     深色主题下就会留下大片白底——用户反馈的"深色主题下的表现很差"就是这个。
 
+    ## ⚠️ 浅色要传 **3（ForceLight）**，不是 0（Default）
+
+    用户 2026-10-26："浅色主题菜单错误保持深色。"
+
+    实测：同一进程里**先设深色、再设 0（Default）不会回退** —— 菜单仍然是深的
+    （那套主题数据已经被加载并缓存）。而 **0 的语义是"跟随系统"**，
+    系统若是深色，浅色主题的程序就会长出深色菜单。
+
+    所以这里浅色一律传 **3（ForceLight）**：强制浅色，与深色那档对称，
+    且实测能从"已强制深色"回退过来。
+
     Windows 10 1809 之前的版本没有这个导出，此时返回 ``False``，
     调用方应退回逐控件设色。
 
-    **必须在创建窗口之前调用**，之后调用对已经创建的控件不生效。
+    **必须在创建窗口之前调用**，之后调用对已经创建的控件不生效
+    （菜单是按需创建的，所以运行中切主题后对**后续弹出**的菜单仍有效）。
     """
     if not IS_WINDOWS:
         return False
@@ -670,8 +692,10 @@ def set_process_dark_mode(dark: bool) -> bool:
             setter = uxtheme[135]
         setter.argtypes = [ctypes.c_int]
         setter.restype = ctypes.c_int
-        # 2 = ForceDark：强制深色，不跟随系统
-        setter(2 if dark else 0)
+        # 2 = ForceDark / 3 = ForceLight：两档都**强制**，不跟随系统。
+        # **浅色不能用 0（Default）** —— 那是"跟随系统"，系统深色时菜单还是深的。
+        setter(PREFERRED_APP_MODE_FORCE_DARK if dark
+               else PREFERRED_APP_MODE_FORCE_LIGHT)
         globals()["process_dark_mode"] = bool(dark)
         return True
     except (OSError, AttributeError, TypeError):

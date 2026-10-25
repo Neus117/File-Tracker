@@ -678,6 +678,13 @@ class Metrics:
 
 METRICS = Metrics()
 
+#: 感叹号整组沿重心上移之后，再**往下挪**这么多**物理像素**。
+#:
+#: 用户 2026-10-26 第二轮验收："感叹号需要细一点、相对三角形**下移 1 像素**"。
+#: 这是**绝对像素**而不是比例：他看的是屏幕上那一个尺寸（54px），
+#: 差 1 像素是能一眼看出来的"视觉重心"问题，比例化反而会随字高漂。
+EXCLAMATION_NUDGE_PX = 1.0
+
 
 def scale_for_dpi(pixels: int, dpi: int) -> int:
     """把 96 DPI 逻辑像素换算成目标 DPI 下的物理像素。
@@ -757,13 +764,16 @@ def warning_badge_geometry(size: float) -> dict:
     #   ② "希望这个感叹号**稍微上移两三个像素**，对比等边三角形"
     #      ⇒ 三角形视觉重心偏下（底边是一条实线），所以整组沿重心再上移
     #      `0.05 s`（45px 时为 2.25px —— 正是"两三个像素"）。
+    #   ③ 2026-10-26 第二轮验收："感叹号需要**细一点**、相对三角形**下移 1 像素**"
+    #      ⇒ 竖条 0.086 s → **0.072 s**（54px 时 4.6px → 3.9px，仍比外框粗）；
+    #        上移量 = 比例部分 **减 1 物理像素**。
     bar_length = 0.20 * size
     bar_gap = 0.060 * size
     dot_radius = 0.050 * size
-    bar_width = 0.086 * size          # 比 `stroke`(0.062 s) 粗，不再"很细"
+    bar_width = 0.072 * size          # 比 `stroke`(0.062 s) 粗，但不再"很粗"
     group_height = bar_length + bar_gap + 2 * dot_radius
-    # **以比例表示上移量**（换尺寸时按比例走，不写死像素）
-    lift = 0.05 * size
+    # **上移量 = 比例部分 − 1 物理像素**（用户按 54px 那一档说的"下移 1 像素"）
+    lift = max(0.0, 0.05 * size - EXCLAMATION_NUDGE_PX)
     group_top = centroid_y - group_height / 2 - lift
     return {
         "size": size,
