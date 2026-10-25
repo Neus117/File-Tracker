@@ -54,11 +54,11 @@
 
 | | |
 |---|---|
-| **Download** | Get `File.Tracker_v1.4.1.exe` from [Releases](https://github.com/Neus117/File-Tracker/releases/latest) and run it — portable, no installation |
+| **Download** | Get `File.Tracker_v1.4.2.exe` from [Releases](https://github.com/Neus117/File-Tracker/releases/latest) and run it — portable, no installation |
 | **Database** | On first launch it creates `file_tracker.db` under `C:\Users\<you>\` (named `file_access.db` back in v1.0) |
 | **Run at startup** | Press `Win+R`, type `shell:startup`, press Enter, and drop a shortcut into the folder that opens |
 | **Uninstall** | Delete the exe and `file_tracker.db` |
-| **Check the version** | `File.Tracker_v1.4.1.exe --version` prints something like `File Tracker 1.4.1+12f8bc7` — the part after `+` is the commit it was built from |
+| **Check the version** | `File.Tracker_v1.4.2.exe --version` prints something like `File Tracker 1.4.2+@REV@` — the part after `+` is the commit it was built from |
 | **Multi-select** (since v1.3.3) | Hold **Ctrl** and click to pick several rows, or **hold the left button and drag** across a range; **Shift**-click selects a run. With several rows selected, the context menu keeps only "Open N items" and "Delete N items" |
 
 > **About the asset name**: from v1.2.0 onward it is uniformly
@@ -74,9 +74,9 @@
 
 ## Compared with v1.1.0
 
-v1.1.0 shipped on 2024-10-14; v1.4.1 on 2026-10-25. **More features, smaller download.**
+v1.1.0 shipped on 2024-10-14; v1.4.2 on 2026-10-26. **More features, smaller download.**
 
-| | v1.1.0 | **v1.4.1** |
+| | v1.1.0 | **v1.4.2** |
 |---|---|---|
 | Size | 15.76 MB | **12.70 MB** |
 | UI language | Chinese only | **Chinese/English, switchable** |
@@ -89,6 +89,35 @@ v1.1.0 shipped on 2024-10-14; v1.4.1 on 2026-10-25. **More features, smaller dow
 | Build pipeline | **None** (no `.spec`, no script, no CI) | `build.ps1` + 4 build checks + 9 gates in CI |
 | Binary reports its version | No | **Yes** (name / version / commit) |
 | Version info in file properties | Nearly blank | **All five fields filled** |
+
+### What v1.4.2 is about — four things
+
+1. **Enter in the address bar is 4–10× faster** — for a path like
+   `C:\Windows\System32\drivers\etc`: **296 → 70 ms**, and the tree grows by
+   **5789 → 614** nodes. The cause was that expanding along the path built every
+   file of every ancestor as a tree node (`System32` alone has 4708), just to show
+   one level further down. Big folders now list sub-folders first; files appear
+   when you open them.
+
+2. **A whole day of use no longer slows the app down** — previously every opened
+   folder stayed expanded and nodes were never reclaimed, so after a few hours
+   closing took a dozen seconds (measured: 45746 nodes → **11 s** to close). Now:
+   navigating collapses the previous path, the tree is rebuilt once it exceeds
+   4000 nodes, and folders like `WinSxS` (19727 entries) are **paged**
+   (800 at a time plus a last row saying how many are left; collapse and expand
+   again to load the next page).
+
+3. **Three dark-theme holes closed** — system-drawn parts (context menus, scroll
+   bars) followed the **system** theme, so "system light + app dark" still got a
+   white menu; the light setting was also sent as "follow the system", so a light
+   app on a dark system got a dark menu; and switching theme at runtime did not
+   update menus (they need an extra flush of the menu theme). All three fixed.
+
+4. **The dialog warning badge is now drawn, not typed** — the old `⚠️` was a font
+   glyph whose size is decided by the font and **cannot be made larger than the
+   body text**. It is now an equilateral outlined triangle with an exclamation
+   mark built from geometry (spec: `Icons-Drawing.md` → `warning`), sized at
+   **1.8× the body line height** and tucked right next to the first line.
 
 ### What v1.4.0 is about — three things
 
