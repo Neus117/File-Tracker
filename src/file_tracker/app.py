@@ -5057,10 +5057,20 @@ class FileTrackerApp(wx.App):
         # （用户报的"右键菜单没跟着反色"）。见 `process_theme_preference`。
         #
         # 必须在窗口创建之前调用，所以放在这里而不是 apply_window_theme 里。
+        applied = False
         try:
-            win32.set_process_dark_mode(process_theme_preference().is_dark)
+            applied = win32.set_process_dark_mode(
+                process_theme_preference().is_dark)
         except Exception:
-            pass
+            applied = False
+        if not applied:
+            # **不能静默失败**：进程级开关设不上，菜单/滚动条/系统提示框就会
+            # 一直是浅色，而界面上只看得到"它们是浅的"、看不到原因。
+            # 源码运行（`run.ps1`）时这行会出现在终端里。
+            print("[dark-mode] " + L(
+                "进程级深色模式设置失败：右键菜单与系统控件将保持系统主题颜色",
+                "Process dark mode unavailable: menus and system controls "
+                "will follow the system theme"), file=sys.stderr)
 
         self.SetAppName(APP_NAME)
         self.frame = FileTracker()
