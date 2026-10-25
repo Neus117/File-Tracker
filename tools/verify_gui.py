@@ -1344,8 +1344,11 @@ def main() -> int:
         #
         # 用户的原话是"从左边导航窗格打开" —— 只靠 `reveal_in_tree` 里的检查
         # 会漏掉"只用树浏览几小时"这条完全合法的用法。
+        #
+        # ⚠️ 手动展开用的是**更高**的那道线（`MAX_TREE_NODES_HARD`）：
+        # 用户刚点开的目录不能立刻被拆掉（2026-10-26 那张截图就是被拆掉了）。
         frame.reveal_in_tree(chain_b)
-        before_manual = tree_native._node_count = tree_nav.MAX_TREE_NODES + 1
+        before_manual = tree_native._node_count = tree_nav.MAX_TREE_NODES_HARD + 1
         manual_parent = tree.GetItemParent(tree.GetSelection())
         tree.Collapse(manual_parent)
         tree.Expand(manual_parent)          # 手动展开：不在 quiet_expand 里
@@ -1357,9 +1360,10 @@ def main() -> int:
             time.sleep(0.01)
         check(
             "手动在树里展开也会触发重建（只用树浏览几个小时也不会累积）",
-            not tree_native.needs_trim()
+            not tree_native.needs_hard_trim()
             and tree_native.node_count < tree_nav.MAX_TREE_NODES,
-            f"强制计数器 = {before_manual}，展开后 node_count = "
+            f"强制计数器 = {before_manual}（硬上限 "
+            f"{tree_nav.MAX_TREE_NODES_HARD}），展开后 node_count = "
             f"{tree_native.node_count}",
         )
         check(
@@ -1417,6 +1421,103 @@ def main() -> int:
             huge_item.IsOk() and has_kids and placeholder == "",
             f"节点 = {tree.GetItemText(huge_item)!r}，ItemHasChildren = {has_kids}，"
             f"第一个子项文本 = {placeholder!r}（空串 = 占位子项）",
+        )
+
+        # ---- 用户**自己**点开超大目录：分页显示，不能是"几秒空白" ----
+        #
+        # 用户 2026-10-26 截图报的 bug：展开 `WinSxS` 卡 5~6 秒后**什么都看不到**
+        # —— 2.7 秒建出来的 39697 个节点，紧接着被"节点上限"整体重建删光了。
+        # 现在的规则：一次只放 `MAX_EXPAND_PAGE` 个 + 一行"还有 N 项未显示"，
+        # 收起再展开接着放下一页。
+        started = time.perf_counter()
+        tree.Collapse(huge_item)
+        tree.Expand(huge_item)              # 手动展开：不在 quiet_expand 里
+        manual_ms = (time.perf_counter() - started) * 1000
+        shown = tree_nav.MAX_EXPAND_PAGE
+        kids = child_names_of(huge_item)
+        marker_text = kids[-1] if kids else ""
+        check(
+            "手动展开超大目录：**快**（不再是几秒的冻结）",
+            manual_ms < 1000,
+            f"{manual_ms:.0f} ms（一次只放 {shown} 个；全量要 2.7 秒且树立刻废掉）",
+        )
+        check(
+            "手动展开超大目录：**有内容**（不再是一片空白）",
+            len(kids) >= shown,
+            f"子项 {len(kids)} 个（期望 ≥ {shown} + 1 行说明）",
+        )
+        check(
+            "末尾有一行说明「还有 N 项未显示」（不是静默截断）",
+            "未显示" in marker_text or "not shown" in marker_text,
+            f"最后一行 = {marker_text!r}",
+        )
+        marker_item = tree.GetLastChild(huge_item)
+        check(
+            "说明行**不是目录**：它的路径是空串（否则会被当成真节点选中/记录）",
+            frame.dir_ctrl.GetPath(marker_item) == "",
+            f"说明行 GetPath = {frame.dir_ctrl.GetPath(marker_item)!r}，"
+            f"在 _markers 里 = {marker_item in frame.dir_ctrl._markers}",
+        )
+        check(
+            "手动展开之后**没有被整体重建**（用户点开的东西不能立刻拆掉）",
+            tree.IsExpanded(huge_item) and not frame.dir_ctrl.needs_hard_trim(),
+            f"IsExpanded = {tree.IsExpanded(huge_item)}，node_count = "
+            f"{frame.dir_ctrl.node_count}，硬上限 = "
+            f"{tree_nav.MAX_TREE_NODES_HARD}",
+        )
+
+        first_kid = tree.GetFirstChild(huge_item)[0]
+        first_path = frame.dir_ctrl.GetPath(first_kid)
+        before_more = len(kids)
+        started = time.perf_counter()
+        tree.Collapse(huge_item)
+        tree.Expand(huge_item)              # 再展开一次 = 接着加载下一页
+        more_ms = (time.perf_counter() - started) * 1000
+        kids2 = child_names_of(huge_item)
+        check(
+            "再展开一次 → **接着加载下一页**（收起再展开就是「看更多」）",
+            len(kids2) >= before_more + shown,
+            f"{before_more} → {len(kids2)} 个（每次 +{shown}），{more_ms:.0f} ms",
+        )
+        check(
+            "分页是**追加**：原来那个子项仍然有效（不是重建）",
+            first_kid.IsOk() and frame.dir_ctrl.GetPath(first_kid) == first_path,
+            f"第一个子项 IsOk = {first_kid.IsOk()}，路径 "
+            f"{frame.dir_ctrl.GetPath(first_kid)[-24:]!r}（原 {first_path[-24:]!r}）",
+        )
+
+        # ---- 「打开」也要收起旧链（用户 2026-10-26 的第二条反馈）----
+        #
+        # "用户在浏览导航窗格时，选中路径，然后点击「打开」按钮来打开对应的
+        #  文件夹。在这个操作过程中，它没有把以前在导航窗格上浏览的那些路径收起来。"
+        frame.reveal_in_tree(chain_b)          # 程序展开的链 = chain-b
+        b1_node = tree.GetItemParent(tree.GetSelection())
+        b_chain_node = tree.GetItemParent(b1_node)   # chain-b 那一级
+        frame.reveal_in_tree(chain_a)          # 现在旧链 = chain-a，选中 a2
+        a1_user = tree.GetItemParent(tree.GetSelection())
+        a_chain_node = tree.GetItemParent(a1_user)
+        tree.Expand(a_chain_node)              # 用户手动展开 chain-a 浏览
+        tree.Expand(a1_user)
+        opened_paths.clear()
+        frame._focus_pane = "tree"             # 用户点进过导航窗格（见 on_tree_selection_made）
+        tree.SelectItem(a1_user)               # 用户在树里选中 chain-a\a1
+        frame.on_open(None)
+        check(
+            "阳性对照：点「打开」用的是**导航窗格**里的选中项",
+            len(opened_paths) == 1 and opened_paths[0].endswith("chain-a\\a1"),
+            f"打开的路径 = {opened_paths!r}（期望 …\\chain-a\\a1）",
+        )
+        check(
+            "用「打开」之后旧链也收起来了（与地址栏回车同一规则）",
+            not tree.IsExpanded(b_chain_node),
+            f"chain-b 那一级 IsExpanded = {tree.IsExpanded(b_chain_node)}"
+            f"（收起的是**程序**展开过的链）",
+        )
+        check(
+            "「打开」之后选中项那条链仍然展开着（否则选中的那一行看不见）",
+            tree.IsExpanded(a_chain_node) and tree.IsExpanded(a1_user),
+            f"chain-a IsExpanded = {tree.IsExpanded(a_chain_node)}，"
+            f"a1 IsExpanded = {tree.IsExpanded(a1_user)}",
         )
 
         # ==============================================================

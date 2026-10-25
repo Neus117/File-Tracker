@@ -51,7 +51,10 @@ import sys
 
 import wx
 
-from .tree_nav import needs_trim, should_skip_files, too_many_to_expand
+from .lang import L
+from .tree_nav import (MAX_EXPAND_PAGE, needs_hard_trim, needs_trim,
+                       next_page_count, should_skip_files,
+                       too_many_to_expand)
 
 # --------------------------------------------------------------------------
 # Windows 外壳图标
@@ -294,6 +297,16 @@ class DirectoryTree(wx.TreeCtrl):
         #: `_refresh_item` / `TreeWalker`），而每问一次都要扫一遍目录 ——
         #: `WinSxS`（19727 条）一次 40 ms，问六次就是 240 ms。
         self._too_big: set = set()
+        #: 分页列出的节点 —— 它现在显示了多少个**真实**子项；
+        #: 以及它末尾那行"还有 N 项未显示"的说明节点。
+        #:
+        #: 用户 2026-10-26 截图报的 bug：展开 `WinSxS` 花 2.7 秒建了 39697 个节点，
+        #: 紧接着节点上限触发整体重建 ⇒ 节点全删、界面变回空白。现在超大目录
+        #: **一次只放 `MAX_EXPAND_PAGE` 个**，收起再展开就接着放下一页。
+        self._capped_shown: dict = {}
+        self._marker_of: dict = {}
+        #: 所有"说明行"节点（它们**不是目录**，`path_of_node` 要返回空串）
+        self._markers: set = set()
         self._images = self._build_images()
         self.AssignImageList(self._images)
         #: 扩展名（小写）→ 图列表下标。**一个扩展名只取一次图标。**
@@ -397,6 +410,9 @@ class DirectoryTree(wx.TreeCtrl):
         self._populated.clear()
         self._revealed_chain = []
         self._too_big.clear()
+        self._capped_shown.clear()
+        self._marker_of.clear()
+        self._markers.clear()
         self._node_count = 0
         for drive in self._drives():
             # 标签用外壳给的名字（`SYSTEM (C:)`），路径反查由
@@ -483,32 +499,43 @@ class DirectoryTree(wx.TreeCtrl):
         # 能走到 `"dirs"` 的目录都是因为大，再问一次条目数只会白扫一遍。
         if state == "dirs" and files is not True:
             return
+        # **已经分页列过一部分**：只有"用户自己又展开了一次"才接着加载下一页。
+        # 程序态（导航）不动它 —— 它本来就没列完，去找子项会白扫一遍。
+        if state == "capped":
+            if files is True and self._quiet_expand_depth == 0:
+                self._append_page(item, self._entries_of(item))
+            return
 
         if self._quiet_expand_depth > 0 and item in self._too_big:
             return
         entries = self._entries_of(item)
-        # **程序态的第二道闸：这么大的目录这次干脆不展开。**
-        #
-        # `should_skip_files` 只挡住"文件多"的目录；`WinSxS` 那种是
-        # **子目录多**（19727 个），挡住文件也救不了 —— 建 19725 个子项 +
-        # 19725 个占位 = 近四万个节点、约 2.6 秒（65 µs/节点，实测）。
-        #
-        # ⚠️ **判据是"谁在调"，不是 `files`。** 踩过：`_refresh_item` 为了
-        # 找一个**最后一级**的子项，会带着 `files=True` 去填**父级**
-        # （`files=last` 那一行）—— 按 `files is None` 判断的话，
-        # 那个 2601 条目的父级照样被整棵建出来（实测 2604 个节点）。
-        # 程序态（`quiet_expand_depth > 0`）一律不许建这么大的层级；
-        # 用户自己点开时（`files=True` 且不在程序态）才全量 ——
-        # 那是他自己选的动作，他知道在等什么。
-        if self._quiet_expand_depth > 0 and too_many_to_expand(len(entries)):
-            # **记住这个结论**：一次导航里同一个节点会被问好几次
-            # （`expand_to` / `_on_expanding` / `_refresh_item` / `TreeWalker`），
-            # 而每问一次就要扫一遍目录 —— `WinSxS` 一次 40 ms，问六次就是 240 ms。
-            # 实测 A/B：加了这条备忘，同一次导航 308 → 90 ms。
-            self._too_big.add(item)
+        if too_many_to_expand(len(entries)):
+            if self._quiet_expand_depth > 0:
+                # **程序态：这么大的目录这次干脆不展开。**
+                #
+                # `should_skip_files` 只挡住"文件多"的目录；`WinSxS` 那种是
+                # **子目录多**（19727 个），挡住文件也救不了 —— 建 19725 个子项 +
+                # 19725 个占位 = 近四万个节点、约 2.6 秒（65 µs/节点，实测）。
+                #
+                # ⚠️ **判据是"谁在调"，不是 `files`。** 踩过：`_refresh_item`
+                # 为了找一个**最后一级**的子项，会带着 `files=True` 去填**父级**
+                # （`files=last` 那一行）—— 按 `files is None` 判断的话，
+                # 那个 2601 条目的父级照样被整棵建出来（实测 2604 个节点）。
+                #
+                # **记住这个结论**：一次导航里同一个节点会被问好几次
+                # （`expand_to` / `_on_expanding` / `_refresh_item` / `TreeWalker`），
+                # 每问一次就要扫一遍目录 —— `WinSxS` 一次 40 ms，问六次就是 240 ms。
+                # 实测 A/B：加了这条备忘，同一次导航 308 → 90 ms。
+                self._too_big.add(item)
+                return
+            # **用户自己点开的：分页给出一部分**，而不是"几秒空白"。
+            #
+            # 用户 2026-10-26 截图：展开 `WinSxS` 卡 5~6 秒后**什么都看不到**
+            # （2.7 秒建出来的 39697 个节点，紧接着被"节点上限"整体重建删光了）。
+            self._too_big.discard(item)
+            self._build_children(item, entries, True, page=MAX_EXPAND_PAGE)
             return
         if self._quiet_expand_depth == 0:
-            # 用户自己展开了：这个结论作废（他愿意等）
             self._too_big.discard(item)
         if files is None:
             files = not should_skip_files(len(entries))
@@ -541,13 +568,18 @@ class DirectoryTree(wx.TreeCtrl):
             print(f"[dir_tree] 展开目录失败：{where}（{error!r}）",
                   file=sys.stderr)
 
-    def _build_children(self, item, entries, files: bool) -> None:
+    def _build_children(self, item, entries, files: bool,
+                        page: int | None = None) -> None:
         """**第一次**建某个节点的子项。这时可以有占位子项，可以整体删掉。
 
         `DeleteChildren(item)` 在这里是安全的：能走到这儿说明
         `self._populated` 里没有它，它的子项只可能是 `_add_placeholder`
         放的那个空占位项 —— **没有任何调用方持有它**
         （`expand_to` 按名字找子项，空名字永远匹配不上）。
+
+        :param page: 只放前 `page` 个子项，并在末尾加一行"还有 N 项未显示"。
+            只用于**用户手动展开超大目录**（见 `MAX_EXPAND_PAGE`）：
+            一次建完整 19727 个要 2.7 秒，而且树立刻就到了关闭要十几秒的量级。
         """
         # **批量插节点必须冻结重绘。**
         #
@@ -556,11 +588,12 @@ class DirectoryTree(wx.TreeCtrl):
         # 约 1.4 ms/节点 —— 一半以上花在重复布局上。
         # `Freeze`/`Thaw` 是 wx 给"批量修改"准备的标准接口，
         # `reveal_in_tree` 那边本来就用了，**只有展开事件这条路漏了**。
+        shown = entries if page is None else entries[:page]
         self.Freeze()
         try:
             self.DeleteChildren(item)
             added = 0
-            for name, is_dir in entries:
+            for name, is_dir in shown:
                 # **文件和文件夹都要列**（用户："只展示文件夹……会很困惑"），
                 # 只有"大目录的自动档"才跳过文件。
                 if not is_dir and not files:
@@ -595,11 +628,88 @@ class DirectoryTree(wx.TreeCtrl):
             #
             # 这与本项目另一条教训同型：**先记账、后干活 ⇒ 账本一旦脏了，
             # 就永远不再重试**（`_apply_selection_highlight` 那次也是）。
-            self._populated[item] = "full" if files else "dirs"
+            if len(shown) < len(entries):
+                self._capped_shown[item] = len(shown)
+                self._add_marker(item, len(entries) - len(shown))
+                added += 1
+                self._populated[item] = "capped"
+            else:
+                self._populated[item] = "full" if files else "dirs"
             # **节点数也要在"真的建完"之后才加**（同上：先记账后干活会脏）
             self._node_count += added
         except Exception as error:
             self._report_expand_error(item, error)
+        finally:
+            self.Thaw()
+
+    def _marker_label(self, remaining: int) -> str:
+        """末尾那行"还有 N 项未显示"。双语跟着界面语言走。"""
+        return L(f"…（还有 {remaining} 项未显示，收起再展开可继续）",
+                 f"… ({remaining} more not shown; collapse and expand again)")
+
+    def _add_marker(self, item, remaining: int) -> None:
+        """给分页列出的节点加一行说明（它**不是目录**，见 `path_of_node` 的守卫）。"""
+        old = self._marker_of.get(item)
+        if old is not None:
+            self._drop_marker(item)
+            try:
+                if old.IsOk():
+                    self.Delete(old)          # 只删这一行说明，不碰真实子项
+                    self._node_count -= 1
+            except Exception:
+                pass
+        marker = self.AppendItem(item, self._marker_label(remaining), -1)
+        self._marker_of[item] = marker
+        self._markers.add(marker)
+
+    def _drop_marker(self, item) -> None:
+        """把某个节点记着的"说明行"摘掉（不删节点，只清记账）。"""
+        old = self._marker_of.pop(item, None)
+        if old is not None:
+            self._markers.discard(old)
+
+    def _append_page(self, item, entries) -> None:
+        """用户又展开了一次超大目录：**接着放下一页**（只追加，不重建）。
+
+        用户 2026-10-26 报的问题就是"看不到内容" —— 现在的规则是
+        **收起再展开就再放 `MAX_EXPAND_PAGE` 个**，一行一行往下翻，
+        不会出现"等 2.7 秒然后什么都没有"。
+        """
+        already = self._capped_shown.get(item, 0)
+        count = next_page_count(already, len(entries))
+        if not count:
+            return
+        # 先摘掉旧的说明行（它只是个提示，没人持有；删它不碰真实子项）
+        old_marker = self._marker_of.get(item)
+        if old_marker is not None:
+            self._drop_marker(item)
+            try:
+                if old_marker.IsOk():
+                    self.Delete(old_marker)
+                    self._node_count -= 1
+            except Exception:
+                pass
+        self.Freeze()
+        try:
+            added = 0
+            for name, is_dir in entries[already:already + count]:
+                child = self.AppendItem(item, name, self._icon_for(name, is_dir))
+                added += 1
+                if is_dir:
+                    self._add_placeholder(child)
+                    added += 1
+            self._capped_shown[item] = already + count
+            remaining = len(entries) - (already + count)
+            if remaining > 0:
+                self._add_marker(item, remaining)
+                added += 1
+                self._populated[item] = "capped"
+            else:
+                self._populated[item] = "full"
+            self._node_count += added
+        except Exception as error:
+            # **保留记账**：子节点已经进去了，重建才是危险操作
+            self._report_expand_error(item, error, keep_state=True)
         finally:
             self.Thaw()
 
@@ -673,7 +783,14 @@ class DirectoryTree(wx.TreeCtrl):
         （`too_many_to_expand`）会在这里被绕过去 —— 找不到子项就重扫，
         重扫就把四万个节点全建出来。所以**中间层仍然走 `files=None`**，
         只有最后一级（用户目标）才允许全量。
+
+        ## ⚠️ 分页列过的节点（`"capped"`）不能走 `_append_missing`
+
+        `_append_missing` 会把**所有缺的都补上** —— 对 `WinSxS` 就是一口气
+        补上 19000 个，正好是分页想避免的事。
         """
+        if self._populated.get(item) == "capped":
+            return
         if item not in self._populated:
             self._populate_item(item, files=files if files is True else None)
             return
@@ -807,6 +924,12 @@ class DirectoryTree(wx.TreeCtrl):
         之外的任何东西。
         """
         if not item.IsOk() or item == self._root:
+            return ""
+        # **"还有 N 项未显示"那一行不是目录**（`_add_marker` 放的）。
+        #
+        # 与占位子项同理：它的文本是说明，沿父链拼出来的只会是**父目录的路径** ——
+        # 一个"看起来有值"的假路径，兜底逻辑会把它当成真节点。
+        if item in self._markers:
             return ""
         parts = []
         node = item
@@ -969,6 +1092,47 @@ class DirectoryTree(wx.TreeCtrl):
                 pass
         self._revealed_chain = []
 
+    def focus_chain(self, item) -> None:
+        """把用户选中的节点那一链当成"当前路径"，其余由程序展开过的链收起来。
+
+        ## 为什么需要它（用户 2026-10-26 报）
+
+        > "用户在浏览导航窗格时，选中路径，然后点击「打开」按钮来打开对应的文件夹。
+        >  在这个操作过程中，它没有把以前在导航窗格上浏览的那些路径收起来。"
+
+        地址栏回车会收起旧链（`expand_to` → `_collapse_revealed_chain`），
+        但「打开」不走 `expand_to`，所以那条路一直是"只增不减"。
+        **两条路要表现一致**，否则用户会觉得规则时灵时不灵。
+
+        ⚠️ 只收起**由程序展开过的**链；用户自己点开的分支不动 ——
+        否则"选中一个在工作目录里、点打开"会把自己刚才展开的东西收掉。
+        """
+        if not item.IsOk():
+            return
+        ancestors = []
+        node = item
+        while node.IsOk() and node != self._root:
+            ancestors.append(node)
+            node = self.GetItemParent(node)
+        keep = set(ancestors)
+        for old in self._revealed_chain:
+            try:
+                if old in keep or not old.IsOk():
+                    continue
+                if self.IsExpanded(old):
+                    self.Collapse(old)
+            except Exception:
+                pass
+        # 链上从盘符到选中项**都必须是展开的**，否则"选中"的那一行根本看不见
+        for node in reversed(ancestors):
+            try:
+                if not self.IsExpanded(node):
+                    self.Expand(node)
+            except Exception:
+                pass
+        # 下一次导航（地址栏回车）就以这条链为"旧链"收起来
+        self._revealed_chain = list(reversed(ancestors))
+
     @property
     def node_count(self) -> int:
         """当前树里由本类建出来的节点数（自己记账，**不是** O(N) 数一遍）。"""
@@ -982,6 +1146,14 @@ class DirectoryTree(wx.TreeCtrl):
         那会把调用方手里的 item 一起删掉。
         """
         return needs_trim(self._node_count)
+
+    def needs_hard_trim(self) -> bool:
+        """手动展开之后用的那道**更高**的上限（见 `MAX_TREE_NODES_HARD`）。
+
+        为什么手动展开用另一道线：用户刚点开的目录不能立刻被拆掉 ——
+        那正是 2026-10-26 那张截图（展开 `WinSxS` 后一片空白）。
+        """
+        return needs_hard_trim(self._node_count)
 
     def _child_by_name(self, parent, name: str):
         """在 `parent` 的直接子项里按名字找一个；找不到返回 `None`。

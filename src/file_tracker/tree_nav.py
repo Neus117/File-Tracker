@@ -128,9 +128,46 @@ def too_many_to_expand(entry_count: int,
 #: 4000 这一档对应"关闭约 200–350 ms"，与刚启动时没有可感差别。
 MAX_TREE_NODES = 4000
 
+#: **手动展开**时触发重建的上限（比 `MAX_TREE_NODES` 高很多）。
+#:
+#: 为什么两个上限：`MAX_TREE_NODES` 是"程序导航结束后顺手清一次"，
+#: 而用户在树里自己点开的目录**不能刚点完就被拆掉** —— 那正是用户
+#: 2026-10-26 截图报的 bug：展开 `WinSxS` 花 2.7 秒建了 39697 个节点，
+#: 紧接着"上限"触发整体重建，节点全删、界面变回空白。
+#:
+#: 现在手动展开每个节点最多只建 `MAX_EXPAND_PAGE` 个（见下），所以要到这个
+#: 硬上限需要连着手动展开六七个巨目录 —— 那时树已经不好用了，重建它反而对。
+MAX_TREE_NODES_HARD = 12000
+
+#: 用户自己点开一个超大目录时，**一次最多列这么多子项**（还有更多，会显示一行说明）。
+#:
+#: 实测成本：一个节点约 65 µs，加占位子项翻倍。800 个 ≈ 1600 节点 ≈ **100 ms**；
+#: 而 `WinSxS` 全部 19727 个要 **2.7 秒**（且树一下就废了）。
+MAX_EXPAND_PAGE = 800
+
+
+def next_page_count(already: int, total: int,
+                    page: int = MAX_EXPAND_PAGE) -> int:
+    """分页加载时，这一轮还该再放进去多少个子项。
+
+    :param already: 已经放到树里的子项数
+    :param total: 这个目录一共有多少条目
+    :param page: 每页多少条
+    :return: 本次应新增的条数（0 表示已经没有更多了）
+    """
+    if total <= already:
+        return 0
+    return min(page, total - already)
+
 
 def needs_trim(node_count: int, limit: int = MAX_TREE_NODES) -> bool:
     """节点数是不是超过上限了（超过就该重建，只保留当前路径）。"""
+    return node_count > limit
+
+
+def needs_hard_trim(node_count: int,
+                    limit: int = MAX_TREE_NODES_HARD) -> bool:
+    """手动展开之后用的那道更高的上限（见 `MAX_TREE_NODES_HARD` 的说明）。"""
     return node_count > limit
 
 

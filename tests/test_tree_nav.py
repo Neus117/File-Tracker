@@ -575,3 +575,51 @@ def test_programmatic_limits_are_in_sane_ranges():
     assert 1000 <= tree_nav.MAX_TREE_NODES <= 20000
     # 上限必须大于"跳文件"的那条线，否则小目录也会被整棵拒掉
     assert tree_nav.MAX_TREE_NODES > tree_nav.DIRS_ONLY_ENTRY_THRESHOLD
+
+
+# --------------------------------------------------------------------------
+# 用户手动展开超大目录：**分页**（2026-10-26）
+# --------------------------------------------------------------------------
+#
+# 用户截图报的 bug：展开 `WinSxS` 卡 5~6 秒后**什么都看不到**
+# （2.7 秒建出来的 39697 个节点，紧接着被"节点上限"整体重建删光了）。
+
+
+def test_next_page_count_first_page():
+    page = tree_nav.MAX_EXPAND_PAGE
+    assert tree_nav.next_page_count(0, 100) == 100          # 一页装得下
+    assert tree_nav.next_page_count(0, 10000) == page       # 装不下，先给一页
+
+
+def test_next_page_count_keeps_growing_until_done():
+    page = tree_nav.MAX_EXPAND_PAGE
+    total = page + 10
+    assert tree_nav.next_page_count(page, total) == 10      # 最后一页只剩 10
+    assert tree_nav.next_page_count(total, total) == 0      # 已经全了
+    assert tree_nav.next_page_count(total + 5, total) == 0  # 越界也不会返回负数
+
+
+def test_next_page_count_never_exceeds_the_page():
+    page = tree_nav.MAX_EXPAND_PAGE
+    for already in (0, page // 2, page, page * 3):
+        assert tree_nav.next_page_count(already, 10 ** 6) <= page
+
+
+def test_needs_hard_trim_is_higher_than_navigation_trim():
+    """手动展开那道线必须**高于**导航那道线。
+
+    低了的话，用户刚点开的目录会立刻被整体重建拆掉 —— 那正是 2026-10-26
+    那张截图：展开 `WinSxS` 后一片空白。
+    """
+    assert tree_nav.MAX_TREE_NODES_HARD > tree_nav.MAX_TREE_NODES
+    assert tree_nav.needs_hard_trim(tree_nav.MAX_TREE_NODES) is False
+    assert tree_nav.needs_hard_trim(tree_nav.MAX_TREE_NODES_HARD + 1) is True
+
+
+def test_page_size_is_small_enough_to_be_fast():
+    """一页必须"点开就有"，不能又要等几秒。
+
+    实测一个节点约 65 µs（含占位子项翻倍），所以 800 个 ≈ 1600 节点 ≈ 100 ms。
+    这里只守卫量级：一页不许超过 2000（否则就是几千毫秒）。
+    """
+    assert 100 <= tree_nav.MAX_EXPAND_PAGE <= 2000

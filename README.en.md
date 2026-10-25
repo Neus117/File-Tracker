@@ -85,7 +85,7 @@ v1.1.0 shipped on 2024-10-14; v1.4.1 on 2026-10-25. **More features, smaller dow
 | Settings dialog | None | **Yes** (language / theme / sort key / sort direction, all icon buttons) |
 | Dark theme | Some controls ignored it | **All custom-drawn controls follow it** |
 | Address bar + Enter | Did not open Explorer | **Actually opens it** |
-| Automated tests | **0** (and the test file imported two names that did not exist) | **207 unit tests + 234 GUI checks** |
+| Automated tests | **0** (and the test file imported two names that did not exist) | **212 unit tests + 244 GUI checks** |
 | Build pipeline | **None** (no `.spec`, no script, no CI) | `build.ps1` + 4 build checks + 9 gates in CI |
 | Binary reports its version | No | **Yes** (name / version / commit) |
 | Version info in file properties | Nearly blank | **All five fields filled** |
@@ -125,11 +125,13 @@ v1.1.0 shipped on 2024-10-14; v1.4.1 on 2026-10-25. **More features, smaller dow
 from getting slower:
 
 1. **The folder you navigate to must be complete** — but the program will not expand a
-   folder with **more than 2500 entries** for you. `C:\Windows\WinSxS` has 19727
-   subfolders and takes **2.6 s** to expand; the tree stops at its parent and builds
-   the whole thing only when **you** click to expand it.
+   folder with **more than 2500 entries** for you: `C:\Windows\WinSxS` has 19727
+   subfolders and takes **2.7 s** to expand. When **you** expand it, **800 are shown
+   at a time** and the last row says how many are left — **collapse and expand again**
+   to load the next page (about 0.1 s each).
 2. **Navigating somewhere new collapses the previous path** — only the current path
    stays expanded. It used to stay expanded forever, so nodes piled up over hours.
+   **Opening with the Open button counts too** (the old path collapses as well).
 3. **The tree is rebuilt once it exceeds 4000 nodes** (still keeping only the current
    path). Closing time grows **super-linearly** with node count: measured 6295 nodes
    → **0.35 s**, 45746 nodes → **11 s**.
@@ -256,7 +258,7 @@ powershell -File tools/verify_gui.ps1
 
 | Checker | What it catches |
 |---|---|
-| `pytest` | 207 unit tests, no GUI required |
+| `pytest` | 212 unit tests, no GUI required |
 | `check_wiring.py` | Things that are defined but never read |
 | `check_dialogs.py` | Dialogs given two buttons whose return value is ignored (users once reported "both buttons do the same thing") |
 | `check_duplicate_methods.py` | A method defined twice — Python silently keeps the last one, so **editing the first has no effect** |

@@ -2292,7 +2292,7 @@ class FileTracker(wx.Frame):
         就是这么来的（节点只增不减）。
         """
         event.Skip()
-        if self._trim_pending or not self.dir_ctrl.needs_trim():
+        if self._trim_pending or not self.dir_ctrl.needs_hard_trim():
             return
         self._trim_pending = True
         self._call_after(self._run_scheduled_trim)
@@ -2300,7 +2300,7 @@ class FileTracker(wx.Frame):
     def _run_scheduled_trim(self) -> None:
         """`on_tree_expanded` 排下的那次重建（回调里再确认一遍条件）。"""
         self._trim_pending = False
-        if self.dir_ctrl.needs_trim():
+        if self.dir_ctrl.needs_hard_trim():
             self._trim_tree()
 
     def _reveal_by_ancestor(self, tree, folder: str):
@@ -3932,6 +3932,13 @@ class FileTracker(wx.Frame):
         ⇒ 改成：**打开了才记**。打不开就如实告诉用户，
         并且**不**记这一次访问（没到达的地方不该算访问过）。
         """
+        # 「打开」的目标是不是**导航窗格**给出来的 —— 决定"要不要收起旧链"。
+        #
+        # 用户 2026-10-26："用户在浏览导航窗格时，选中路径，然后点击「打开」
+        # 按钮来打开对应的文件夹。在这个操作过程中，它没有把以前在导航窗格上
+        # 浏览的那些路径收起来。" ⇒ 与地址栏回车保持同一套规则。
+        tree_supplied = (self._focus_pane != "list"
+                         and bool([p for p in self.dir_ctrl.GetPaths() if p]))
         for path in self.open_targets():
             if not os.path.exists(path):
                 # **先问用户**，不再直接删（见 confirm_remove_invalid_path）
@@ -3945,6 +3952,9 @@ class FileTracker(wx.Frame):
                       f"或该位置已不可用）",
                       f"Could not open: {path} (Explorer refused the request, "
                       f"or the location is unavailable)"))
+        if tree_supplied:
+            # 把用户选中的那一项当成"当前路径"，其余由程序展开过的链收起来
+            self.dir_ctrl.focus_chain(self.dir_ctrl.GetTreeCtrl().GetSelection())
         self._call_later(100, self.reset_dir_ctrl_scroll)
 
     def open_folder(self, path: str) -> bool:
