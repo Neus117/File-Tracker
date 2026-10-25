@@ -54,11 +54,11 @@
 
 | | |
 |---|---|
-| **Download** | Get `File.Tracker_v1.4.2.exe` from [Releases](https://github.com/Neus117/File-Tracker/releases/latest) and run it — portable, no installation |
+| **Download** | Get `File.Tracker_v1.4.3.exe` from [Releases](https://github.com/Neus117/File-Tracker/releases/latest) and run it — portable, no installation |
 | **Database** | On first launch it creates `file_tracker.db` under `C:\Users\<you>\` (named `file_access.db` back in v1.0) |
 | **Run at startup** | Press `Win+R`, type `shell:startup`, press Enter, and drop a shortcut into the folder that opens |
 | **Uninstall** | Delete the exe and `file_tracker.db` |
-| **Check the version** | `File.Tracker_v1.4.2.exe --version` prints something like `File Tracker 1.4.2+9454e28` — the part after `+` is the commit it was built from |
+| **Check the version** | `File.Tracker_v1.4.3.exe --version` prints something like `File Tracker 1.4.3+@REV@` — the part after `+` is the commit it was built from |
 | **Multi-select** (since v1.3.3) | Hold **Ctrl** and click to pick several rows, or **hold the left button and drag** across a range; **Shift**-click selects a run. With several rows selected, the context menu keeps only "Open N items" and "Delete N items" |
 
 > **About the asset name**: from v1.2.0 onward it is uniformly
@@ -74,9 +74,9 @@
 
 ## Compared with v1.1.0
 
-v1.1.0 shipped on 2024-10-14; v1.4.2 on 2026-10-26. **More features, smaller download.**
+v1.1.0 shipped on 2024-10-14; v1.4.3 on 2026-10-26. **More features, smaller download.**
 
-| | v1.1.0 | **v1.4.2** |
+| | v1.1.0 | **v1.4.3** |
 |---|---|---|
 | Size | 15.76 MB | **12.73 MB** |
 | UI language | Chinese only | **Chinese/English, switchable** |
@@ -89,6 +89,24 @@ v1.1.0 shipped on 2024-10-14; v1.4.2 on 2026-10-26. **More features, smaller dow
 | Build pipeline | **None** (no `.spec`, no script, no CI) | `build.ps1` + 4 build checks + 9 gates in CI |
 | Binary reports its version | No | **Yes** (name / version / commit) |
 | Version info in file properties | Nearly blank | **All five fields filled** |
+
+### What v1.4.3 is about — one thing: the dialog body layout
+
+**The same dialog used to look right with one line and wrong with several.**
+In a multi-paragraph message the warning badge floated to the left of the text
+block while the first (shortest) line sat in the middle of the column, leaving a
+wide gap between icon and text.
+
+There is now one rule that does not depend on the text:
+
+- "badge + gap + the widest line" is centred **as a group**;
+- **every line inside the group shares one left edge** — no per-line centring;
+- the badge is centred on the **first line** and hugs the text column;
+- **no blank line between paragraphs** — only line spacing, so the dialog got
+  shorter (the missing-path one went from 529×356 to 529×296).
+
+A single-line dialog renders **byte-identical** before and after (same bitmap
+sha256).
 
 ### What v1.4.2 is about — four things
 
