@@ -194,6 +194,15 @@ class FileTracker(wx.Frame):
         super().__init__(parent=None, title=APP_NAME, style=style)
         self.SetName("FileTrackerFrame")
 
+        # **必须一开始就有值**：`dir_ctrl.populate(expand_path=...)` 会同步派发
+        # `EVT_TREE_ITEM_EXPANDED`，那时 `on_tree_expanded` 已经会被调用 ——
+        # 而 `__init__` 里那些标志位要到很下面才赋值。
+        # 实测（2026-10-25）：放在下面 ⇒ 启动时立刻
+        # `AttributeError: 'FileTracker' object has no attribute '_trim_pending'`，
+        # 而**它被 wx 的事件处理器吞掉了**（只在 stderr 一行），
+        # 门禁照样全绿 —— 这类"看不见的异常"只能靠"把 stderr 一起看"发现。
+        self._trim_pending = False
+
         # 先按**系统**取一次：下面马上要用它设窗口底色，
         # 而 `config` 要再往下才建出来。
         #
@@ -671,8 +680,6 @@ class FileTracker(wx.Frame):
         self._focus_pane = "tree"
         # 关闭时用来停掉挂起回调（见 `on_close` / `_call_later`）
         self._closing = False
-        # `on_tree_expanded` 排下的"重建目录树"是否已经在路上（去重）
-        self._trim_pending = False
         self._pending_timers: list = []
         # 点了列表（含点已选中的那一行，此时 `ITEM_SELECTED` 不发）
         for list_event in (wx.EVT_LIST_ITEM_SELECTED, wx.EVT_SET_FOCUS):
