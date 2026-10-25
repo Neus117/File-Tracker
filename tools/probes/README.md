@@ -302,7 +302,8 @@ cd "D:\Coding\MyGitHub\File-Tracker"
 |---|---|
 | `probe_dir_tree.py` | 改 `dir_tree.DirectoryTree` 之前（图标尺寸、盘符、`GetPath`） |
 | `probe_tree_paths.py` | 怀疑**盘符解析错了**（`C:` vs `C:\\` 那类） |
-| `probe_tree_perf.py` | 改 `_children_of` / `_populate_item` 之前**先量基线** |
+| `probe_tree_perf.py` | 改 `_entries_of` / `_populate_item` 之前**先量基线** |
+| `probe_pathbar_populate.py` | **地址栏回车慢 / 关程序慢** —— 把 `_populate_item` 的每一次调用都列出来（谁调的、哪个目录、建了几个节点、几个是文件、各花多久），并按"同步"和"事件循环"两段分开计时 |
 | `probe_lazy_expand.py` | 核树是不是懒加载的 |
 | `probe_tree_labels.py` | 核驱动器节点的标签（`SYSTEM (C:)` 那种） |
 | `probe_tree_frame.py` / `probe_tree_scrollbar.py` / `probe_tree_blank.py` | 核容器底色 / 滚动条 / 空白区 |

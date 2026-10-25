@@ -75,7 +75,7 @@ with probe_temp("probe-tree-files") as scratch:
           f"root = …{root[-30:]}")
 
     if item is not None:
-        tree._populated.discard(item)
+        tree._populated.pop(item, None)
         tree._populate_item(item)
         settle()
 

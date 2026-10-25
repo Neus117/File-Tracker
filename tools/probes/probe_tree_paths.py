@@ -63,7 +63,7 @@ for item in tree.iter_top():
             print(f'      实际子目录前 6  → {names}')
         except OSError as error:
             print(f'      listdir 失败    → {error}')
-    print(f'      _children_of    → {tree._children_of(item)[:6]}')
+    print(f'      _entries_of    → {tree._entries_of(item)[:6]}')
     print()
 
 # 展开一个盘，看子节点有没有占位（决定能不能再展开）

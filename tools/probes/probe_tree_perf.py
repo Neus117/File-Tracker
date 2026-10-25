@@ -2,7 +2,7 @@
 
 ## 为什么要量
 
-`_children_of` 现在每个条目要调**三次系统调用**：
+`_entries_of` 现在每个条目要调**三次系统调用**：
 
 ```python
 os.listdir(path)                  # 1 次
@@ -68,7 +68,7 @@ for target in TARGETS:
     #
     # 第一版没摘， 直接早退（已经填过），
     # 量出来是 0 ms —— **量了个空操作**，差点据此认为没有性能问题。
-    tree._populated.discard(item)
+    tree._populated.pop(item, None)
     started = time.perf_counter()
     tree._populate_item(item)
     elapsed = time.perf_counter() - started

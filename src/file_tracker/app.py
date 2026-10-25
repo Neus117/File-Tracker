@@ -2167,53 +2167,67 @@ class FileTracker(wx.Frame):
         """展开目录树到 ``folder`` 并选中它。
 
         :return: 是否在树里找到了对应节点（找不到时已尽力展开并给出兜底选择）
+
+        ## ⚠️ 整段都包在 `quiet_expand()` 里（2026-10-25）
+
+        `wx.TreeCtrl.Expand()` 会**同步**回调 `EVT_TREE_ITEM_EXPANDING`
+        （`DirectoryTree._on_expanding`），而那个回调默认要把子项
+        **连文件一起**建出来。沿路径展开一个像 ``C:\\Windows\\System32``
+        那样的目录（4907 个条目、4708 个文件、192 ms）就是这么来的 ——
+        而它只是为了把下面三级的 ``etc`` 显示出来。
+
+        `quiet_expand()` 让这一整段里的展开都算"程序发起的"，
+        于是大目录只建子文件夹（见 `tree_nav.DIRS_ONLY_ENTRY_THRESHOLD`）。
+        **不要只包 `expand_to`**：下面 `tree.Expand(item)` 和 `TreeWalker`
+        里那几处 `Expand` 是同一个机制（`Expand` 一被调用就同步回调）。
         """
         tree = self.dir_ctrl.GetTreeCtrl()
         names = (plan or build_walk_plan(folder, self.last_directory))["names"]
 
         self.dir_ctrl.Freeze()
         try:
-            # **先试"沿路径展开"这条路。**
-            #
-            # 本树是懒加载的，深层节点在展开之前根本不存在 ——
-            # 只靠下面的 `TreeWalker`（`GenericDirCtrl` 时代写的、
-            # 假设树是 eager 的）会**半路停下**（实测只到 `C:\\Users`）。
-            item = None
-            if hasattr(self.dir_ctrl, "expand_to"):
-                item = self.dir_ctrl.expand_to(folder, select=False)
-            walker = TreeWalker(tree)
-            if item is None:
-                item = walker.find_by_names(names)
-            if item is not None and not item.IsOk():
+            with self.dir_ctrl.quiet_expand():
+                # **先试"沿路径展开"这条路。**
+                #
+                # 本树是懒加载的，深层节点在展开之前根本不存在 ——
+                # 只靠下面的 `TreeWalker`（`GenericDirCtrl` 时代写的、
+                # 假设树是 eager 的）会**半路停下**（实测只到 `C:\\Users`）。
                 item = None
+                if hasattr(self.dir_ctrl, "expand_to"):
+                    item = self.dir_ctrl.expand_to(folder, select=False)
+                walker = TreeWalker(tree)
+                if item is None:
+                    item = walker.find_by_names(names)
+                if item is not None and not item.IsOk():
+                    item = None
 
-            if item is None:
-                # 逐级匹配失败：可能树的层级与盘符假设不一致。
-                # 在已展开部分按完整路径兜底扫描一次。
-                item = walker.bfs_find_by_path(folder, self.dir_ctrl.GetPath)
+                if item is None:
+                    # 逐级匹配失败：可能树的层级与盘符假设不一致。
+                    # 在已展开部分按完整路径兜底扫描一次。
+                    item = walker.bfs_find_by_path(folder, self.dir_ctrl.GetPath)
 
-            if item is None:
-                item = self._reveal_by_ancestor(tree, folder)
+                if item is None:
+                    item = self._reveal_by_ancestor(tree, folder)
 
-            if item is None or not item.IsOk():
-                return False
+                if item is None or not item.IsOk():
+                    return False
 
-            tree.Expand(item)
-            # **必须先 UnselectAll。** 目录树带了 wx.DIRCTRL_MULTIPLE，
-            # 是**多选**控件，而 SelectItem 在多选树上是"追加"而不是"替换"：
-            # 不清空的话，树里原有选中项（通常是当前盘符）会一直留着，
-            # 于是"导航到某路径"之后有两项同时高亮。
-            # 实测见 `tools/probes/probe_multiselect.py` 场景 C。
-            tree.UnselectAll()
-            # 这一次选中是**程序改的**，不是用户点的。
-            # 它不再需要任何"闸门"：`_focus_pane` 只由**用户输入事件**
-            # （`EVT_SET_FOCUS` / `EVT_TREE_KEY_DOWN`）改写，而
-            # `SelectItem()` 一个都触发不了。完整理由见
-            # `on_tree_selection_made`。
-            tree.SelectItem(item)
-            tree.EnsureVisible(item)
-            tree.Refresh()
-            return True
+                tree.Expand(item)
+                # **必须先 UnselectAll。** 目录树带了 wx.DIRCTRL_MULTIPLE，
+                # 是**多选**控件，而 SelectItem 在多选树上是"追加"而不是"替换"：
+                # 不清空的话，树里原有选中项（通常是当前盘符）会一直留着，
+                # 于是"导航到某路径"之后有两项同时高亮。
+                # 实测见 `tools/probes/probe_multiselect.py` 场景 C。
+                tree.UnselectAll()
+                # 这一次选中是**程序改的**，不是用户点的。
+                # 它不再需要任何"闸门"：`_focus_pane` 只由**用户输入事件**
+                # （`EVT_SET_FOCUS` / `EVT_TREE_KEY_DOWN`）改写，而
+                # `SelectItem()` 一个都触发不了。完整理由见
+                # `on_tree_selection_made`。
+                tree.SelectItem(item)
+                tree.EnsureVisible(item)
+                tree.Refresh()
+                return True
         finally:
             self.dir_ctrl.Thaw()
 

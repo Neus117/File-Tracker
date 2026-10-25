@@ -479,3 +479,41 @@ def test_build_walk_plan_reports_missing_without_touching_disk():
     )
     assert plan["status"] == "missing"
     assert "Z:\\gone" in plan["hint"]
+
+
+# --------------------------------------------------------------------------
+# 沿路径展开时"要不要建文件子项"
+# --------------------------------------------------------------------------
+#
+# 2026-10-25：用户报"地址栏回车非常慢、关程序也慢"。实测
+# `C:\Windows\System32` 一个目录就有 4907 个条目（4708 个文件），
+# 而它只是为了把下面三级的 `etc` 显示出来。
+#
+# 这里的判据是**纯函数**（不碰 wx、不碰文件系统），因为"哪一档算大"
+# 是策略而不是实现——改错了会同时让两边（`dir_tree` 与测试）漂移。
+
+
+def test_should_skip_files_only_for_big_directories():
+    """**等于分界值不算超**：`>` 而不是 `>=`。"""
+    threshold = tree_nav.DIRS_ONLY_ENTRY_THRESHOLD
+    assert tree_nav.should_skip_files(0) is False
+    assert tree_nav.should_skip_files(threshold - 1) is False
+    assert tree_nav.should_skip_files(threshold) is False
+    assert tree_nav.should_skip_files(threshold + 1) is True
+
+
+def test_should_skip_files_threshold_is_in_a_sane_range():
+    """分界值本身的**量级**要有守卫。
+
+    单个树节点约 20–40 µs（实测）。太小 ⇒ 小目录也被剥掉文件，
+    用户会看到"这里怎么没有文件"；太大 ⇒ 又回到"一个目录 192 ms"。
+
+    **不锚定具体数字**：只要求落在 100~2000 之间，
+    允许以后按新测量调整，但不允许调成 0 或 100000。
+    """
+    assert 100 <= tree_nav.DIRS_ONLY_ENTRY_THRESHOLD <= 2000
+
+
+def test_should_skip_files_explicit_threshold():
+    assert tree_nav.should_skip_files(10, threshold=5) is True
+    assert tree_nav.should_skip_files(5, threshold=5) is False

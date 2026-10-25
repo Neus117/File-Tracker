@@ -38,6 +38,7 @@ from file_tracker import core as _core  # noqa: E402
 from file_tracker import core, win32  # noqa: E402
 from file_tracker import lang as _lang  # noqa: E402
 from file_tracker import theme as _theme  # noqa: E402
+from file_tracker import tree_nav  # noqa: E402
 from file_tracker import widgets as _widgets  # noqa: E402
 from file_tracker.store import PathStore  # noqa: E402
 
@@ -1118,6 +1119,161 @@ def main() -> int:
             frame.store.get(bogus) is None,
             f"bogus 路径没有被写进数据库；提示框被拦下 = {notified}",
         )
+
+        # ==============================================================
+        print()
+        print("=== 地址栏回车：路径上的大目录只建文件夹（2026-10-25）===")
+        # ==============================================================
+        # 用户原话（2026-10-25）：「从左侧导航窗格顶部的输入框键入路径后回车
+        # 打开文件夹，**非常慢非常卡**，有一次差点卡死。使用输入框打开文件夹后，
+        # **关闭程序也变得很缓慢、卡顿**。」
+        #
+        # 实测根因（`tools/probes/probe_pathbar_populate.py`，路径
+        # `C:\Windows\System32\drivers\etc`）：树节点 49 → 5838，
+        # 其中 `C:\Windows\System32` 一个目录就 4907 条（**4708 个文件**）、
+        # 192 ms —— 而它只是为了把下面三级的 `etc` 显示出来。
+        #
+        # 修法：条目超过 `tree_nav.DIRS_ONLY_ENTRY_THRESHOLD` 的**祖先**
+        # 只建子文件夹；用户点开它时才**追加**文件（绝不 `DeleteChildren`）。
+        # **目标目录（用户输入的那个）永远全量。**
+        #
+        # ⚠️ **这一段就是判据本身。** 把 `_on_expanding` 里的
+        # `files=True` 改成 `None`（或删掉 `quiet_expand`），下面
+        # "一个文件都没进树""补文件是追加"两条会立刻失败 ——
+        # 这就是"改前 / 改后能区分"的证据。
+        big_ancestor = os.path.join(scratch.name, "big-ancestor")
+        big_mid = os.path.join(big_ancestor, "mid")
+        big_target = os.path.join(big_mid, "the-target")
+        os.makedirs(big_target, exist_ok=True)
+        for index in range(400):
+            with open(os.path.join(big_ancestor, f"f-{index:03d}.txt"), "w"):
+                pass
+        for name in ("inner-1.txt", "inner-2.txt"):
+            with open(os.path.join(big_target, name), "w"):
+                pass
+        entries_now = len(os.listdir(big_ancestor))
+        check(
+            "阳性对照：造出来的祖先目录确实够大（否则下面测不到东西）",
+            entries_now > tree_nav.DIRS_ONLY_ENTRY_THRESHOLD,
+            f"{big_ancestor} 有 {entries_now} 个条目，阈值 = "
+            f"{tree_nav.DIRS_ONLY_ENTRY_THRESHOLD}",
+        )
+
+        tree = frame.dir_ctrl.GetTreeCtrl()
+
+        def child_names_of(parent) -> list[str]:
+            names = []
+            child, cookie = tree.GetFirstChild(parent)
+            while child.IsOk():
+                names.append(tree.GetItemText(child))
+                child, cookie = tree.GetNextChild(parent, cookie)
+            return names
+
+        # 走用户真实走的路：往输入框填路径，然后发回车事件
+        frame.path_bar.set_value(big_target)
+        frame.path_bar.text_ctrl.GetEventHandler().ProcessEvent(
+            wx.CommandEvent(wx.wxEVT_TEXT_ENTER, frame.path_bar.text_ctrl.GetId()),
+        )
+        for _ in range(20):
+            wx.YieldIfNeeded()
+            time.sleep(0.02)
+
+        target_item = None
+        for item in tree.GetSelections():
+            if item.IsOk() and core.paths_equal(frame.dir_ctrl.GetPath(item), big_target):
+                target_item = item
+                break
+        check(
+            "回车后目标被选中（下面几条都以它为参照）",
+            target_item is not None,
+            f"选中 = {[frame.dir_ctrl.GetPath(i) for i in tree.GetSelections() if i.IsOk()]!r}",
+        )
+
+        if target_item is None:
+            check("大目录只建文件夹", False, "目标没选中，后面的判据无法进行")
+        else:
+            mid_item = tree.GetItemParent(target_item)
+            ancestor_item = tree.GetItemParent(mid_item)
+            # 先确认"父链"取对了，别拿错节点当祖先
+            chain_ok = (tree.GetItemText(mid_item) == "mid"
+                        and tree.GetItemText(ancestor_item) == "big-ancestor")
+            check(
+                "阳性对照：从目标节点能沿父链拿到 mid / big-ancestor",
+                chain_ok,
+                f"目标 = {tree.GetItemText(target_item)!r}，父 = "
+                f"{tree.GetItemText(mid_item)!r}，祖父 = "
+                f"{tree.GetItemText(ancestor_item)!r}",
+            )
+
+            ancestor_children = child_names_of(ancestor_item)
+            noise = [n for n in ancestor_children if n.startswith("f-")]
+            check(
+                "祖先目录只建了**文件夹**：400 个文件一个都没进树",
+                not noise and "mid" in ancestor_children,
+                f"big-ancestor 的子项 {len(ancestor_children)} 个，"
+                f"其中 f-* = {len(noise)} 个，含 mid = {'mid' in ancestor_children}",
+            )
+
+            check(
+                "目标目录是**全量**（用户输入的那个文件夹必须完整）",
+                set(child_names_of(target_item)) == {"inner-1.txt", "inner-2.txt"},
+                f"the-target 的子项 = {child_names_of(target_item)!r}",
+            )
+
+            # **全树扫一遍**：任何地方都不该冒出 f-* 节点。
+            # 这一条防的是"还有第二处全量填充"（交接文档里那个没查清的线索）。
+            stack = []
+            root_item = tree.GetRootItem()
+            child, cookie = tree.GetFirstChild(root_item)
+            while child.IsOk():
+                stack.append(child)
+                child, cookie = tree.GetNextChild(root_item, cookie)
+            total_nodes = 0
+            while stack:
+                node = stack.pop()
+                total_nodes += 1
+                if tree.GetItemText(node).startswith("f-"):
+                    noise.append(tree.GetItemText(node))
+                child, cookie = tree.GetFirstChild(node)
+                while child.IsOk():
+                    stack.append(child)
+                    child, cookie = tree.GetNextChild(node, cookie)
+            check(
+                "全树没有任何 f-* 文件节点（不存在第二处全量填充）",
+                not noise,
+                f"全树共 {total_nodes} 个节点，f-* 检出 {len(noise)} 个",
+            )
+
+            # ---- 用户点开它 → 文件补上，而且必须是**追加** ----
+            #
+            # 这一条是那 6 次失败的分水岭：以前"补文件"要靠
+            # `DeleteChildren` + 重建，于是 `mid_item` 立刻变成悬空句柄，
+            # 之后任何调用都是 `0xC0000005`。**只追加**才能让 mid_item 活着。
+            tree.Collapse(ancestor_item)
+            tree.Expand(ancestor_item)
+            for _ in range(10):
+                wx.YieldIfNeeded()
+                time.sleep(0.01)
+            after = child_names_of(ancestor_item)
+            files_after = [n for n in after if n.startswith("f-")]
+            check(
+                "用户点开大目录 → 文件补上来了（展开时升级为全量）",
+                len(files_after) == 400,
+                f"补完后 f-* 文件节点 = {len(files_after)} 个（期望 400），"
+                f"子项总数 = {len(after)}",
+            )
+            check(
+                "⚠️ 补文件是**追加**，不是重建 —— 原来那个 mid 节点还活着",
+                mid_item.IsOk() and tree.GetItemText(mid_item) == "mid",
+                f"mid_item.IsOk() = {mid_item.IsOk()}，"
+                f"文本 = {tree.GetItemText(mid_item)!r}"
+                f"（悬空句柄正是之前 6 次崩溃的原因）",
+            )
+            check(
+                "补完之后没有重复条目（按名字去重，不是无脑 append）",
+                len(after) == len(set(after)),
+                f"子项 {len(after)} 个，去重后 {len(set(after))} 个",
+            )
 
         # ==============================================================
         print()

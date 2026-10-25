@@ -98,7 +98,7 @@ with probe_temp("probe-dbl-file") as scratch:
 
     # 走到这个目录、展开，拿到文件节点
     node = tree.expand_to(holder, select=False)
-    tree._populated.discard(node)
+    tree._populated.pop(node, None)
     tree._populate_item(node)
     settle()
 

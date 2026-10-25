@@ -43,12 +43,15 @@ Explorer     16 × 16     ≈ 22 px         ≈ 0.73
 """
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import os
 import string
 import sys
 
 import wx
+
+from .tree_nav import should_skip_files
 
 # --------------------------------------------------------------------------
 # Windows 外壳图标
@@ -260,8 +263,19 @@ class DirectoryTree(wx.TreeCtrl):
                          | wx.TR_LINES_AT_ROOT | wx.TR_HIDE_ROOT
                          | wx.TR_SINGLE, **kwargs)
         self._show_hidden = show_hidden
-        #: 建树时把子节点推迟到"展开时"再加 —— 盘符下的目录可能上千个
-        self._populated: set = set()
+        #: 建树时把子节点推迟到"展开时"再加 —— 盘符下的目录可能上千个。
+        #:
+        #: **值不再是 `True`，而是"建到哪一步了"**：
+        #:
+        #: * ``"dirs"`` —— 只建了子文件夹（沿路径展开时，大目录走这一条）
+        #: * ``"full"`` —— 连文件一起建了
+        #:
+        #: 为什么必须区分：只有知道了当前状态，才能决定"要不要**追加**文件"；
+        #: 而追加是唯一的升级方式 —— `DeleteChildren()` 会让调用方手里的 item
+        #: 变成悬空句柄（见 `_append_missing` 的说明）。
+        self._populated: dict = {}
+        #: `quiet_expand()` 的嵌套计数；>0 表示**程序**在展开（不是用户点的）。
+        self._quiet_expand_depth = 0
         self._images = self._build_images()
         self.AssignImageList(self._images)
         #: 扩展名（小写）→ 图列表下标。**一个扩展名只取一次图标。**
@@ -387,8 +401,8 @@ class DirectoryTree(wx.TreeCtrl):
         if not self.ItemHasChildren(item):
             self.AppendItem(item, "", -1)
 
-    def _populate_item(self, item) -> None:
-        """把某个节点的子目录**同步**建出来（懒加载的唯一实现处）。
+    def _populate_item(self, item, *, files: bool | None = None) -> None:
+        """把某个节点的子项**同步**建出来（懒加载的唯一实现处）。
 
         **抽出来是因为有两条路要走它**：
 
@@ -398,9 +412,82 @@ class DirectoryTree(wx.TreeCtrl):
         踩过：`expand_to` 里只用 `self.Expand(item)`，而它**投递事件**、
         处理函数要到下一轮事件循环才跑 —— 紧接着迭代 `GetFirstChild`
         什么也拿不到，于是路径**只展开一层就停**（实测只到 `C:\\Users`）。
+
+        ## `files`：这个节点的**文件**子项要不要建
+
+        ==============  ==========================================================
+        值              含义
+        ==============  ==========================================================
+        ``None``        自动：条目多于 `tree_nav.DIRS_ONLY_ENTRY_THRESHOLD` 就只建文件夹
+        ``True``        全量（用户点的展开、以及**目标目录**它自己）
+        ``False``       只要文件夹
+        ==============  ==========================================================
+
+        **为什么"自动"这一档必须存在**（2026-10-25 实测）：
+
+        用户报"地址栏回车非常慢、关程序也慢"。实测
+        （`tools/probes/probe_pathbar_populate.py`，路径
+        ``C:\\Windows\\System32\\drivers\\etc``）：
+
+        树节点 49 → 5838，其中 ``C:\\Windows\\System32`` 一个目录就 **4907 个
+        子项、4708 个是文件**、耗时 192 ms —— 而它**只是为了把下面三级的
+        ``etc`` 显示出来**，那 4708 个文件对"找到下一级"毫无用处，
+        却要在关闭时逐个 `Destroy()`（关闭 58 → 367 ms）。
+
+        所以沿路径展开时，大目录只建子文件夹；真要看文件，用户点开它
+        时再**追加**（`files=True` → :meth:`_append_missing`）。
         """
-        if not item.IsOk() or item in self._populated:
+        if not item.IsOk():
             return
+        state = self._populated.get(item)
+        if state == "full":
+            return
+        # 已经建过"只含文件夹"的版本：
+        # **只有明确要文件时才升级**。`None`（自动）按定义就是"别补" ——
+        # 能走到 `"dirs"` 的目录都是因为大，再问一次条目数只会白扫一遍。
+        if state == "dirs" and files is not True:
+            return
+
+        entries = self._entries_of(item)
+        if files is None:
+            files = not should_skip_files(len(entries))
+
+        if state is None:
+            self._build_children(item, entries, files)
+        else:
+            self._append_missing(item, entries)
+
+    def _report_expand_error(self, item, error, *, keep_state: bool = False) -> None:
+        """展开失败时**如实报出来**。
+
+        :param keep_state: 保留已有记账（不重试）。
+            `_append_missing` 失败时必须传 ``True``：那时子节点**已经存在**，
+            把记账撤掉会让下一次展开走"重建"那条路 ⇒ `DeleteChildren`
+            ⇒ 调用方手里的 item 悬空。宁可这次补得不全，也不要崩。
+            默认（新建那条路）撤掉记账 —— 那时节点已被清空，下次重新建才对。
+        """
+        if not keep_state:
+            self._populated.pop(item, None)
+        try:
+            where = self.path_of_node(item)
+        except Exception:
+            where = repr(item)
+        report = self.on_error
+        if report is not None:
+            report(f"展开目录失败：{where}（{error!r}）")
+        else:
+            # 没接回调也不能静默 —— 至少让它出现在 stderr 上
+            print(f"[dir_tree] 展开目录失败：{where}（{error!r}）",
+                  file=sys.stderr)
+
+    def _build_children(self, item, entries, files: bool) -> None:
+        """**第一次**建某个节点的子项。这时可以有占位子项，可以整体删掉。
+
+        `DeleteChildren(item)` 在这里是安全的：能走到这儿说明
+        `self._populated` 里没有它，它的子项只可能是 `_add_placeholder`
+        放的那个空占位项 —— **没有任何调用方持有它**
+        （`expand_to` 按名字找子项，空名字永远匹配不上）。
+        """
         # **批量插节点必须冻结重绘。**
         #
         # `AppendItem` 每插一个都会重排 + 重绘一次；插 N 个就是 N 次布局。
@@ -411,15 +498,18 @@ class DirectoryTree(wx.TreeCtrl):
         self.Freeze()
         try:
             self.DeleteChildren(item)
-            for name, is_dir in self._children_of(item):
-                child = self.AppendItem(item, name,
-                                        self._icon_for(name, is_dir))
-            # **每个子节点也要有占位子节点。**
-            #
-            # `wx.TreeCtrl` 靠"有没有子节点"决定画不画展开箭头 ——
-            # 不加的话，展开一层之后**再也点不下去**（用户实测：
-            # "每个磁盘展开后下面只有一级，不能接着展开了"）。
-            #
+            for name, is_dir in entries:
+                # **文件和文件夹都要列**（用户："只展示文件夹……会很困惑"），
+                # 只有"大目录的自动档"才跳过文件。
+                if not is_dir and not files:
+                    continue
+                child = self.AppendItem(item, name, self._icon_for(name, is_dir))
+                # **每个子节点也要有占位子节点。**
+                #
+                # `wx.TreeCtrl` 靠"有没有子节点"决定画不画展开箭头 ——
+                # 不加的话，展开一层之后**再也点不下去**（用户实测：
+                # "每个磁盘展开后下面只有一级，不能接着展开了"）。
+                #
                 # 代价是"空目录也显示箭头"：盘根下有没有子目录**只能等展开时
                 # 才知道**（列一次目录的代价不想在建树时付）。这是资源管理器
                 # 同款的取舍。
@@ -439,31 +529,101 @@ class DirectoryTree(wx.TreeCtrl):
             #   * 之后每次展开都在 `item in self._populated` 处直接返回
             #   * `reveal_in_tree` / 地址栏定位到它也会**静默失败**
             #
-            # 而 `_icon_for` → `_shell_icon` 是**故意只兜 `OSError`** 的
-            # （编程错误要露出来）—— 所以这条路径真的可能被走到。
-            #
             # 这与本项目另一条教训同型：**先记账、后干活 ⇒ 账本一旦脏了，
             # 就永远不再重试**（`_apply_selection_highlight` 那次也是）。
-            self._populated.add(item)
+            self._populated[item] = "full" if files else "dirs"
         except Exception as error:
-            # **失败时把记账撤掉（下次展开会重试），并如实报出来。**
-            #
-            # 静默吞掉的话用户只看到"这个目录点不开、里面什么都没有"，
-            # 没有任何线索。
-            self._populated.discard(item)
-            try:
-                where = self.path_of_node(item)
-            except Exception:
-                where = repr(item)
-            report = self.on_error
-            if report is not None:
-                report(f"展开目录失败：{where}（{error!r}）")
-            else:
-                # 没接回调也不能静默 —— 至少让它出现在 stderr 上
-                print(f"[dir_tree] 展开目录失败：{where}（{error!r}）",
-                      file=sys.stderr)
+            self._report_expand_error(item, error)
         finally:
             self.Thaw()
+
+    def _append_missing(self, item, entries) -> None:
+        """把 `entries` 里**还不在树上**的子项**追加**进去 —— **只增不删**。
+
+        ## ⚠️ 这里绝不能改成 `DeleteChildren` + 重建
+
+        这一条是踩了 6 次才确认的（见交接文档第 4 节）：
+
+        `wx.TreeCtrl` 唯一的"重建"方式就是删光再插，而只要在**已经有子节点**
+        的节点上跑一次 `DeleteChildren(item)`，调用方（`expand_to` 的循环、
+        `reveal_in_tree` 手里的 `item`、`GetSelection()`）拿着的
+        `TreeItemId` **立刻变成悬空句柄** —— 之后任何 `GetItemText` /
+        `IsOk()` 都是 C 层访问违例（`0xC0000005`），Python 抓不住。
+
+        "只追加"顺带解决了另外两件事：
+
+        * **不会丢文件节点**（第 3 版"点开目录只剩文件夹"就是重建丢的）
+        * **新出现的文件夹能被找到**（第 1 版的缓存陈旧：这里按名字对比，
+          缺什么补什么，不需要"作废整棵子树"）
+
+        顺序也对得上：`_entries_of` 已经排成"文件夹在前、文件在后"，
+        所以追加文件只会加在每个目录子项的**后面**，屏幕上方的行不动。
+        """
+        existing = set()
+        child, cookie = self.GetFirstChild(item)
+        while child.IsOk():
+            existing.add(self.GetItemText(child).casefold())
+            child, cookie = self.GetNextChild(item, cookie)
+
+        self.Freeze()
+        try:
+            for name, is_dir in entries:
+                key = name.casefold()
+                if key in existing:
+                    continue
+                child = self.AppendItem(item, name, self._icon_for(name, is_dir))
+                if is_dir:
+                    self._add_placeholder(child)
+                existing.add(key)
+            # 走到了这里就只有一种可能：**要文件的那次升级**
+            self._populated[item] = "full"
+        except Exception as error:
+            # **保留记账**：子节点已经进去了，重建才是危险操作
+            self._report_expand_error(item, error, keep_state=True)
+        finally:
+            self.Thaw()
+
+    def _refresh_item(self, item) -> None:
+        """重扫目录，把**新出现的**子项追加进去（仍然只增不删）。
+
+        ## 什么时候需要它
+
+        `expand_to` 沿路径找某一级却找不到时，除了"上一级是大目录、
+        而这个子项是文件"，还有一种更常见的情况：**这一级是刚新建的** ——
+        它的父目录早在启动时就填满了（`_populated == "full"`），
+        缓存里当然没有它。
+
+        这正是交接文档第 1 版"缓存陈旧：新建的文件夹找不到"那件事。
+        第 2 版当时用"强制重填"（`DeleteChildren` + 重建）来解决，
+        于是撞上悬空句柄崩溃；这里改成**只追加**，同一个问题换个安全的解。
+        """
+        if item not in self._populated:
+            self._populate_item(item, files=True)
+            return
+        self._append_missing(item, self._entries_of(item))
+
+    @contextlib.contextmanager
+    def quiet_expand(self):
+        """在这个 ``with`` 里发生的展开都算**程序**发起的（只建到够用为止）。
+
+        ## ⚠️ 为什么需要它（2026-10-25 实测，别再删）
+
+        `wx.TreeCtrl.Expand()` **会同步回调** `EVT_TREE_ITEM_EXPANDING` ——
+        也就是 `_on_expanding` 在 `Expand()` 返回之前就跑完了
+        （实测：`tools/probes/probe_pathbar_populate.py` 里每次 `Expand`
+        都紧跟着一条 `_on_expanding` 记录，不是延后到事件循环）。
+
+        于是 `expand_to` 刚决定"这个目录太大、先别建文件"，
+        下一句 `self.Expand(item)` 就会经 `_on_expanding` 把文件补回来。
+
+        **交接文档里第 4 版"增量填充能跑但没效果（节点仍 +5793）"就是这件事**：
+        填充逻辑没错，是被 `Expand()` 同步触发的那个回调推翻了。
+        """
+        self._quiet_expand_depth += 1
+        try:
+            yield
+        finally:
+            self._quiet_expand_depth -= 1
 
     def _on_expanding(self, event) -> None:
         item = event.GetItem()
@@ -487,17 +647,27 @@ class DirectoryTree(wx.TreeCtrl):
         except (RuntimeError, AttributeError):
             event.Skip()
             return
-        self._populate_item(item)
+        # **用户点的展开 = 要看全（含文件）；程序沿路径展开 = 够用就行。**
+        #
+        # ⚠️ 必须靠 `quiet_expand()` 的计数来分辨，不能"看是不是已填充"：
+        # 已展开但只建了文件夹的节点，用户点箭头（先折叠再展开）时
+        # 必须升级成 `files=True`，否则文件永远补不上。
+        self._populate_item(
+            item, files=True if self._quiet_expand_depth == 0 else None)
         event.Skip()
 
-    def _children_of(self, item) -> list[str]:
-        """某个**节点**对应目录下、该显示的子项 —— **(名字, 是不是目录)**。
+    def _entries_of(self, item) -> list[tuple[str, bool]]:
+        """某个**节点**对应目录下的**全部**子项 —— ``[(名字, 是不是目录)]``。
 
-        ⚠️ **文件和文件夹都要列。**
+        ⚠️ **文件和文件夹都要返回。**
         我一度只列目录，理由写的是"列文件会把树撑爆" ——
         而用户报："现在它只展示文件夹，不展示文件。这样用户看不到文件夹下
         有什么东西，会很困惑。" **那个限制是我自己加的，不是用户要的**；
         原来的 `wx.GenericDirCtrl` 默认两者都显示。
+
+        所以"要不要真的建文件节点"由**调用方**决定
+        （`_build_children` 的 `files` 参数），本方法只管如实读出目录里有什么 ——
+        因为**判断"这个目录大不大"必须知道条目总数**。
 
         返回 `(名字, 是否目录)` 而不是纯名字 —— 调用方要据此选图标、
         并决定要不要加"占位子节点"（**文件展开不了，不能加**）。
@@ -621,6 +791,19 @@ class DirectoryTree(wx.TreeCtrl):
         这个方法**边展开边创建**，正好补上那一环；
         `select=False` 让调用方自己决定要不要选中（`reveal_in_tree`
         有自己的选中逻辑，见那里的说明）。
+
+        ## 中间那一级只建文件夹，**目标那一级全量**
+
+        用户 2026-10-25 报"地址栏回车非常慢、关程序也慢"，实测
+        （`tools/probes/probe_pathbar_populate.py`，路径
+        ``C:\\Windows\\System32\\drivers\\etc``）：
+
+        * ``C:\\Windows\\System32`` —— 4907 个子项（**4708 个是文件**）、192 ms
+        * 而它只是为了把下面三级的 ``etc`` 显示出来
+
+        所以中间层级走 `files=None`（大目录只建文件夹），
+        **最后一级（用户输入的那个文件夹）走 `files=True`** ——
+        用户输入的目标目录必须完整，这一点没有妥协。
         """
         from .tree_nav import drive_in_label
         path = os.path.normpath(path)
@@ -635,25 +818,48 @@ class DirectoryTree(wx.TreeCtrl):
                 break
         if target is None:
             return None
-        self._populate_item(target)
-        self.Expand(target)
-        for part in [seg for seg in rest.split(os.sep) if seg]:
-            found = None
-            child, cookie = self.GetFirstChild(target)
-            while child.IsOk():
-                if self.GetItemText(child).lower() == part.lower():
-                    found = child
-                    break
-                child, cookie = self.GetNextChild(target, cookie)
-            if found is None:
-                return None
-            # **先同步建子节点，再展开** —— 顺序反了就又会只走一层。
-            self._populate_item(found)
-            self.Expand(found)
-            target = found
+        parts = [seg for seg in rest.split(os.sep) if seg]
+        # **整段展开都算"程序在展开"。**
+        # `Expand()` 会**同步**回调 `_on_expanding`，而它默认要建文件子项 ——
+        # 不标记的话，上面"只建文件夹"的决定立刻被推翻
+        # （交接文档第 4 版"增量填充没效果"就是这么来的）。
+        with self.quiet_expand():
+            self._populate_item(target)
+            self.Expand(target)
+            for index, part in enumerate(parts):
+                last = index == len(parts) - 1
+                found = self._child_by_name(target, part)
+                if found is None:
+                    # 两种可能，都靠**重扫 + 追加**解决，而不是"作废整棵子树"：
+                    #   ① 上一级是"只建文件夹"的大目录，这个子项是文件；
+                    #   ② 这一级是刚新建的，父目录早就填满了（缓存陈旧）。
+                    self._refresh_item(target)
+                    found = self._child_by_name(target, part)
+                if found is None:
+                    return None
+                # **先同步建子节点，再展开** —— 顺序反了就又会只走一层。
+                self._populate_item(found, files=True if last else None)
+                self.Expand(found)
+                target = found
         if select:
             self.SelectItem(target)
         return target
+
+    def _child_by_name(self, parent, name: str):
+        """在 `parent` 的直接子项里按名字找一个；找不到返回 `None`。
+
+        比较用 `casefold()`（不是 `lower()`）—— 与
+        `tree_nav.find_child_by_label` 同一口径：Windows 路径不区分大小写，
+        而树的显示文本可能是任一大小写形式。**两个函数描述同一件事，
+        口径不一致会让路径栏在某条路径上静默失败。**
+        """
+        wanted = name.casefold()
+        child, cookie = self.GetFirstChild(parent)
+        while child.IsOk():
+            if self.GetItemText(child).casefold() == wanted:
+                return child
+            child, cookie = self.GetNextChild(parent, cookie)
+        return None
 
     def iter_top(self):
         child, cookie = self.GetFirstChild(self._root)

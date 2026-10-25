@@ -118,7 +118,7 @@ with probe_temp("probe-robust") as scratch:
         assert item is not None
         import shutil
         shutil.rmtree(vanishing)          # 展开之前把它删了
-        tree._populated.discard(item)     # 强制重新填充
+        tree._populated.pop(item, None)     # 强制重新填充
         tree._populate_item(item)         # ← 这里会撞上"目录不存在"
         return "删掉之后重新填充未抛"
 

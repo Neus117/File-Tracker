@@ -24,7 +24,8 @@
 
 - Tree-view navigation
 - **Address bar**: paste or type a path and press Enter to jump there **and record
-  one visit** (`Ctrl+L` to focus)
+  one visit** (`Ctrl+L` to focus); big folders **along the way** list their
+  subfolders first and fill in files when you expand them
 - Select folders or files; double-clicking a file opens its parent folder
 - Remembers the last location you browsed; resets the horizontal scroll bar
 
@@ -83,7 +84,7 @@ v1.1.0 shipped on 2024-10-14; v1.4.1 on 2026-10-25. **More features, smaller dow
 | Settings dialog | None | **Yes** (language / theme / sort key / sort direction, all icon buttons) |
 | Dark theme | Some controls ignored it | **All custom-drawn controls follow it** |
 | Address bar + Enter | Did not open Explorer | **Actually opens it** |
-| Automated tests | **0** (and the test file imported two names that did not exist) | **200 unit tests + 214 GUI checks** |
+| Automated tests | **0** (and the test file imported two names that did not exist) | **203 unit tests + 223 GUI checks** |
 | Build pipeline | **None** (no `.spec`, no script, no CI) | `build.ps1` + 4 build checks + 9 gates in CI |
 | Binary reports its version | No | **Yes** (name / version / commit) |
 | Version info in file properties | Nearly blank | **All five fields filled** |
@@ -118,6 +119,13 @@ v1.1.0 shipped on 2024-10-14; v1.4.1 on 2026-10-25. **More features, smaller dow
 ---
 
 ## Known limitations
+
+**Typing the address of a folder with a huge number of entries (e.g. `C:\Windows\System32`)
+still expands that folder itself in full**, about 190 ms — the folder you navigate
+to must be complete; that is a deliberate trade-off. Big folders **along the way**
+(say `System32` when you are heading for `…\drivers\etc`) no longer build file
+nodes, so that Enter goes from **296 ms to about 70 ms**, and the tree shrinks
+from **5789 nodes to roughly 600**.
 
 **Opening a record still rebuilds the list when you have a lot of them.**
 v1.3.3 cut that roughly in half:
