@@ -326,8 +326,14 @@ def test_find_by_names_stops_at_max_nodes():
 
 
 def test_bfs_find_by_path_scans_expanded_items():
-    """兜底路径：按完整路径扫描，用于层级结构与盘符假设不一致的情况。"""
+    """兜底路径：按完整路径扫描，用于层级结构与盘符假设不一致的情况。
+
+    **它只在已经建出来的节点里找，不展开**（2026-10-25 改：整树展开会让
+    "找不到"这条兜底路径自己变成几秒的开销，见 `bfs_find_by_path` 的说明）。
+    所以这里先 `expand_all()` 模拟"树里确实已经有这些节点"。
+    """
     tree = FakeTree([r"C:\Users", r"C:\Users\Neus"])
+    tree.expand_all()
     walker = tree_nav.TreeWalker(tree)
     found = walker.bfs_find_by_path(r"c:\users\neus", path_of(tree))
     assert found is not None
@@ -336,14 +342,28 @@ def test_bfs_find_by_path_scans_expanded_items():
 
 def test_bfs_find_by_path_is_case_insensitive():
     tree = FakeTree([r"C:\Users"])
+    tree.expand_all()
     walker = tree_nav.TreeWalker(tree)
     assert walker.bfs_find_by_path(r"C:\USERS", path_of(tree)) is not None
 
 
 def test_bfs_returns_none_for_absent_path():
     tree = FakeTree([r"C:\Users"])
+    tree.expand_all()
     walker = tree_nav.TreeWalker(tree)
     assert walker.bfs_find_by_path(r"C:\Nope", path_of(tree)) is None
+
+
+def test_bfs_does_not_expand_anything():
+    """**兜底扫描不展开**：它跑在"逐级匹配已经失败"之后，
+    那时再整树展开会把省下的开销全花回去（实测：扫一层 %TEMP% 就多建上千节点）。
+    """
+    tree = FakeTree([r"C:\Users", r"C:\Users\Neus"])
+    tree.expand_all()
+    before = list(tree.expand_calls)      # expand_all() 自己不算
+    walker = tree_nav.TreeWalker(tree)
+    walker.bfs_find_by_path(r"C:\Nope", path_of(tree))
+    assert tree.expand_calls == before, tree.expand_calls
 
 
 # --------------------------------------------------------------------------
@@ -517,3 +537,41 @@ def test_should_skip_files_threshold_is_in_a_sane_range():
 def test_should_skip_files_explicit_threshold():
     assert tree_nav.should_skip_files(10, threshold=5) is True
     assert tree_nav.should_skip_files(5, threshold=5) is False
+
+
+# --------------------------------------------------------------------------
+# 长会话不退化：程序态的两道闸 + 节点上限
+# --------------------------------------------------------------------------
+#
+# 2026-10-25 用户："开着用几小时之后，回车卡六七秒，关闭要等十几秒。"
+# 实测（`tools/probes/probe_tree_inflate.py`）：6295 节点关闭 352 ms，
+# **45746 节点关闭 10941 ms** —— 节点数必须被限制住。
+
+
+def test_too_many_to_expand_boundary():
+    """**等于上限不算超**：`>` 而不是 `>=`。"""
+    limit = tree_nav.MAX_PROGRAMMATIC_CHILDREN
+    assert tree_nav.too_many_to_expand(0) is False
+    assert tree_nav.too_many_to_expand(limit) is False
+    assert tree_nav.too_many_to_expand(limit + 1) is True
+
+
+def test_needs_trim_boundary():
+    limit = tree_nav.MAX_TREE_NODES
+    assert tree_nav.needs_trim(0) is False
+    assert tree_nav.needs_trim(limit) is False
+    assert tree_nav.needs_trim(limit + 1) is True
+
+
+def test_programmatic_limits_are_in_sane_ranges():
+    """两个上限的**量级**要有守卫（不锚定具体数字）。
+
+    * `MAX_PROGRAMMATIC_CHILDREN`：太小 ⇒ 正常目录也展不开；
+      太大 ⇒ 又出现 `WinSxS`（19727 个子目录）那种 2.6 秒。
+    * `MAX_TREE_NODES`：实测关闭耗时随节点数**超线性**上升，
+      6295 节点 352 ms / 45746 节点 10941 ms。上限要落在"关闭还在几百毫秒"的区间。
+    """
+    assert 500 <= tree_nav.MAX_PROGRAMMATIC_CHILDREN <= 10000
+    assert 1000 <= tree_nav.MAX_TREE_NODES <= 20000
+    # 上限必须大于"跳文件"的那条线，否则小目录也会被整棵拒掉
+    assert tree_nav.MAX_TREE_NODES > tree_nav.DIRS_ONLY_ENTRY_THRESHOLD

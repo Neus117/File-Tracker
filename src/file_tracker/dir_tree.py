@@ -51,7 +51,7 @@ import sys
 
 import wx
 
-from .tree_nav import should_skip_files
+from .tree_nav import needs_trim, should_skip_files, too_many_to_expand
 
 # --------------------------------------------------------------------------
 # Windows 外壳图标
@@ -276,6 +276,24 @@ class DirectoryTree(wx.TreeCtrl):
         self._populated: dict = {}
         #: `quiet_expand()` 的嵌套计数；>0 表示**程序**在展开（不是用户点的）。
         self._quiet_expand_depth = 0
+        #: 当前树里**由本类建出来的节点总数**（不含隐藏根；盘符节点算在内）。
+        #:
+        #: 为什么要自己数：`wx.TreeCtrl.GetCount()` 是 O(N) 且会走一遍原生接口，
+        #: 而"要不要重建"这个判断每次导航都要做一次。自己数就放在建节点的两处
+        #: （`_build_children` / `_append_missing`）累加、`populate()` 归零。
+        self._node_count = 0
+        #: 上一次**由程序**沿路径展开的那条链（从盘符到目标）。
+        #:
+        #: 下次导航时把它收起来 —— 否则"每一次打开的目录在导航窗格里全部都是
+        #: 展开的状态"（用户 2026-10-25 原话），开着用几小时之后：
+        #: 6k 节点关闭 0.35 秒、**45k 节点关闭 11 秒**（实测 `probe_tree_inflate.py`）。
+        self._revealed_chain: list = []
+        #: 已知"太大、程序态不该展开"的节点（`too_many_to_expand` 的判断结果）。
+        #:
+        #: 一次导航里同一个节点会被问好几次（`expand_to` / `_on_expanding` /
+        #: `_refresh_item` / `TreeWalker`），而每问一次都要扫一遍目录 ——
+        #: `WinSxS`（19727 条）一次 40 ms，问六次就是 240 ms。
+        self._too_big: set = set()
         self._images = self._build_images()
         self.AssignImageList(self._images)
         #: 扩展名（小写）→ 图列表下标。**一个扩展名只取一次图标。**
@@ -368,14 +386,24 @@ class DirectoryTree(wx.TreeCtrl):
     # -- 建树 -------------------------------------------------------------
 
     def populate(self, expand_path: str = "") -> None:
-        """列出所有盘符；`expand_path` 指向的那条链**自动展开并选中**。"""
+        """列出所有盘符；`expand_path` 指向的那条链**自动展开并选中**。
+
+        这也是**唯一的"整体重建"入口**：`DeleteChildren(root)` 之后所有旧节点
+        都作废，所以 `_populated`（按节点记账）与 `_revealed_chain` 必须一起清掉。
+        节点数超上限时（`tree_nav.needs_trim`）由 `app.reveal_in_tree` 调它来
+        "只保留当前路径" —— 见 `MAX_TREE_NODES` 里的实测曲线。
+        """
         self.DeleteChildren(self._root)
         self._populated.clear()
+        self._revealed_chain = []
+        self._too_big.clear()
+        self._node_count = 0
         for drive in self._drives():
             # 标签用外壳给的名字（`SYSTEM (C:)`），路径反查由
             # `_as_drive_root` 里的 `drive_in_label` 负责 —— 它认的正是这种。
             item = self.AppendItem(self._root, _drive_label(drive), ICON_DRIVE)
             self._add_placeholder(item)
+            self._node_count += 1
         if expand_path:
             self.expand_to(expand_path)
 
@@ -456,7 +484,32 @@ class DirectoryTree(wx.TreeCtrl):
         if state == "dirs" and files is not True:
             return
 
+        if self._quiet_expand_depth > 0 and item in self._too_big:
+            return
         entries = self._entries_of(item)
+        # **程序态的第二道闸：这么大的目录这次干脆不展开。**
+        #
+        # `should_skip_files` 只挡住"文件多"的目录；`WinSxS` 那种是
+        # **子目录多**（19727 个），挡住文件也救不了 —— 建 19725 个子项 +
+        # 19725 个占位 = 近四万个节点、约 2.6 秒（65 µs/节点，实测）。
+        #
+        # ⚠️ **判据是"谁在调"，不是 `files`。** 踩过：`_refresh_item` 为了
+        # 找一个**最后一级**的子项，会带着 `files=True` 去填**父级**
+        # （`files=last` 那一行）—— 按 `files is None` 判断的话，
+        # 那个 2601 条目的父级照样被整棵建出来（实测 2604 个节点）。
+        # 程序态（`quiet_expand_depth > 0`）一律不许建这么大的层级；
+        # 用户自己点开时（`files=True` 且不在程序态）才全量 ——
+        # 那是他自己选的动作，他知道在等什么。
+        if self._quiet_expand_depth > 0 and too_many_to_expand(len(entries)):
+            # **记住这个结论**：一次导航里同一个节点会被问好几次
+            # （`expand_to` / `_on_expanding` / `_refresh_item` / `TreeWalker`），
+            # 而每问一次就要扫一遍目录 —— `WinSxS` 一次 40 ms，问六次就是 240 ms。
+            # 实测 A/B：加了这条备忘，同一次导航 308 → 90 ms。
+            self._too_big.add(item)
+            return
+        if self._quiet_expand_depth == 0:
+            # 用户自己展开了：这个结论作废（他愿意等）
+            self._too_big.discard(item)
         if files is None:
             files = not should_skip_files(len(entries))
 
@@ -506,12 +559,14 @@ class DirectoryTree(wx.TreeCtrl):
         self.Freeze()
         try:
             self.DeleteChildren(item)
+            added = 0
             for name, is_dir in entries:
                 # **文件和文件夹都要列**（用户："只展示文件夹……会很困惑"），
                 # 只有"大目录的自动档"才跳过文件。
                 if not is_dir and not files:
                     continue
                 child = self.AppendItem(item, name, self._icon_for(name, is_dir))
+                added += 1
                 # **每个子节点也要有占位子节点。**
                 #
                 # `wx.TreeCtrl` 靠"有没有子节点"决定画不画展开箭头 ——
@@ -526,6 +581,7 @@ class DirectoryTree(wx.TreeCtrl):
                 # 给文件加占位会让它显示一个点不开的箭头。
                 if is_dir:
                     self._add_placeholder(child)
+                    added += 1
             # **记账放在"真的干完之后"。**
             #
             # ⚠️ 审计查出的缺陷（2026-10-17）：原来 `self._populated.add(item)`
@@ -540,6 +596,8 @@ class DirectoryTree(wx.TreeCtrl):
             # 这与本项目另一条教训同型：**先记账、后干活 ⇒ 账本一旦脏了，
             # 就永远不再重试**（`_apply_selection_highlight` 那次也是）。
             self._populated[item] = "full" if files else "dirs"
+            # **节点数也要在"真的建完"之后才加**（同上：先记账后干活会脏）
+            self._node_count += added
         except Exception as error:
             self._report_expand_error(item, error)
         finally:
@@ -575,23 +633,27 @@ class DirectoryTree(wx.TreeCtrl):
 
         self.Freeze()
         try:
+            added = 0
             for name, is_dir in entries:
                 key = name.casefold()
                 if key in existing:
                     continue
                 child = self.AppendItem(item, name, self._icon_for(name, is_dir))
+                added += 1
                 if is_dir:
                     self._add_placeholder(child)
+                    added += 1
                 existing.add(key)
             # 走到了这里就只有一种可能：**要文件的那次升级**
             self._populated[item] = "full"
+            self._node_count += added
         except Exception as error:
             # **保留记账**：子节点已经进去了，重建才是危险操作
             self._report_expand_error(item, error, keep_state=True)
         finally:
             self.Thaw()
 
-    def _refresh_item(self, item) -> None:
+    def _refresh_item(self, item, *, files: bool | None = None) -> None:
         """重扫目录，把**新出现的**子项追加进去（仍然只增不删）。
 
         ## 什么时候需要它
@@ -604,9 +666,16 @@ class DirectoryTree(wx.TreeCtrl):
         这正是交接文档第 1 版"缓存陈旧：新建的文件夹找不到"那件事。
         第 2 版当时用"强制重填"（`DeleteChildren` + 重建）来解决，
         于是撞上悬空句柄崩溃；这里改成**只追加**，同一个问题换个安全的解。
+
+        ## ⚠️ `files` 不能写死成 `True`
+
+        写死的话，`WinSxS`（19727 个子目录）那条"程序态不展开"的闸
+        （`too_many_to_expand`）会在这里被绕过去 —— 找不到子项就重扫，
+        重扫就把四万个节点全建出来。所以**中间层仍然走 `files=None`**，
+        只有最后一级（用户目标）才允许全量。
         """
         if item not in self._populated:
-            self._populate_item(item, files=True)
+            self._populate_item(item, files=files if files is True else None)
             return
         self._append_missing(item, self._entries_of(item))
 
@@ -746,6 +815,15 @@ class DirectoryTree(wx.TreeCtrl):
             if not parent.IsOk():
                 break
             text = self.GetItemText(node)
+            # **空文本 = 占位子项**（`_add_placeholder` 放的那个）。
+            #
+            # 它不是一个目录，`os.path.join` 会把空串吃掉、于是**返回父目录的路径** ——
+            # 这个"看起来有值"的假路径会让 `pick_fallback_item` 把占位子项
+            # 当成"最深的、包含目标的祖先"，最后 `SelectItem` 选中一条**空白行**
+            # （2026-10-25 实测：超上限的目录不展开时就会走到这里）。
+            # 顺带也避免了"展开占位子项会列出父目录内容"这种荒谬行为。
+            if not text:
+                return ""
             drive = _as_drive_root(text)
             if drive:
                 # 到盘符根了：拼起来收工
@@ -817,10 +895,19 @@ class DirectoryTree(wx.TreeCtrl):
         所以中间层级走 `files=None`（大目录只建文件夹），
         **最后一级（用户输入的那个文件夹）走 `files=True`** ——
         用户输入的目标目录必须完整，这一点没有妥协。
+
+        ## 展开之前先**收起上一次那条链**（2026-10-25）
+
+        用户："每次打开的目录在导航窗格里全部都是展开的状态……原来展开的目录
+        没有收回去"，并怀疑这就是"开几小时后卡几秒、关要十几秒"的原因。
+        **实测他是对的**（`tools/probes/probe_tree_inflate.py`）：
+        6295 节点关闭 352 ms，45746 节点关闭 **10941 ms**。
+
+        所以这里只收起**上一次由程序展开**的那条链，用户自己点开的目录不动。
         """
         from .tree_nav import drive_in_label
-        path = os.path.normpath(path)
-        drive, rest = os.path.splitdrive(path)
+        base = os.path.normpath(path)
+        drive, rest = os.path.splitdrive(base)
         if not drive:
             return None
         drive_root = drive + os.sep
@@ -832,6 +919,10 @@ class DirectoryTree(wx.TreeCtrl):
         if target is None:
             return None
         parts = [seg for seg in rest.split(os.sep) if seg]
+        # **先收旧链，再展新链**（顺序不能反：反了就是"先展后收"，
+        # 收到刚展开的那条上，用户会看到树瞬间塌掉）
+        self._collapse_revealed_chain()
+        chain = []
         # **整段展开都算"程序在展开"。**
         # `Expand()` 会**同步**回调 `_on_expanding`，而它默认要建文件子项 ——
         # 不标记的话，上面"只建文件夹"的决定立刻被推翻
@@ -839,6 +930,7 @@ class DirectoryTree(wx.TreeCtrl):
         with self.quiet_expand():
             self._populate_item(target)
             self.Expand(target)
+            chain.append(target)
             for index, part in enumerate(parts):
                 last = index == len(parts) - 1
                 found = self._child_by_name(target, part)
@@ -846,17 +938,50 @@ class DirectoryTree(wx.TreeCtrl):
                     # 两种可能，都靠**重扫 + 追加**解决，而不是"作废整棵子树"：
                     #   ① 上一级是"只建文件夹"的大目录，这个子项是文件；
                     #   ② 这一级是刚新建的，父目录早就填满了（缓存陈旧）。
-                    self._refresh_item(target)
+                    self._refresh_item(target, files=last)
                     found = self._child_by_name(target, part)
                 if found is None:
+                    self._revealed_chain = chain
                     return None
                 # **先同步建子节点，再展开** —— 顺序反了就又会只走一层。
                 self._populate_item(found, files=True if last else None)
                 self.Expand(found)
                 target = found
+                chain.append(target)
+        self._revealed_chain = chain
         if select:
             self.SelectItem(target)
         return target
+
+    def _collapse_revealed_chain(self) -> None:
+        """把**上一次由程序展开**的那条链收起来（用户点开的分支不动）。
+
+        只 `Collapse`，**不删节点** —— 删节点会让调用方手里的 item 悬空
+        （见 `_append_missing` 的说明）；节点回收交给"节点数超上限时的整体重建"
+        （`tree_nav.MAX_TREE_NODES` + `app.reveal_in_tree` 里那次 `populate`）。
+        """
+        for item in self._revealed_chain:
+            try:
+                if item.IsOk() and self.IsExpanded(item):
+                    self.Collapse(item)
+            except Exception:
+                # 树已经被重建 / 正在销毁 —— 这条链本来就没意义了
+                pass
+        self._revealed_chain = []
+
+    @property
+    def node_count(self) -> int:
+        """当前树里由本类建出来的节点数（自己记账，**不是** O(N) 数一遍）。"""
+        return self._node_count
+
+    def needs_trim(self) -> bool:
+        """节点数是不是已经超过上限、该整体重建了。
+
+        判断在 `tree_nav.needs_trim`（纯函数，可单测）；重建由
+        `app.reveal_in_tree` 在导航结束后触发，**不在建节点的过程中做** ——
+        那会把调用方手里的 item 一起删掉。
+        """
+        return needs_trim(self._node_count)
 
     def _child_by_name(self, parent, name: str):
         """在 `parent` 的直接子项里按名字找一个；找不到返回 `None`。

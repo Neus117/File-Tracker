@@ -87,12 +87,15 @@ with probe_temp("probe-robust") as scratch:
 
     # ══════════════ 目录树 ══════════════
 
-    @case("空字符串 / 不存在的路径 → 返回空，不抛")
+    @case("空字符串 / 不存在的路径 → expand_to 返回 None，不抛")
     def _():
-        assert tree.path_of_label("") == ""
+        # ⚠️ 原来这里还有一句 `tree.path_of_label("") == ""` —— 那个方法在换成
+        # `path_of_node(item)` 之后就被删了，这条判据于是一直失败（不是产品 bug）。
+        # **不要**改成"`GetPath()` 返回空串"：`GetPath(None)` 按设计会退回
+        # **当前选中项**（启动时会自动定位上次浏览的目录），那时它不是空串。
         assert tree.expand_to("") is None
         assert tree.expand_to(os.path.join(scratch, "no-such-dir")) is None
-        return "3 种输入都返回空/None"
+        return "两种输入都返回 None"
 
     @case("超长路径（> 260 字符）→ 不抛")
     def _():

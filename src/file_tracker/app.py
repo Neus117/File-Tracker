@@ -2227,9 +2227,39 @@ class FileTracker(wx.Frame):
                 tree.SelectItem(item)
                 tree.EnsureVisible(item)
                 tree.Refresh()
-                return True
         finally:
             self.dir_ctrl.Thaw()
+        # **节点太多就整体重建一次，只保留当前这条路径。**
+        #
+        # 必须放在导航**结束之后**（`Freeze`/`Thaw` 之外、没有 item 还活着的时候）：
+        # 重建会把所有旧 item 一次性作废，正在用的 item 不能还在手里。
+        #
+        # 为什么必须做（2026-10-25 实测，`tools/probes/probe_tree_inflate.py`）：
+        # 6295 节点关闭 352 ms，**45746 节点关闭 10941 ms** ——
+        # 用户"开着用几小时之后关程序要等十几秒"就是这个。
+        if self.dir_ctrl.needs_trim():
+            self._trim_tree()
+        return True
+
+    def _trim_tree(self) -> None:
+        """整体重建目录树，只保留当前这条路径展开。
+
+        ## 为什么"整体重建"是唯一安全的那种回收
+
+        `populate()` 先 `DeleteChildren(root)`，所有旧 item **一次性**作废 ——
+        此时没有代码还攥着它们（导航刚结束，选中与日志都在它之后按路径重新解析）。
+        而"删一部分、留一部分"正是悬空句柄（`0xC0000005`）的来源：
+        前一个人 6 次失败全在这一件事上（见交接文档第 4 节）。
+
+        重建后 `populate(expand_path=...)` 会重新展开并选中当前路径，
+        所以用户看到的是"其余分支收起来了"，而不是"树空了"。
+        """
+        path = self.dir_ctrl.GetPath()
+        if not path:
+            return
+        self.dir_ctrl.populate(expand_path=path)
+        # 重建后横向滚动条回到初始位置 —— 与 `reset_dir_ctrl_scroll` 一致
+        self.reset_dir_ctrl_scroll()
 
     def _reveal_by_ancestor(self, tree, folder: str):
         """兜底：从"最深的、包含目标路径的已展开祖先"继续逐级展开下去。"""

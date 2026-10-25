@@ -1277,6 +1277,119 @@ def main() -> int:
 
         # ==============================================================
         print()
+        print("=== 长会话不退化：收起旧链 / 节点上限 / 超大目录不展开（2026-10-25）===")
+        # ==============================================================
+        # 用户原话（2026-10-25）：
+        #   「我使用这个程序的时候，它已经在我的电脑上运行了几个小时……每一次
+        #     打开的目录在导航窗格里全部都是展开的状态……是不是随着运行时间变长、
+        #     使用次数变多，左边导航窗格不停地在展开、不停地在叠加……才导致了
+        #     打开时长达几秒，最后关闭时甚至长达十几秒的性能异常？」
+        #
+        # 实测（`tools/probes/probe_tree_inflate.py`）：6295 节点关闭 352 ms，
+        # **45746 节点关闭 10941 ms** —— 他的怀疑成立。三处修法：
+        #   ① `expand_to` 展开新路径前，把**上一次由程序展开**的那条链收起来
+        #   ② 节点数超过 `tree_nav.MAX_TREE_NODES` 就整体重建（只留当前路径）
+        #   ③ 程序态遇到 `WinSxS` 那种（19727 个子目录）**干脆不展开**
+        chain_a = os.path.join(scratch.name, "chain-a", "a1", "a2")
+        chain_b = os.path.join(scratch.name, "chain-b", "b1", "b2")
+        os.makedirs(chain_a, exist_ok=True)
+        os.makedirs(chain_b, exist_ok=True)
+
+        frame.reveal_in_tree(chain_a)
+        first_target = tree.GetSelection()
+        a1_item = tree.GetItemParent(first_target) if first_target.IsOk() else None
+        check(
+            "阳性对照：第一次导航后，路径上那一级确实是展开的",
+            a1_item is not None and tree.IsExpanded(a1_item),
+            f"a1 = {tree.GetItemText(a1_item)!r}，IsExpanded = "
+            f"{tree.IsExpanded(a1_item) if a1_item else None}",
+        )
+
+        frame.reveal_in_tree(chain_b)
+        check(
+            "导航到新路径后，**上一次那条链收起来了**（不再一路全展开）",
+            a1_item is not None and a1_item.IsOk() and not tree.IsExpanded(a1_item),
+            f"旧链的 a1 节点 IsOk = {a1_item.IsOk() if a1_item else None}，"
+            f"IsExpanded = {tree.IsExpanded(a1_item) if a1_item else None}"
+            f"（只看不删：删节点会让调用方手里的 item 悬空）",
+        )
+        check(
+            "新路径照样展开并选中（收起旧链不能把新链也收掉）",
+            core.paths_equal(frame.dir_ctrl.GetPath(tree.GetSelection()), chain_b),
+            f"当前选中 = {frame.dir_ctrl.GetPath(tree.GetSelection())!r}",
+        )
+
+        # ---- 节点上限：超过就整体重建 ----
+        #
+        # 直接把计数器顶到上限之上，再走一次真实导航 —— 判据是"导航结束后
+        # 树里节点数回落到小量级"，而且**当前路径仍然选中**。
+        tree_native = frame.dir_ctrl
+        tree_native._node_count = tree_nav.MAX_TREE_NODES + 1
+        before_trim = tree_native.node_count
+        frame.reveal_in_tree(chain_a)
+        check(
+            f"节点数超过 {tree_nav.MAX_TREE_NODES} 时整体重建，节点回落到小量级",
+            not tree_native.needs_trim() and tree_native.node_count < before_trim // 2,
+            f"重建前计数器 = {before_trim}，重建后 node_count = "
+            f"{tree_native.node_count}（残留的大部分是 %TEMP% 自己的 271 个子目录；"
+            f"关闭耗时随节点数超线性上升）",
+        )
+        check(
+            "重建之后当前路径仍然选中（重建不是把树清空）",
+            core.paths_equal(frame.dir_ctrl.GetPath(tree.GetSelection()), chain_a),
+            f"当前选中 = {frame.dir_ctrl.GetPath(tree.GetSelection())!r}",
+        )
+
+        # ---- 超大目录：程序态**不展开** ----
+        #
+        # `C:\Windows\WinSxS` 有 19727 个子目录，建一节就是近四万节点、约 2.6 秒。
+        # 这里用 2600 个**空文件**造一个同量级的目录（判据只看条目数）。
+        huge = os.path.join(scratch.name, "huge-ancestor")
+        huge_target = os.path.join(huge, "inside")
+        os.makedirs(huge_target, exist_ok=True)
+        for index in range(tree_nav.MAX_PROGRAMMATIC_CHILDREN + 100):
+            with open(os.path.join(huge, "h-%05d.txt" % index), "w"):
+                pass
+        huge_entries = len(os.listdir(huge))
+        nodes_before_huge = tree_native.node_count
+        landed = frame.reveal_in_tree(huge_target)
+        delta = tree_native.node_count - nodes_before_huge
+        check(
+            "阳性对照：造出来的目录确实超过程序态上限",
+            huge_entries > tree_nav.MAX_PROGRAMMATIC_CHILDREN,
+            f"{huge} 有 {huge_entries} 个条目，上限 = "
+            f"{tree_nav.MAX_PROGRAMMATIC_CHILDREN}",
+        )
+        check(
+            "超大目录**不由程序展开**：导航它下面的子目录时不为它付节点代价",
+            delta < huge_entries,
+            f"这次导航共多建 {delta} 个节点，其中**一个都不是**这 {huge_entries} "
+            f"个条目（多出来的是路径上其它层级本来就该建的）；"
+            f"上限内的做法会是 {huge_entries} 个起步；reveal 返回 {landed}",
+        )
+        # 展开被拒绝时，reveal 会退到"包含目标的已展开祖先" —— 也就是这个超大目录
+        huge_item = tree.GetSelection()
+        check(
+            "超大目录里的子目录：树停在该超大目录本身（不再是几秒的空白等待）",
+            huge_item.IsOk() and core.paths_equal(
+                frame.dir_ctrl.GetPath(huge_item), huge),
+            f"当前选中 = {frame.dir_ctrl.GetPath(huge_item)!r}，期望 = {huge!r}",
+        )
+        placeholder = None
+        has_kids = False
+        if huge_item.IsOk():
+            has_kids = tree.ItemHasChildren(huge_item)
+            child, _cookie = tree.GetFirstChild(huge_item)
+            placeholder = tree.GetItemText(child) if child.IsOk() else None
+        check(
+            "超大目录仍然**保留展开箭头**（占位子项没被删，用户自己点开还能全量看）",
+            huge_item.IsOk() and has_kids and placeholder == "",
+            f"节点 = {tree.GetItemText(huge_item)!r}，ItemHasChildren = {has_kids}，"
+            f"第一个子项文本 = {placeholder!r}（空串 = 占位子项）",
+        )
+
+        # ==============================================================
+        print()
         print("=== 改动 ②：Win11 风格美化（可从程序读到的部分）===")
         # ==============================================================
         theme = frame.theme

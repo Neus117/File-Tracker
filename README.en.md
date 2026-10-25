@@ -25,7 +25,8 @@
 - Tree-view navigation
 - **Address bar**: paste or type a path and press Enter to jump there **and record
   one visit** (`Ctrl+L` to focus); big folders **along the way** list their
-  subfolders first and fill in files when you expand them
+  subfolders first and fill in files when you expand them; **navigating somewhere
+  new collapses the previous path** (only the current one stays expanded)
 - Select folders or files; double-clicking a file opens its parent folder
 - Remembers the last location you browsed; resets the horizontal scroll bar
 
@@ -84,7 +85,7 @@ v1.1.0 shipped on 2024-10-14; v1.4.1 on 2026-10-25. **More features, smaller dow
 | Settings dialog | None | **Yes** (language / theme / sort key / sort direction, all icon buttons) |
 | Dark theme | Some controls ignored it | **All custom-drawn controls follow it** |
 | Address bar + Enter | Did not open Explorer | **Actually opens it** |
-| Automated tests | **0** (and the test file imported two names that did not exist) | **203 unit tests + 223 GUI checks** |
+| Automated tests | **0** (and the test file imported two names that did not exist) | **207 unit tests + 232 GUI checks** |
 | Build pipeline | **None** (no `.spec`, no script, no CI) | `build.ps1` + 4 build checks + 9 gates in CI |
 | Binary reports its version | No | **Yes** (name / version / commit) |
 | Version info in file properties | Nearly blank | **All five fields filled** |
@@ -120,12 +121,22 @@ v1.1.0 shipped on 2024-10-14; v1.4.1 on 2026-10-25. **More features, smaller dow
 
 ## Known limitations
 
-**Typing the address of a folder with a huge number of entries (e.g. `C:\Windows\System32`)
-still expands that folder itself in full**, about 190 ms — the folder you navigate
-to must be complete; that is a deliberate trade-off. Big folders **along the way**
-(say `System32` when you are heading for `…\drivers\etc`) no longer build file
-nodes, so that Enter goes from **296 ms to about 70 ms**, and the tree shrinks
-from **5789 nodes to roughly 600**.
+**The navigation tree has three limits**, all of them there to keep a whole day of use
+from getting slower:
+
+1. **The folder you navigate to must be complete** — but the program will not expand a
+   folder with **more than 2500 entries** for you. `C:\Windows\WinSxS` has 19727
+   subfolders and takes **2.6 s** to expand; the tree stops at its parent and builds
+   the whole thing only when **you** click to expand it.
+2. **Navigating somewhere new collapses the previous path** — only the current path
+   stays expanded. It used to stay expanded forever, so nodes piled up over hours.
+3. **The tree is rebuilt once it exceeds 4000 nodes** (still keeping only the current
+   path). Closing time grows **super-linearly** with node count: measured 6295 nodes
+   → **0.35 s**, 45746 nodes → **11 s**.
+
+Along the way, big folders that are merely **passed through** (say `System32` on the
+way to `…\drivers\etc`) no longer build file nodes, so that Enter goes from
+**296 ms to about 70 ms** and the tree shrinks from **5789 to roughly 600** nodes.
 
 **Opening a record still rebuilds the list when you have a lot of them.**
 v1.3.3 cut that roughly in half:
@@ -245,7 +256,7 @@ powershell -File tools/verify_gui.ps1
 
 | Checker | What it catches |
 |---|---|
-| `pytest` | 200 unit tests, no GUI required |
+| `pytest` | 207 unit tests, no GUI required |
 | `check_wiring.py` | Things that are defined but never read |
 | `check_dialogs.py` | Dialogs given two buttons whose return value is ignored (users once reported "both buttons do the same thing") |
 | `check_duplicate_methods.py` | A method defined twice — Python silently keeps the last one, so **editing the first has no effect** |

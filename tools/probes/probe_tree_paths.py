@@ -13,10 +13,10 @@
 
 ## 第 2 个不能猜
 
-`path_of_label` 有两条路（`_as_drive_root` 直接解析 / 按文字全局搜索 + 沿父链回拼），
-到底是哪条给出了错的路径，**必须量出来**。
+当时用 `path_of_label` 查（按文字全局搜索 + 沿父链回拼，全树 O(N)，后来被删掉换成了
+`path_of_node`）—— 到底是哪条给出了错的路径，**必须量出来**。
 
-判据：对每个顶层盘符，把 `GetItemText` / `path_of_label` / `os.listdir` 前几项
+判据：对每个顶层盘符，把 `GetItemText` / `path_of_node` / `os.listdir` 前几项
 全部打出来，与真实盘根对照。
 """
 import ctypes
@@ -50,12 +50,13 @@ for _ in range(30):
 print('  ── 每个盘符：标签 → 解析出的路径 ──')
 for item in tree.iter_top():
     label = tree.GetItemText(item)
-    resolved = tree.path_of_label(label)
+    # ⚠️ 原来这里是 `tree.path_of_label(label)` —— 那个方法在换成
+    # `path_of_node(item)` 之后就被删了（按文字搜全树是 O(N)，见 dir_tree 的说明）。
+    resolved = tree.path_of_node(item)
     via_helper = _as_drive_root(label)
-    real = f"{label.split('(')[-1].rstrip(')')}" + chr(92) if '(' in label else ''
     print(f'    标签 {label!r}')
     print(f'      _as_drive_root  → {via_helper!r}')
-    print(f'      path_of_label   → {resolved!r}')
+    print(f'      path_of_node    → {resolved!r}')
     print(f'      os.path.isdir   → {os.path.isdir(resolved) if resolved else "（空）"}')
     if resolved and os.path.isdir(resolved):
         try:
