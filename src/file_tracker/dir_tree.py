@@ -467,6 +467,26 @@ class DirectoryTree(wx.TreeCtrl):
 
     def _on_expanding(self, event) -> None:
         item = event.GetItem()
+        # **窗口正在销毁时不要再建节点**（`0xC0000005` 防护）。
+        #
+        # `wx.TreeCtrl.Expand()` 会**投递事件**，而 `wx.Window.Destroy()`
+        # 是**延迟销毁**（只打标记，真正释放要等事件循环）。两者叠在一起：
+        # 窗口已经标记销毁、队列里还留着展开事件，处理它就是在访问一个
+        # 正在被释放的控件 —— 进程直接访问冲突，界面消失、没有任何提示。
+        #
+        # 实测：`tools/verify_gui.py` 在 `frame.Destroy()` 之后还会
+        # `wx.YieldIfNeeded()`，不加这一句时连跑 3 次崩 2 次。
+        #
+        # ⚠️ **必须用 `IsBeingDeleted()`，不是 `GetHandle()`** ——
+        # 在"已标记、未释放"那段窗口里 `GetHandle()` 仍返回有效句柄，
+        # 查它挡不住（第一版就是这么写错的，照样崩）。
+        try:
+            if self.IsBeingDeleted():
+                event.Skip()
+                return
+        except (RuntimeError, AttributeError):
+            event.Skip()
+            return
         self._populate_item(item)
         event.Skip()
 

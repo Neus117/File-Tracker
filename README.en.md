@@ -52,11 +52,11 @@
 
 | | |
 |---|---|
-| **Download** | Get `File.Tracker_v1.4.0.exe` from [Releases](https://github.com/Neus117/File-Tracker/releases/latest) and run it — portable, no installation |
+| **Download** | Get `File.Tracker_v1.4.1.exe` from [Releases](https://github.com/Neus117/File-Tracker/releases/latest) and run it — portable, no installation |
 | **Database** | On first launch it creates `file_tracker.db` under `C:\Users\<you>\` (named `file_access.db` back in v1.0) |
 | **Run at startup** | Press `Win+R`, type `shell:startup`, press Enter, and drop a shortcut into the folder that opens |
 | **Uninstall** | Delete the exe and `file_tracker.db` |
-| **Check the version** | `File.Tracker_v1.4.0.exe --version` prints something like `File Tracker 1.4.0+fa29265` — the part after `+` is the commit it was built from |
+| **Check the version** | `File.Tracker_v1.4.1.exe --version` prints something like `File Tracker 1.4.1+12f8bc7` — the part after `+` is the commit it was built from |
 | **Multi-select** (since v1.3.3) | Hold **Ctrl** and click to pick several rows, or **hold the left button and drag** across a range; **Shift**-click selects a run. With several rows selected, the context menu keeps only "Open N items" and "Delete N items" |
 
 > **About the asset name**: from v1.2.0 onward it is uniformly
@@ -72,9 +72,9 @@
 
 ## Compared with v1.1.0
 
-v1.1.0 shipped on 2024-10-14; v1.4.0 on 2026-10-17. **More features, smaller download.**
+v1.1.0 shipped on 2024-10-14; v1.4.1 on 2026-10-25. **More features, smaller download.**
 
-| | v1.1.0 | **v1.4.0** |
+| | v1.1.0 | **v1.4.1** |
 |---|---|---|
 | Size | 15.76 MB | **12.70 MB** |
 | UI language | Chinese only | **Chinese/English, switchable** |

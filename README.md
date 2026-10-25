@@ -46,11 +46,11 @@
 
 | | |
 |---|---|
-| **下载** | 到 [Releases](https://github.com/Neus117/File-Tracker/releases/latest) 下载 `File.Tracker_v1.4.0.exe`，双击即用，无需安装 |
+| **下载** | 到 [Releases](https://github.com/Neus117/File-Tracker/releases/latest) 下载 `File.Tracker_v1.4.1.exe`，双击即用，无需安装 |
 | **数据库** | 首次运行会在 `C:\Users\<你的用户名>\` 下创建 `file_tracker.db`（v1.0 时代叫 `file_access.db`） |
 | **开机自启** | `Win+R` 输入 `shell:startup` 回车，把程序的快捷方式放进打开的文件夹 |
 | **卸载** | 删掉 exe 和 `file_tracker.db` 即可 |
-| **查看版本** | `File.Tracker_v1.4.0.exe --version` → 打印形如 `File Tracker 1.4.0+fa29265`，`+` 后面是构建它的提交 |
+| **查看版本** | `File.Tracker_v1.4.1.exe --version` → 打印形如 `File Tracker 1.4.1+12f8bc7`，`+` 后面是构建它的提交 |
 | **多选**（v1.3.3 起） | 记录窗格里按住 **Ctrl** 点选多条，或**按住左键拖动**划选一段；**Shift** 点选可连选。多选后右键菜单只剩「打开 N 项」「删除 N 项」 |
 
 > **关于资产名**：从 v1.2.0 起统一为 `File.Tracker_v<完整版本号>.exe`。
@@ -63,9 +63,9 @@
 
 ## 与 v1.1.0 相比
 
-v1.1.0 发布于 2024-10-14，v1.4.0 发布于 2026-10-17。**功能变多了，体积反而小了。**
+v1.1.0 发布于 2024-10-14，v1.4.1 发布于 2026-10-25。**功能变多了，体积反而小了。**
 
-| | v1.1.0 | **v1.4.0** |
+| | v1.1.0 | **v1.4.1** |
 |---|---|---|
 | 体积 | 15.76 MB | **12.70 MB** |
 | 界面语言 | 仅中文 | **中英双语，可切换** |
