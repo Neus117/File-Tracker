@@ -702,6 +702,36 @@ def set_process_dark_mode(dark: bool) -> bool:
         return False
 
 
+def flush_menu_themes() -> bool:
+    """让系统**重新加载菜单/小部件的主题数据**（`uxtheme` 序号 136）。
+
+    ## 什么时候必须调：**运行中切主题**之后
+
+    用户 2026-10-26："就算我现在是以浅色主题启动的，然后在设置里改成了深色主题，
+    我希望这个时候菜单也能同步变成深色。"
+
+    实测（`tools/probes/probe_menu_dark.py --theme light --switch dark`，
+    抓整块菜单取众数色）：
+
+    * **深 → 浅**：只调 `SetPreferredAppMode(3)` 就生效；
+    * **浅 → 深**：**不调这个就不生效** —— 新弹出的菜单仍是 (249,249,249)；
+      切完再 Flush 一次，同一进程内新菜单 = **(44,44,44)**。
+
+    所以它配 `set_process_dark_mode` 一起用：**设完之后 Flush 一次**。
+    启动时不需要（那时还没有任何菜单被建过）。
+
+    :return: 是否调用成功（老系统上没有这个导出返回 ``False``）。
+    """
+    if not IS_WINDOWS:
+        return False
+    try:
+        uxtheme = ctypes.WinDLL("uxtheme")
+        uxtheme[136]()
+        return True
+    except (OSError, AttributeError, TypeError, IndexError):
+        return False
+
+
 def set_title_bar_dark(hwnd: int, dark: bool) -> bool:
     """让标题栏跟随深浅色主题（``DWMWA_USE_IMMERSIVE_DARK_MODE``）。
 

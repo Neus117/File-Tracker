@@ -414,7 +414,7 @@ def test_warning_badge_exclamation_sits_inside_and_is_lifted():
         dot_bottom = geometry["dot"][1] + geometry["dot"][2]
         middle = (bar_top + dot_bottom) / 2
         lift = geometry["centroid_y"] - middle        # 正 = 上移
-        expected = max(0.0, 0.05 * size - theme.EXCLAMATION_NUDGE_PX)
+        expected = theme.EXCLAMATION_LIFT_RATIO * size
         assert abs(lift - expected) < 1e-9, (size, lift, expected)
         assert middle < geometry["centroid_y"]         # 确实在重心之上
         assert bar_top > geometry["apex"][1]           # 在顶点之下
@@ -434,6 +434,8 @@ def test_warning_badge_bar_is_a_plain_thick_bar():
         # 比外框线**粗**（用户："中间的竖线又很细"），但仍是"一条线"
         assert geometry["bar_width"] > geometry["stroke"], size
         assert geometry["bar_width"] <= 0.09 * size, size
+        # 圆点跟着竖条一起收细（用户 2026-10-26："保持视觉上的一致性"）
+        assert 0.035 <= geometry["dot"][2] / size <= 0.05, size
         assert geometry["bar_width"] < geometry["bar"][3] - geometry["bar"][1], size
 
 

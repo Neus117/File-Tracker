@@ -678,12 +678,15 @@ class Metrics:
 
 METRICS = Metrics()
 
-#: 感叹号整组沿重心上移之后，再**往下挪**这么多**物理像素**。
+#: 感叹号整组沿重心上移的比例（**固定比例**，随尺寸走）。
 #:
-#: 用户 2026-10-26 第二轮验收："感叹号需要细一点、相对三角形**下移 1 像素**"。
-#: 这是**绝对像素**而不是比例：他看的是屏幕上那一个尺寸（54px），
-#: 差 1 像素是能一眼看出来的"视觉重心"问题，比例化反而会随字高漂。
-EXCLAMATION_NUDGE_PX = 1.0
+#: 来历：用户 2026-10-26 先要"上移两三个像素"，验收后又要"**下移 1 像素**"，
+#: 随后明确要求"**把视觉重心的比例固定住**"。
+#:
+#: 所以这里不再用"比例 − 1 物理像素"的混搭写法：
+#: 54px 那一档实测下来是 `0.05 × 54 − 1 = 1.7px` ⇒ **1.7 / 54 ≈ 0.0315**，
+#: 于是比例定死为 `0.0315`，换尺寸时视觉重心关系不变。
+EXCLAMATION_LIFT_RATIO = 0.0315
 
 
 def scale_for_dpi(pixels: int, dpi: int) -> int:
@@ -769,11 +772,14 @@ def warning_badge_geometry(size: float) -> dict:
     #        上移量 = 比例部分 **减 1 物理像素**。
     bar_length = 0.20 * size
     bar_gap = 0.060 * size
-    dot_radius = 0.050 * size
+    # 圆点半径跟着竖条一起收（用户 2026-10-26："竖条变细了以后，圆点也要同步
+    # 变细，要保持视觉上的一致性"）。竖条 0.086 → 0.072 是 ×0.837，
+    # 圆点 0.050 → **0.042**（同样 ×0.84），两者粗细观感才对得上。
+    dot_radius = 0.042 * size
     bar_width = 0.072 * size          # 比 `stroke`(0.062 s) 粗，但不再"很粗"
     group_height = bar_length + bar_gap + 2 * dot_radius
-    # **上移量 = 比例部分 − 1 物理像素**（用户按 54px 那一档说的"下移 1 像素"）
-    lift = max(0.0, 0.05 * size - EXCLAMATION_NUDGE_PX)
+    # **上移量是固定比例**（用户："把视觉重心的比例固定住"）
+    lift = EXCLAMATION_LIFT_RATIO * size
     group_top = centroid_y - group_height / 2 - lift
     return {
         "size": size,

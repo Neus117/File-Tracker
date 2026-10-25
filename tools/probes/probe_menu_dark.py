@@ -118,6 +118,9 @@ def grab(hwnd: int, tag: str) -> dict:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--theme", choices=("dark", "light"), default="dark")
+    parser.add_argument("--switch", choices=("dark", "light"),
+                        help="先以 --theme 启动，**运行中**再切到这一档并量第二次"
+                             "（模拟用户在设置里切主题）")
     parser.add_argument("--flush", action="store_true",
                         help="设完进程级模式后调 uxtheme[136]（FlushMenuThemes）")
     args = parser.parse_args(argv)
@@ -149,20 +152,22 @@ def main(argv=None) -> int:
 
     pid = os.getpid()
 
-    def finish(hwnd):
-        RESULTS.append(grab(hwnd, args.theme))
-        ctypes.windll.user32.PostMessageW(ctypes.c_void_p(hwnd), 0x0100, 0x1B, 0)
-        ctypes.windll.user32.PostMessageW(ctypes.c_void_p(hwnd), 0x0101, 0x1B, 0)
-        wx.CallLater(250, frame.Close)
+    def grab_and_continue(tag, then):
+        def finish(hwnd):
+            RESULTS.append(grab(hwnd, tag))
+            ctypes.windll.user32.PostMessageW(ctypes.c_void_p(hwnd),
+                                              0x0100, 0x1B, 0)
+            ctypes.windll.user32.PostMessageW(ctypes.c_void_p(hwnd),
+                                              0x0101, 0x1B, 0)
+            wx.CallLater(300, then)
 
-    def poll():
-        menus = find_popup_menus(pid)
-        if not menus:
-            wx.CallLater(150, poll)
-            return
-        finish(menus[0])
+        def poll():
+            menus = find_popup_menus(pid)
+            if not menus:
+                wx.CallLater(150, poll)
+                return
+            finish(menus[0])
 
-    def show():
         menu = wx.Menu()
         for label in ("复制路径", "顶置", "打开", "删除"):
             menu.Append(wx.ID_ANY, label)
@@ -170,8 +175,25 @@ def main(argv=None) -> int:
         frame.PopupMenu(menu)
         menu.Destroy()
 
-    wx.CallLater(500, show)
-    wx.CallLater(12000, frame.Close)
+    def after_first():
+        if not args.switch:
+            frame.Close()
+            return
+        # **模拟用户在设置里切主题**：只走 `_retheme`（代码里就是这么一条路）。
+        # 进程级开关的重设与 FlushMenuThemes 都应由 `_retheme` 自己完成 ——
+        # 探针**不手写**这两步，否则测的是探针不是产品。
+        theme_cls = type(frame.theme)
+        wanted = theme_cls.dark(frame.theme.accent) if args.switch == "dark" \
+            else theme_cls.light(frame.theme.accent)
+        frame.theme = wanted
+        frame._retheme()
+        print("switched to %s: is_dark = %s  process_dark_mode = %s"
+              % (args.switch, frame.theme.is_dark, win32.process_dark_mode))
+        wx.CallLater(400, lambda: grab_and_continue(
+            "%s-then-%s" % (args.theme, args.switch), frame.Close))
+
+    wx.CallLater(500, lambda: grab_and_continue(args.theme, after_first))
+    wx.CallLater(15000, frame.Close)
     app.MainLoop()
 
     print()

@@ -4557,6 +4557,12 @@ class FileTracker(wx.Frame):
         # 所以对后续弹出的菜单仍然有效（实测：切换后再右键，菜单是深的）。
         try:
             win32.set_process_dark_mode(self.theme.is_dark)
+            # **切完必须 Flush 一次。**
+            #
+            # 实测（`probe_menu_dark.py --theme light --switch dark`）：
+            # 深→浅 不 flush 也生效；**浅→深 不 flush 时新菜单仍是浅的**
+            # （(249,249,249)）——用户 2026-10-26 报的就是这一条。
+            win32.flush_menu_themes()
         except Exception:
             pass
         for child in (self.open_btn, self.clear_btn):

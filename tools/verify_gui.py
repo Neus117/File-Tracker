@@ -3459,10 +3459,12 @@ def main() -> int:
             f"{still_uses_system}（改前/改后能区分）",
         )
         check(
-            "运行中切主题也会重设进程级模式（否则切换后菜单一直是旧的）",
+            "运行中切主题：重设进程级模式 + FlushMenuThemes（否则浅→深不生效）",
             "set_process_dark_mode(self.theme.is_dark)" in
-            _inspect.getsource(_app_module),
-            "在 `_retheme` 里，菜单是按需创建的，所以对后续弹出的菜单有效",
+            _inspect.getsource(_app_module)
+            and "flush_menu_themes" in _inspect.getsource(_app_module),
+            "两句都在 `_retheme` 里。实测（`probe_menu_dark.py --theme light "
+            "--switch dark`）：浅→深 之后新菜单 (44,44,44)；不 Flush 时仍是 (249,249,249)",
         )
         # 浅色必须用 **ForceLight(3)**，不能传 0（Default=跟随系统）。
         # 用户 2026-10-26："浅色主题菜单错误保持深色。" —— 那条就是传 0 造成的：
