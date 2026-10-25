@@ -58,7 +58,7 @@
 | **Database** | On first launch it creates `file_tracker.db` under `C:\Users\<you>\` (named `file_access.db` back in v1.0) |
 | **Run at startup** | Press `Win+R`, type `shell:startup`, press Enter, and drop a shortcut into the folder that opens |
 | **Uninstall** | Delete the exe and `file_tracker.db` |
-| **Check the version** | `File.Tracker_v1.4.2.exe --version` prints something like `File Tracker 1.4.2+@REV@` — the part after `+` is the commit it was built from |
+| **Check the version** | `File.Tracker_v1.4.2.exe --version` prints something like `File Tracker 1.4.2+9454e28` — the part after `+` is the commit it was built from |
 | **Multi-select** (since v1.3.3) | Hold **Ctrl** and click to pick several rows, or **hold the left button and drag** across a range; **Shift**-click selects a run. With several rows selected, the context menu keeps only "Open N items" and "Delete N items" |
 
 > **About the asset name**: from v1.2.0 onward it is uniformly
@@ -78,7 +78,7 @@ v1.1.0 shipped on 2024-10-14; v1.4.2 on 2026-10-26. **More features, smaller dow
 
 | | v1.1.0 | **v1.4.2** |
 |---|---|---|
-| Size | 15.76 MB | **12.70 MB** |
+| Size | 15.76 MB | **12.73 MB** |
 | UI language | Chinese only | **Chinese/English, switchable** |
 | Sorting | Fixed to frequency | **Choose the column and direction; remembered across restarts** |
 | Pin order | Newest pin went last, and moved after a restart | **Newest pin goes first, and stays there** |
