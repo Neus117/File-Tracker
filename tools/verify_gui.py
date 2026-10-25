@@ -3563,11 +3563,74 @@ def main() -> int:
             f"组左边 = {group_x}（留白 {group_x - left}），"
             f"组右边 = {group_x + group_w}（留白 {right - (group_x + group_w)}）",
         )
+        # **多段正文：各行共用一条左缘**（2026-10-26 第三版）。
+        #
+        # 用户："这个警告窗根据正文内容的不同，排版方式会发生变化。比如现在这种
+        #       多段式的，排版就变成了这种情况。你看一下怎么去规范和统一化，要美观。"
+        #
+        # 那张截图里图标飘在正文块左侧、第一行却缩在中间 —— 根因是**逐行居中**
+        # （每行按自己宽度在"最宽那一行"的列里居中）。改成"组内一律左对齐"。
+        #
+        # 判据落在**位图上每行墨迹的左缘**（不是读代码里的公式）：
+        # 逐行居中时各行左缘必然不同 ⇒ 改前/改后能区分。
+        # 这里用 `alert=False` 的弹窗量，避免图标的墨迹混进第一行。
+        multi_text = ["这条路径已失效：", "", "F:\\【屎山】Windows 系统相关问题",
+                      "", "要从记录中删除它吗？"]
+        probe_multi = _widgets.ThemedDialog(
+            frame, frame.theme, "\n".join(multi_text),
+            title="路径已失效", alert=False)
+        multi_w = probe_multi.GetClientSize().width
+        multi_h = probe_multi.GetClientSize().height
+        multi_canvas = wx.Bitmap(multi_w, multi_h)
+        multi_dc = wx.MemoryDC(multi_canvas)
+        multi_dc.SetBackground(wx.Brush(wx.Colour(probe_multi.theme.background)))
+        multi_dc.Clear()
+        multi_dc.SetFont(probe_multi.GetFont())
+        # **行高必须取自"画这块位图用的那个 DC"。**
+        # 踩过：`MemoryDC` 与窗口 `ClientDC` 报的字高不同（22 vs 30px），
+        # 用后者分带 ⇒ 后面的行落在两行之间、数不到墨迹（会变成假阳性）。
+        multi_line_h = multi_dc.GetTextExtent(
+            _widgets._measure_probe()).height or 1
+        probe_multi._body_rect = (probe_multi._body_rect[0], 0,
+                                  multi_w, multi_h)
+        probe_multi._draw_body(multi_dc)
+        multi_dc.SelectObject(wx.NullBitmap)
+        multi_image = multi_canvas.ConvertToImage()
+        multi_edges = []
+        for index, text in enumerate(probe_multi._lines):
+            if not text:
+                continue
+            band_top = index * multi_line_h
+            xs = [x
+                  for y in range(band_top, min(band_top + multi_line_h, multi_h))
+                  for x in range(multi_w)
+                  if multi_image.GetRed(x, y) < 128]
+            multi_edges.append((text, min(xs) if xs else None))
+        distinct_edges = {edge for _text, edge in multi_edges if edge is not None}
+        text_widths = []
+        multi_dc2 = wx.ClientDC(probe_multi)
+        multi_dc2.SetFont(probe_multi.GetFont())
+        for text in probe_multi._lines:
+            if text:
+                text_widths.append(multi_dc2.GetTextExtent(text).width)
+        del multi_dc2
+        probe_multi.Destroy()
+        # 容差 **1 px**：绘制起点是同一个整数 x，但不同首字（这 / F / 要）
+        # 的抗锯齿墨迹起点会差 1 px。逐行居中时这个差是**几十到上百 px**。
+        edge_values = [edge for _t, edge in multi_edges if edge is not None]
+        edge_spread = (max(edge_values) - min(edge_values)) if edge_values else 999
         check(
-            "每行文字在组内居中（左右留白相等，差 ≤ 1px）",
-            all(abs((block_w - w) // 2 - (block_w - w - (block_w - w) // 2)) <= 1
-                for w in widths),
-            f"文字块宽 {block_w}，各行宽 {widths}",
+            "多段正文：各行共用一条左缘（不逐行居中，容差 1px）",
+            len(multi_edges) >= 3
+            and all(edge is not None for _t, edge in multi_edges)
+            and edge_spread <= 1,
+            f"各行墨迹左缘 = {[(t[:6], e) for t, e in multi_edges]}"
+            f"，极差 {edge_spread}px（共 {len(multi_edges)} 行文字）",
+        )
+        check(
+            "阳性对照：这几行宽度确实不同（逐行居中会得到不同左缘）",
+            len(set(text_widths)) >= 3,
+            f"各行宽 = {text_widths}",
         )
         check(
             "阳性对照：正文确实有内容（不是空行凑出来的居中）",
