@@ -927,7 +927,15 @@ class ThemedDialog(wx.Dialog):
         lines: list[str] = []
         for paragraph in self._message.splitlines() or [""]:
             if not paragraph:
-                lines.append("")
+                # **空行不占高度**（2026-10-26）。
+                #
+                # 用户："就是这种多段式的正文，每行之间应该不用空行。把空行删了
+                # 我再看。" —— 调用点用 `\n\n` 分段（"这条路径已失效：\n\n<路径>
+                # \n\n要从记录中删除它吗？"），若空行照占一行，三段之间会各留一个
+                # 整行高度，弹窗又高又松。现在按**行距**排，段落只靠行距区分。
+                #
+                # 注意：这里不删调用点的 `\n\n` —— 保留分段写法，让"分段"这件事
+                # 在源码里仍然可读，渲染层统一忽略空行。
                 continue
             current = ""
             for char in paragraph:

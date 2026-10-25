@@ -85,7 +85,7 @@ v1.1.0 shipped on 2024-10-14; v1.4.2 on 2026-10-26. **More features, smaller dow
 | Settings dialog | None | **Yes** (language / theme / sort key / sort direction, all icon buttons) |
 | Dark theme | Some controls ignored it | **All custom-drawn controls follow it** |
 | Address bar + Enter | Did not open Explorer | **Actually opens it** |
-| Automated tests | **0** (and the test file imported two names that did not exist) | **220 unit tests + 256 GUI checks** |
+| Automated tests | **0** (and the test file imported two names that did not exist) | **220 unit tests + 257 GUI checks** |
 | Build pipeline | **None** (no `.spec`, no script, no CI) | `build.ps1` + 4 build checks + 9 gates in CI |
 | Binary reports its version | No | **Yes** (name / version / commit) |
 | Version info in file properties | Nearly blank | **All five fields filled** |

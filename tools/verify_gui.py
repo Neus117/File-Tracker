@@ -3632,6 +3632,24 @@ def main() -> int:
             len(set(text_widths)) >= 3,
             f"各行宽 = {text_widths}",
         )
+        # **段落之间的空行不占高度**（2026-10-26）。
+        #
+        # 用户："就是这种多段式的正文，每行之间应该不用空行。把空行删了我再看。"
+        # 调用点仍然用 `\n\n` 分段（源码可读），渲染层忽略空行 —— 判据落在
+        # "三段正文的高度 == 3 × 行高"；改前两个空行各占一行 ⇒ 5 × 行高。
+        probe_blank = _widgets.ThemedDialog(frame, frame.theme,
+                                            "一\n\n二\n\n三", title="空行")
+        blank_line_h = probe_blank._line_height()
+        blank_height = probe_blank._measure_body_height(
+            probe_blank.GetClientSize().width)
+        blank_lines = len(probe_blank._lines)
+        probe_blank.Destroy()
+        check(
+            "正文里的空行不占高度（多段之间只留行距，不留空行）",
+            blank_lines == 3 and blank_height == 3 * blank_line_h,
+            f"3 段文字折出 {blank_lines} 行，正文高 {blank_height}"
+            f"（行高 {blank_line_h}；改前空行各占一行 ⇒ 5 行）",
+        )
         check(
             "阳性对照：正文确实有内容（不是空行凑出来的居中）",
             text_width > 0,
