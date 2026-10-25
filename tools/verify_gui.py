@@ -1422,9 +1422,14 @@ def main() -> int:
             f"节点 = {tree.GetItemText(huge_item)!r}，ItemHasChildren = {has_kids}，"
             f"第一个子项文本 = {placeholder!r}（空串 = 占位子项）",
         )
+        check(
+            "程序态不展开的超大目录保持**折叠**（不是「展开着却只有一行空白」）",
+            huge_item.IsOk() and not tree.IsExpanded(huge_item),
+            f"IsExpanded = {tree.IsExpanded(huge_item) if huge_item.IsOk() else None}"
+            f"（展开着但不建子项 = 2026-10-26 那张截图）",
+        )
 
         # ---- 用户**自己**点开超大目录：分页显示，不能是"几秒空白" ----
-        #
         # 用户 2026-10-26 截图报的 bug：展开 `WinSxS` 卡 5~6 秒后**什么都看不到**
         # —— 2.7 秒建出来的 39697 个节点，紧接着被"节点上限"整体重建删光了。
         # 现在的规则：一次只放 `MAX_EXPAND_PAGE` 个 + 一行"还有 N 项未显示"，

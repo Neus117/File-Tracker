@@ -2227,7 +2227,16 @@ class FileTracker(wx.Frame):
                 if item is None or not item.IsOk():
                     return False
 
-                tree.Expand(item)
+                # **只在"已经建出真实子项"时才展开。**
+                # 程序主动不建的超大目录（`too_many_to_expand`）要**收起来** ——
+                # 否则用户看到"展开着、下面只有一行空白"（2026-10-26 截图）。
+                # 为什么是 Collapse 而不是"不 Expand"：兜底扫描
+                # （`TreeWalker._children(expand=True)`）也会把节点展开，那时
+                # "不展开"拦不住它 —— 收一次才能保证最终状态一致。
+                if self.dir_ctrl.has_children_ready(item):
+                    tree.Expand(item)
+                else:
+                    tree.Collapse(item)
                 # **必须先 UnselectAll。** 目录树带了 wx.DIRCTRL_MULTIPLE，
                 # 是**多选**控件，而 SelectItem 在多选树上是"追加"而不是"替换"：
                 # 不清空的话，树里原有选中项（通常是当前盘符）会一直留着，

@@ -1068,13 +1068,28 @@ class DirectoryTree(wx.TreeCtrl):
                     return None
                 # **先同步建子节点，再展开** —— 顺序反了就又会只走一层。
                 self._populate_item(found, files=True if last else None)
-                self.Expand(found)
+                # ⚠️ **拒绝展开的超大目录保持折叠。**
+                #
+                # 否则用户看到的是"节点是展开状态、下面却只有一行空白"
+                # （2026-10-26 截图）—— 观感上像坏了，实际上是我们主动不建。
+                # 折叠起来 + 箭头还在，用户点一下才分页加载，语义才对。
+                if self.has_children_ready(found):
+                    self.Expand(found)
                 target = found
                 chain.append(target)
         self._revealed_chain = chain
         if select:
             self.SelectItem(target)
         return target
+
+    def has_children_ready(self, item) -> bool:
+        """这个节点**已经建出真实子项**了吗（占位子项不算）。
+
+        用来避免"展开一个我们主动不建的节点" —— 那样用户看到的是
+        "展开状态 + 一行空白"，观感上像坏了（2026-10-26 截图）。
+        """
+        state = self._populated.get(item)
+        return state in ("full", "dirs", "capped")
 
     def _collapse_revealed_chain(self) -> None:
         """把**上一次由程序展开**的那条链收起来（用户点开的分支不动）。
