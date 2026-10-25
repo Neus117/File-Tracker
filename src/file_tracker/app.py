@@ -562,6 +562,12 @@ class FileTracker(wx.Frame):
         # `tree.Expand()` 会触发它——那正是要躲开的"程序化事件"。
         tree.Bind(wx.EVT_TREE_KEY_DOWN, self.on_tree_selection_made)
         tree.Bind(wx.EVT_SET_FOCUS, self.on_tree_selection_made)
+        # **用户自己在树里展开目录 → 顺手检查一次节点总量。**
+        #
+        # 这是"手动浏览"那条路的兜底：`reveal_in_tree` 里的检查只在
+        # 地址栏回车 / 双击文件时跑，而用户完全可以只用树浏览几小时
+        # （他的原话就是"从左边导航窗格打开"）。节点只增不减 ⇒ 关闭十几秒。
+        tree.Bind(wx.EVT_TREE_ITEM_EXPANDED, self.on_tree_expanded)
         # **填充并展开到上次的目录。**
         #
         # `GenericDirCtrl` 是构造时用 `dir=` 一次搞定的；换成自己的树之后
@@ -665,6 +671,8 @@ class FileTracker(wx.Frame):
         self._focus_pane = "tree"
         # 关闭时用来停掉挂起回调（见 `on_close` / `_call_later`）
         self._closing = False
+        # `on_tree_expanded` 排下的"重建目录树"是否已经在路上（去重）
+        self._trim_pending = False
         self._pending_timers: list = []
         # 点了列表（含点已选中的那一行，此时 `ITEM_SELECTED` 不发）
         for list_event in (wx.EVT_LIST_ITEM_SELECTED, wx.EVT_SET_FOCUS):
@@ -2260,6 +2268,33 @@ class FileTracker(wx.Frame):
         self.dir_ctrl.populate(expand_path=path)
         # 重建后横向滚动条回到初始位置 —— 与 `reset_dir_ctrl_scroll` 一致
         self.reset_dir_ctrl_scroll()
+
+    def on_tree_expanded(self, event) -> None:
+        """用户自己在树里展开一个目录**之后**，检查一次节点总量。
+
+        ## ⚠️ 必须推到下一轮事件循环
+
+        `EVT_TREE_ITEM_EXPANDED` 是**同步**派发的（与 `EXPANDING` 一样，见
+        `DirectoryTree.quiet_expand` 的说明）。在这里直接重建树，等于把
+        **正在处理的这个节点本身**删掉 —— wx 处理完事件还会接着用它，
+        那就是 `0xC0000005`。所以只**排一个**回调（`_trim_pending` 去重），
+        真正重建在事件处理之外做。
+
+        为什么需要它：`reveal_in_tree` 里那次检查只在"地址栏回车 / 双击文件"
+        时跑，而用户完全可以只用左边的树浏览几小时 —— 他那次"关程序十几秒"
+        就是这么来的（节点只增不减）。
+        """
+        event.Skip()
+        if self._trim_pending or not self.dir_ctrl.needs_trim():
+            return
+        self._trim_pending = True
+        self._call_after(self._run_scheduled_trim)
+
+    def _run_scheduled_trim(self) -> None:
+        """`on_tree_expanded` 排下的那次重建（回调里再确认一遍条件）。"""
+        self._trim_pending = False
+        if self.dir_ctrl.needs_trim():
+            self._trim_tree()
 
     def _reveal_by_ancestor(self, tree, folder: str):
         """兜底：从"最深的、包含目标路径的已展开祖先"继续逐级展开下去。"""

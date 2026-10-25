@@ -1340,6 +1340,37 @@ def main() -> int:
             f"当前选中 = {frame.dir_ctrl.GetPath(tree.GetSelection())!r}",
         )
 
+        # ---- 手动浏览那条路也要能触发重建 ----
+        #
+        # 用户的原话是"从左边导航窗格打开" —— 只靠 `reveal_in_tree` 里的检查
+        # 会漏掉"只用树浏览几小时"这条完全合法的用法。
+        frame.reveal_in_tree(chain_b)
+        before_manual = tree_native._node_count = tree_nav.MAX_TREE_NODES + 1
+        manual_parent = tree.GetItemParent(tree.GetSelection())
+        tree.Collapse(manual_parent)
+        tree.Expand(manual_parent)          # 手动展开：不在 quiet_expand 里
+        # **收起父节点时 MSW 会把选中挪到父节点**（资源管理器同款行为），
+        # 所以"重建后该选谁"要以这一刻为准，不能假定还是原来的子项。
+        expected_after_manual = frame.dir_ctrl.GetPath(tree.GetSelection())
+        for _ in range(20):
+            wx.YieldIfNeeded()
+            time.sleep(0.01)
+        check(
+            "手动在树里展开也会触发重建（只用树浏览几个小时也不会累积）",
+            not tree_native.needs_trim()
+            and tree_native.node_count < tree_nav.MAX_TREE_NODES,
+            f"强制计数器 = {before_manual}，展开后 node_count = "
+            f"{tree_native.node_count}",
+        )
+        check(
+            "那次重建之后当前路径仍然选中（重建不清空选中）",
+            bool(expected_after_manual) and core.paths_equal(
+                frame.dir_ctrl.GetPath(tree.GetSelection()),
+                expected_after_manual),
+            f"重建前选中 = {expected_after_manual!r}，重建后 = "
+            f"{frame.dir_ctrl.GetPath(tree.GetSelection())!r}",
+        )
+
         # ---- 超大目录：程序态**不展开** ----
         #
         # `C:\Windows\WinSxS` 有 19727 个子目录，建一节就是近四万节点、约 2.6 秒。
