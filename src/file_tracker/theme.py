@@ -745,12 +745,23 @@ def warning_badge_geometry(size: float) -> dict:
               centroid_y + (y - centroid_y) * scale)
              for x, y in (apex, left, right)]
 
-    # 感叹号：竖条 + 间隙 + 圆点，整组沿重心垂直居中
+    # 感叹号：竖条 + 间隙 + 圆点，整组沿重心**再上移**一点点
+    #
+    # 用户 2026-10-26 看图后提的两条观感：
+    #   ① "感叹号竖线部分给人感觉**上下两端有小圆点凸起**，而中间的竖线又很细"
+    #      ⇒ 那正是"两端补半径 = 半个线宽的圆头"造成的：这个尺寸下它读起来是凸起。
+    #      **去掉圆头，改成一条等宽竖条**，并且比外框线宽一点（不然显得细）。
+    #   ② "希望这个感叹号**稍微上移两三个像素**，对比等边三角形"
+    #      ⇒ 三角形视觉重心偏下（底边是一条实线），所以整组沿重心再上移
+    #      `0.05 s`（45px 时为 2.25px —— 正是"两三个像素"）。
     bar_length = 0.20 * size
     bar_gap = 0.060 * size
     dot_radius = 0.050 * size
+    bar_width = 0.086 * size          # 比 `stroke`(0.062 s) 粗，不再"很细"
     group_height = bar_length + bar_gap + 2 * dot_radius
-    group_top = centroid_y - group_height / 2
+    # **以比例表示上移量**（换尺寸时按比例走，不写死像素）
+    lift = 0.05 * size
+    group_top = centroid_y - group_height / 2 - lift
     return {
         "size": size,
         "margin": margin,
@@ -763,6 +774,7 @@ def warning_badge_geometry(size: float) -> dict:
         "centroid_y": centroid_y,
         "inner": inner,
         "bar": (centre_x, group_top, centre_x, group_top + bar_length),
+        "bar_width": bar_width,
         "dot": (centre_x, group_top + bar_length + bar_gap + dot_radius,
                 dot_radius),
     }

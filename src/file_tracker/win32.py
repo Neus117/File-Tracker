@@ -631,6 +631,14 @@ def find_child_window(hwnd: int, class_name: str) -> int:
     return found[0] if found else 0
 
 
+#: 最近一次成功设置的进程级深色模式（`None` = 从没设过 / 系统不支持）。
+#:
+#: **留一个可读回的值**：用户报的"深色主题下右键菜单还是浅色"就是
+#: "进程级模式按**系统**主题决定、而程序被手动设成了深色"造成的，
+#: 而这件事在界面上只能看出一个症状、看不出原因。验证脚本读这个值判定。
+process_dark_mode: bool | None = None
+
+
 def set_process_dark_mode(dark: bool) -> bool:
     """告诉 Windows：**本进程整体渲染深色控件**。
 
@@ -664,6 +672,7 @@ def set_process_dark_mode(dark: bool) -> bool:
         setter.restype = ctypes.c_int
         # 2 = ForceDark：强制深色，不跟随系统
         setter(2 if dark else 0)
+        globals()["process_dark_mode"] = bool(dark)
         return True
     except (OSError, AttributeError, TypeError):
         return False

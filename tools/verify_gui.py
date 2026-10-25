@@ -3389,6 +3389,80 @@ def main() -> int:
             "wx.MessageDialog/MessageBox 由系统按浅色主题绘制，深色下改不了色",
         )
 
+        # ---- 进程级深色模式跟的是**程序主题**，不是系统主题（2026-10-26 修的旧 bug）----
+        #
+        # 用户："在深色主题下，选中路径记录器当中的条目并右键点击，
+        #       其菜单没有随深色主题反色，依然是浅色背景。"
+        #
+        # 右键菜单 / 滚动条 / 系统提示框都是**系统画的**，只看
+        # `uxtheme.SetPreferredAppMode` 那个**进程级**开关；而 `OnInit` 原来按
+        # **系统主题**设它 ⇒ "系统浅色 + 程序深色"时自绘部分全深、菜单却是浅的。
+        #
+        # 实测 A/B（`tools/probes/probe_menu_dark.py`，取整块菜单矩形的众数色）：
+        # 修复前 (249,249,249)／暗占比 2.6%，修复后 (44,44,44)／暗占比 95.2%。
+        from file_tracker import config as _config_module
+
+        original_theme = _config_module.Config(
+            _app_module.default_config_path()).get_theme()
+        resolved = {}
+        try:
+            for preference, want_dark in (("dark", True), ("light", False)):
+                store_cfg = _config_module.Config(
+                    _app_module.default_config_path())
+                store_cfg.set_theme(preference)
+                store_cfg.save()
+                resolved[preference] = _app_module.process_theme_preference()
+        finally:
+            restore = _config_module.Config(_app_module.default_config_path())
+            restore.set_theme(original_theme or "system")
+            restore.save()
+        check(
+            "进程级深色模式按**程序主题偏好**算（不是系统主题）",
+            resolved.get("dark") is not None and resolved["dark"].is_dark
+            and resolved.get("light") is not None
+            and not resolved["light"].is_dark,
+            f"配置 dark → is_dark={getattr(resolved.get('dark'), 'is_dark', None)}，"
+            f"配置 light → is_dark={getattr(resolved.get('light'), 'is_dark', None)}"
+            f"（系统当前浅色 = {win32.system_uses_light_theme()}）",
+        )
+        # ⚠️ 判据**必须走 AST**，不能拿源码字符串比对：那段旧代码被我
+        # 原样写进了 `process_theme_preference` 的说明文档里，
+        # 字符串判据会命中自己的注释（这个坑本项目已经踩过两次）。
+        on_init = None
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.FunctionDef) and node.name == "OnInit":
+                on_init = node
+                break
+        init_calls = []
+        if on_init is not None:
+            for node in _ast.walk(on_init):
+                if isinstance(node, _ast.Call):
+                    call_name = (getattr(node.func, "attr", None)
+                                 or getattr(node.func, "id", None))
+                    init_calls.append((call_name,
+                                       _ast.get_source_segment(source, node)
+                                       or ""))
+        sets_from_preference = any(
+            call_name == "set_process_dark_mode"
+            and "process_theme_preference" in segment
+            for call_name, segment in init_calls)
+        still_uses_system = any(
+            call_name == "system_uses_light_theme"
+            for call_name, _segment in init_calls)
+        check(
+            "`OnInit` 按**程序主题**设进程级模式（AST 判，不比对源码字符串）",
+            sets_from_preference and not still_uses_system,
+            f"OnInit 里调 set_process_dark_mode 用的是程序主题 = "
+            f"{sets_from_preference}；仍调用 system_uses_light_theme = "
+            f"{still_uses_system}（改前/改后能区分）",
+        )
+        check(
+            "运行中切主题也会重设进程级模式（否则切换后菜单一直是旧的）",
+            "set_process_dark_mode(self.theme.is_dark)" in
+            _inspect.getsource(_app_module),
+            "在 `_retheme` 里，菜单是按需创建的，所以对后续弹出的菜单有效",
+        )
+
         # ---- 弹窗尺寸照抄 Roboc 的固定公式 ----
         #
         # 用户问"Roboc 的所有窗口外观为什么规范又漂亮"。

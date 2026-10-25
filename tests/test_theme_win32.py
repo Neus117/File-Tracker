@@ -400,15 +400,38 @@ def test_warning_badge_inner_triangle_is_inside():
         assert max(inner_ys) < base_y, size          # 内三角底边在外三角底边之上
 
 
-def test_warning_badge_exclamation_sits_inside_and_is_centred():
-    """感叹号整组沿**重心**垂直居中，且落在三角内部。"""
+def test_warning_badge_exclamation_sits_inside_and_is_lifted():
+    """感叹号整组在三角内部，并**沿重心上移**一点（用户 2026-10-26 的观感要求）。
+
+    > "希望这个感叹号稍微上移两三个像素，对比等边三角形。"
+
+    三角形的视觉重心偏下（底边是一条实线），所以整组沿重心再上移 `0.05 s`。
+    判据是**比例**（不写死像素），换尺寸时自动跟着走。
+    """
     for size in (24, 43, 75):
         geometry = theme.warning_badge_geometry(size)
         bar_top = geometry["bar"][1]
         dot_bottom = geometry["dot"][1] + geometry["dot"][2]
-        assert abs((bar_top + dot_bottom) / 2 - geometry["centroid_y"]) < 1e-9, size
+        middle = (bar_top + dot_bottom) / 2
+        lift = geometry["centroid_y"] - middle        # 正 = 上移
+        assert abs(lift - 0.05 * size) < 1e-9, (size, lift)
+        assert middle < geometry["centroid_y"]         # 确实在重心之上
         assert bar_top > geometry["apex"][1]           # 在顶点之下
         assert dot_bottom < geometry["left"][1]        # 在底边之上
+
+
+def test_warning_badge_bar_is_a_plain_thick_bar():
+    """竖条是**等宽**矩形（没有圆头）且比外框线粗 —— 用户提的两条观感。
+
+    > "感叹号竖线部分给人感觉上下两端有小圆点凸起，而中间的竖线又很细。"
+
+    * 不再补圆头 ⇒ 圆点半径只出现在"感叹号下面那个点"上（`dot` 一项）；
+    * 竖条宽 `bar_width` 必须**大于**外框线宽 `stroke`。
+    """
+    for size in (24, 43, 75):
+        geometry = theme.warning_badge_geometry(size)
+        assert geometry["bar_width"] > geometry["stroke"] * 1.2, size
+        assert geometry["bar_width"] < geometry["bar"][3] - geometry["bar"][1], size
 
 
 def test_warning_badge_is_bigger_than_body_text():

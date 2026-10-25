@@ -85,7 +85,7 @@ v1.1.0 shipped on 2024-10-14; v1.4.1 on 2026-10-25. **More features, smaller dow
 | Settings dialog | None | **Yes** (language / theme / sort key / sort direction, all icon buttons) |
 | Dark theme | Some controls ignored it | **All custom-drawn controls follow it** |
 | Address bar + Enter | Did not open Explorer | **Actually opens it** |
-| Automated tests | **0** (and the test file imported two names that did not exist) | **218 unit tests + 251 GUI checks** |
+| Automated tests | **0** (and the test file imported two names that did not exist) | **219 unit tests + 254 GUI checks** |
 | Build pipeline | **None** (no `.spec`, no script, no CI) | `build.ps1` + 4 build checks + 9 gates in CI |
 | Binary reports its version | No | **Yes** (name / version / commit) |
 | Version info in file properties | Nearly blank | **All five fields filled** |
@@ -258,7 +258,7 @@ powershell -File tools/verify_gui.ps1
 
 | Checker | What it catches |
 |---|---|
-| `pytest` | 218 unit tests, no GUI required |
+| `pytest` | 219 unit tests, no GUI required |
 | `check_wiring.py` | Things that are defined but never read |
 | `check_dialogs.py` | Dialogs given two buttons whose return value is ignored (users once reported "both buttons do the same thing") |
 | `check_duplicate_methods.py` | A method defined twice — Python silently keeps the last one, so **editing the first has no effect** |

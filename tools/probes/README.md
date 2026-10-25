@@ -305,6 +305,7 @@ cd "D:\Coding\MyGitHub\File-Tracker"
 | `probe_tree_perf.py` | 改 `_entries_of` / `_populate_item` 之前**先量基线** |
 | `probe_pathbar_populate.py` | **地址栏回车慢 / 关程序慢** —— 把 `_populate_item` 的每一次调用都列出来（谁调的、哪个目录、建了几个节点、几个是文件、各花多久），并按"同步"和"事件循环"两段分开计时 |
 | `probe_tree_accumulate.py` | **"开着用几小时之后变慢"** —— 连续导航几十条真实深路径，量累计节点数与每次导航的耗时；`--seed-rows` 可分离"列表重建"的贡献 |
+| `probe_menu_dark.py` | **深色主题下右键菜单/系统控件的颜色** —— 抓整块菜单矩形取**众数色**（单点读数会骗人）；也是「进程级深色模式必须按程序主题设」这条判据的来源 |
 | `probe_tree_inflate.py` | **节点数 → 时间的成本曲线**（`--target-nodes`）—— 关闭耗时是**超线性**的：6295 节点 0.35 s，45746 节点 11 s |
 | `probe_lazy_expand.py` | 核树是不是懒加载的 |
 | `probe_tree_labels.py` | 核驱动器节点的标签（`SYSTEM (C:)` 那种） |

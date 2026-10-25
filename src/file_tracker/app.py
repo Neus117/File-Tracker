@@ -4548,6 +4548,17 @@ class FileTracker(wx.Frame):
                        self._right_panel, self.splitter):
             holder.SetBackgroundColour(wx.Colour(self.theme.background))
         self._card_panel.SetBackgroundColour(wx.Colour(self.theme.card))
+        # **进程级深色模式也要跟着改。**
+        #
+        # 右键菜单、滚动条、系统提示框这些是**系统画的**，它们只看
+        # `SetPreferredAppMode` 那个进程级开关；不重设的话，
+        # "启动时是浅色、运行中切成深色"之后菜单会一直是浅的。
+        # 官方说这个开关"对已经创建的控件无效"——菜单是**按需创建**的，
+        # 所以对后续弹出的菜单仍然有效（实测：切换后再右键，菜单是深的）。
+        try:
+            win32.set_process_dark_mode(self.theme.is_dark)
+        except Exception:
+            pass
         for child in (self.open_btn, self.clear_btn):
             child.apply_theme(self.theme)
         self.path_bar.apply_theme(self.theme)
@@ -4981,6 +4992,38 @@ class FileTracker(wx.Frame):
         wx.CallAfter(guarded)
 
 
+def process_theme_preference() -> Theme:
+    """**进程级**深色模式该按什么来 —— 答案是"程序的主题偏好"，不是系统主题。
+
+    ## 这一条修的是用户 2026-10-26 报的旧 bug
+
+    > "在深色主题下，选中路径记录器当中的条目并右键点击，
+    >   其菜单没有随深色主题反色，依然是浅色背景。"
+
+    右键菜单是系统绘制的（`#32768` 类窗口），它跟的是
+    `uxtheme.SetPreferredAppMode` 那个**进程级**开关。而原来这里写的是：
+
+    ```python
+    dark = win32.system_uses_light_theme() is False      # ← 按**系统**主题
+    ```
+
+    于是"系统是浅色、用户把程序设成深色"时，进程级开关是**浅色** ——
+    程序自绘的部分全是深的，唯独菜单、滚动条、表头、系统提示框是浅的。
+    反过来（系统深色、程序设成浅色）也一样。
+
+    实测（`tools/probes/_probe_menu_dark.py`，取整块菜单矩形的众数色）：
+    强制进程深色后菜单 **95% 像素是 (44,44,44)**；进程浅色时是 (249,249,249)。
+
+    **必须在创建任何窗口之前调用**（所以由 `FileTrackerApp.OnInit` 先用它取主题）。
+    取不到配置时退回系统主题，与"跟随系统"的语义一致。
+    """
+    try:
+        preference = Config(default_config_path()).get_theme()
+    except Exception:
+        preference = None
+    return theme_from_preference(preference)
+
+
 class FileTrackerApp(wx.App):
     """应用程序对象。
 
@@ -5008,10 +5051,14 @@ class FileTrackerApp(wx.App):
         # 才会按深色渲染。不做这一步，`SetBackgroundColour` 对它们无效，
         # 深色主题下会留下大片白底——用户反馈的"深色主题下的表现很差"就是这个。
         #
+        # ⚠️ **按"程序的主题偏好"决定，不是按系统主题**（2026-10-26 修）：
+        # 原来写的是 `system_uses_light_theme() is False`，于是"系统浅色 +
+        # 程序设成深色"时进程级开关仍是浅色 —— 自绘部分全深、菜单却是浅的
+        # （用户报的"右键菜单没跟着反色"）。见 `process_theme_preference`。
+        #
         # 必须在窗口创建之前调用，所以放在这里而不是 apply_window_theme 里。
         try:
-            dark = win32.system_uses_light_theme() is False
-            win32.set_process_dark_mode(dark)
+            win32.set_process_dark_mode(process_theme_preference().is_dark)
         except Exception:
             pass
 

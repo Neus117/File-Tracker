@@ -1286,7 +1286,7 @@ def icon_warning(cx: float, cy: float, size: float, colour,
 
     几何全部来自 `theme.warning_badge_geometry()`（唯一权威，可单测），
     这里只把点变成图元：外三角实心 + **背景色**内三角挖空 = 线框；
-    感叹号 = 一根竖条（两端圆头）+ 一个圆点，**不用字体字形**。
+    感叹号 = 一根**等宽竖条**（不再补圆头）+ 一个圆点，**不用字体字形**。
     """
     from .theme import warning_badge_geometry
 
@@ -1309,19 +1309,18 @@ def icon_warning(cx: float, cy: float, size: float, colour,
             ("polygon", (inner[0][0], inner[0][1], inner[1][0], inner[1][1],
                          inner[2][0], inner[2][1]), background))
 
-    stroke = max(float(g["stroke"]), 1.0)
     bar_x, bar_top, _x, bar_bottom = g["bar"]
     bar_x = ox + bar_x
-    # 竖条：上下各内缩半个线宽，再用两个圆头补上 ⇒ 总长 = 规格里的 0.20 s
-    top_y = oy + bar_top + stroke / 2.0
-    bottom_y = oy + bar_bottom - stroke / 2.0
+    # **竖条不补圆头**（2026-10-26，用户："上下两端有小圆点凸起"）：
+    # 两端半径 = 半个线宽的圆头，在这个尺寸下读起来是凸起，不是圆角。
+    # 现在是一条等宽竖条，宽度取 `bar_width`（比外框线宽一点，否则显得细）。
+    half_bar = max(float(g["bar_width"]), 1.0) / 2.0
+    top_y = oy + bar_top
+    bottom_y = oy + bar_bottom
     parts.append(
-        ("polygon", (bar_x - stroke / 2, top_y, bar_x + stroke / 2, top_y,
-                     bar_x + stroke / 2, bottom_y, bar_x - stroke / 2, bottom_y),
+        ("polygon", (bar_x - half_bar, top_y, bar_x + half_bar, top_y,
+                     bar_x + half_bar, bottom_y, bar_x - half_bar, bottom_y),
          colour))
-    for cap_y in (top_y, bottom_y):
-        parts.append(("ellipse_fill", bar_x - stroke / 2, cap_y - stroke / 2,
-                      bar_x + stroke / 2, cap_y + stroke / 2, colour))
     dot_x, dot_y, dot_r = g["dot"]
     parts.append(("ellipse_fill", ox + dot_x - dot_r, oy + dot_y - dot_r,
                   ox + dot_x + dot_r, oy + dot_y + dot_r, colour))
