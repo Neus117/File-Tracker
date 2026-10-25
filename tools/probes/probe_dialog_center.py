@@ -33,10 +33,10 @@ app_mod.theme_from_system = theme_mod.from_system
 
 cases = [
     ("短消息（单行）", "确定要清空所有记录吗？", "确认清空", "是(Y)", "否(N)"),
-    ("多行消息", "⚠️ 这条路径已失效：\n\nH:\\【!!装机必备!!】\n\n要从记录中删除它吗？",
+    ("多行消息", "这条路径已失效：\n\nH:\\【!!装机必备!!】\n\n要从记录中删除它吗？",
      "路径已失效", "删除", "保留"),
     ("超长消息（要折行）",
-     "⚠️ 初始化数据库时发生错误: " + "很长的一段说明文字，" * 12,
+     "初始化数据库时发生错误: " + "很长的一段说明文字，" * 12,
      "数据库错误", "好", None),
 ]
 
@@ -51,7 +51,7 @@ with probe_temp("probe-center") as scratch:
         time.sleep(0.02)
 
     for tag, message, title, yes, no in cases:
-        dialog = ThemedDialog(frame, frame.theme, message, title=title,
+        dialog = ThemedDialog(frame, frame.theme, message, title=title, alert=True,
                               yes_label=yes, no_label=no)
         dialog.Show()
         for _ in range(40):

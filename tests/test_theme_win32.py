@@ -342,3 +342,79 @@ def test_remove_client_edge_is_idempotent():
     first = win32.remove_client_edge(desktop)
     second = win32.remove_client_edge(desktop)
     assert first is True and second is True
+
+
+# --------------------------------------------------------------------------
+# 弹窗正文前那枚**警告三角**的几何（2026-10-26）
+# --------------------------------------------------------------------------
+#
+# 用户："把那个警告标志画出来，替换掉目前所有的"⚠️"符号。
+#       调整尺寸：让它比正文字号大一点，醒目一点。"
+#
+# 规格抄自 `Icons-Drawing.md` 的 `warning` 徽标（用户验收过等边）。
+# 这里的判据全部是**几何量**，不是"看起来像"——因为徽标只有十几像素，
+# 肉眼分不出 0.84 和 0.866，而"两腰明显比底长"正是用户当时报的毛病。
+
+
+def test_warning_badge_is_equilateral():
+    """**等边**三角：高/底 = √3/2 ≈ 0.866。
+
+    踩过的坑：按"底 0.85 s、高 0.85 s"画出来是等腰，两腰明显比底长
+    （用户原话："两腰明显比底边长"）。
+    """
+    import math
+
+    for size in (18, 24, 32, 43, 54, 75):
+        geometry = theme.warning_badge_geometry(size)
+        assert abs(geometry["height"] / geometry["base"] - math.sqrt(3) / 2) < 1e-9, size
+
+
+def test_warning_badge_bounding_box_is_centred():
+    """**包围盒**垂直居中，不是重心居中。
+
+    三角形重心靠下；按重心居中的话整枚徽标会比同尺寸的圆形徽标看着低一截。
+    """
+    for size in (18, 32, 43, 54):
+        geometry = theme.warning_badge_geometry(size)
+        apex_y = geometry["apex"][1]
+        base_y = geometry["left"][1]
+        assert abs((apex_y + base_y) / 2 - size / 2) < 1e-9, size
+
+
+def test_warning_badge_base_width_and_stroke():
+    """底边 = 0.85 s、线宽 = 0.062 s —— 规格里的两个定值。"""
+    for size in (24, 43, 75):
+        geometry = theme.warning_badge_geometry(size)
+        assert abs(geometry["base"] - 0.85 * size) < 1e-9, size
+        assert abs(geometry["stroke"] - 0.062 * size) < 1e-9, size
+
+
+def test_warning_badge_inner_triangle_is_inside():
+    """内三角（挖空用）必须**完全落在外三角里**，否则线框会漏。"""
+    for size in (18, 32, 75):
+        geometry = theme.warning_badge_geometry(size)
+        apex_y = geometry["apex"][1]
+        base_y = geometry["left"][1]
+        inner_ys = [point[1] for point in geometry["inner"]]
+        assert min(inner_ys) > apex_y, size          # 内三角顶点在外三角顶点之下
+        assert max(inner_ys) < base_y, size          # 内三角底边在外三角底边之上
+
+
+def test_warning_badge_exclamation_sits_inside_and_is_centred():
+    """感叹号整组沿**重心**垂直居中，且落在三角内部。"""
+    for size in (24, 43, 75):
+        geometry = theme.warning_badge_geometry(size)
+        bar_top = geometry["bar"][1]
+        dot_bottom = geometry["dot"][1] + geometry["dot"][2]
+        assert abs((bar_top + dot_bottom) / 2 - geometry["centroid_y"]) < 1e-9, size
+        assert bar_top > geometry["apex"][1]           # 在顶点之下
+        assert dot_bottom < geometry["left"][1]        # 在底边之上
+
+
+def test_warning_badge_is_bigger_than_body_text():
+    """用户要的是"比正文字号大一点，醒目一点"——比例必须 > 1。
+
+    **不锚定具体数字**（1.4~2.0 都算合理），只禁止"等于或小于正文字号"。
+    """
+    assert 1.2 <= theme.METRICS.dialog_alert_ratio <= 2.0
+    assert theme.METRICS.dialog_alert_gap >= 4

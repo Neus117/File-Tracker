@@ -104,7 +104,7 @@ for label, dark in (("light", False), ("dark", True)):
         for _ in range(40):
             wx.YieldIfNeeded()
             time.sleep(0.02)
-        dialog = ThemedDialog(frame, frame.theme, "⚠️ 确定要清空所有记录吗？",
+        dialog = ThemedDialog(frame, frame.theme, "确定要清空所有记录吗？",
                               title="确认清空")
         dialog.Show()
         for _ in range(40):

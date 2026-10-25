@@ -176,14 +176,17 @@ def _sort_key_of(column: int) -> str:
     return DEFAULT_SORT_KEY
 
 
-#: 所有警告/确认弹窗标题的统一前缀。
-#:
-#: 用户要求："在所有警告弹窗的标题前加上 ⚠️，如 ⚠️确认清空？"
-#:
-#: **抽成常量而不是每处手写**：手写的话新增一个弹窗就会漏掉，
-#: 而且以后要换符号（比如换成 ℹ️ 区分信息类）只改这一处。
-#: 验证脚本会检查每一个弹窗标题都以它开头。
-WARN = "\u26a0\ufe0f"
+# 关于那枚 `⚠️`：**它已经退役了**（2026-10-26）。
+#
+# 原来这里是 `WARN = "\u26a0\ufe0f"`，各处弹窗在正文开头拼它。
+# 用户："每个弹窗的警告标志都使用正文中的"⚠️"符号。但现在我每次看到弹窗时，
+# 发现这个警告标志实在是太小了……把那个警告标志画出来，替换掉目前所有的"⚠️"符号。"
+#
+# 现在标志由 `ThemedDialog(..., alert=True)` **自绘**
+# （几何在 `theme.warning_badge_geometry`，图元在 `widgets.icon_warning`）。
+#
+# ⚠️ **不要再把那个码点拼回任何正文里**：弹窗上会变成"自绘三角 + 巨型 emoji"
+# 两枚标志。`verify_gui` 有一条判据扫描整个 `src/` 禁止它出现。
 
 
 class FileTracker(wx.Frame):
@@ -266,11 +269,12 @@ class FileTracker(wx.Frame):
             # 而且数据库开不了是**致命错误**，弹完就 `raise`，
             # 用户根本看不到主界面——主题不一致在这里不是主要问题。
             # **不要为了统一外观把这条也换掉**：换了会连提示都弹不出来。
-            # ⚠️ 同样放**正文**开头（与其余弹窗一致，见 `_notify`）。
-            # 系统对话框只有正文与标题两个位置，这里沿用同一套约定。
+            # 早先这里还在正文开头拼那枚 ⚠️ 字形；现在警示标志只由
+            # `ThemedDialog(alert=True)` 画得出来，而这条**只能用系统对话框**，
+            # 所以警示意图交给系统的 `wx.ICON_ERROR`（它自带一枚图标）。
             wx.MessageBox(
-                f"{WARN} " + L("初始化数据库时发生错误: ",
-                                 "Could not open the database: ") + str(error),
+                L("初始化数据库时发生错误: ",
+                  "Could not open the database: ") + str(error),
                 L("数据库错误", "Database error"),
                           wx.OK | wx.ICON_ERROR)
             raise
@@ -3638,12 +3642,12 @@ class FileTracker(wx.Frame):
         """
         dialog = ThemedDialog(
             self, self.theme,
-            f"{WARN} "
-            + L("这条路径已失效：", "This path no longer exists:")
+            L("这条路径已失效：", "This path no longer exists:")
             + f"\n\n{path}\n\n"
             + L("要从记录中删除它吗？", "Remove it from the records?"),
             title=L("路径已失效", "Path missing"),
             yes_label=L("删除", "Delete"), no_label=L("保留", "Keep"),
+            alert=True,
         )
         try:
             answer = dialog.ShowModal()
@@ -4105,9 +4109,9 @@ class FileTracker(wx.Frame):
         `_notify` 一直带着一个多余的「否(N)」，直到用户截图指出。
         所以"不要第二个按钮"必须用一个明确的哨兵值。
         """
-        dialog = ThemedDialog(self, self.theme, f"{WARN} {message}",
+        dialog = ThemedDialog(self, self.theme, message,
                               title=title, yes_label=L("好", "OK"),
-                              no_label=NO_BUTTON)
+                              no_label=NO_BUTTON, alert=True)
         try:
             dialog.ShowModal()
         finally:
@@ -4178,8 +4182,8 @@ class FileTracker(wx.Frame):
             prompt = L(f"确定要删除这 {len(paths)} 条记录吗？",
                        f"Delete these {len(paths)} records?")
             title = L(f"确认删除 {len(paths)} 条", f"Delete {len(paths)} records")
-        dialog = ThemedDialog(self, self.theme, f"{WARN} " + prompt,
-                              title=title)
+        dialog = ThemedDialog(self, self.theme, prompt,
+                              title=title, alert=True)
         # **`try/finally` 保证弹窗一定会被销毁。**
         # `ShowModal()` 抛异常时（少见但不是不可能）原来的写法会把
         # 弹窗留在屏幕上，而且后面的 `Refresh()` 也不会执行。
@@ -4265,8 +4269,9 @@ class FileTracker(wx.Frame):
 
     def on_clear(self, event) -> None:
         dialog = ThemedDialog(self, self.theme,
-                              f"{WARN} " + L("确定要清空所有记录吗？", "Clear all records?"),
-                              title=L("确认清空", "Confirm clear"))
+                              L("确定要清空所有记录吗？", "Clear all records?"),
+                              title=L("确认清空", "Confirm clear"),
+                              alert=True)
         try:
             confirmed = dialog.ShowModal() == wx.ID_YES
         finally:

@@ -3214,15 +3214,22 @@ def main() -> int:
                 f"第 0 行文字色 = {_colour_hex(applied)}，"
                 f"期望 {frame.theme.list_text}",
             )
-        #
         # **只检查"警告/确认"类弹窗。** `--version` 那个信息框是
-        # `ICON_INFORMATION`，不是警告，**故意不加** ⚠️
+        # `ICON_INFORMATION`，不是警告，**故意不带警告标志**
         # （否则"信息"和"警告"就分不出来了）。
+        #
+        # ## 2026-10-26 起，判据从"正文里有 ⚠️ 字形"变成"构造时传了 alert=True"
+        #
+        # 用户："每个弹窗的警告标志都使用正文中的"⚠️"符号。但现在我每次看到
+        # 弹窗时，发现这个警告标志实在是太小了……把那个警告标志画出来，
+        # 替换掉目前所有的"⚠️"符号。"
+        #
+        # 现在标志由 `ThemedDialog` **自己画**（`theme.warning_badge_geometry`
+        # 定几何、`widgets.icon_warning` 出图元），正文里**不许再拼那个字形**。
         #
         # 弹窗实现换过一次（系统对话框 → 自绘 `ThemedDialog`），
         # 所以这里**同时扫三种写法**：`ThemedDialog(`、`_notify(`、
         # 以及残留的 `wx.MessageBox` / `wx.MessageDialog`。
-
 
         # **用 AST 找调用点，不要自己拼续行。**
         #
@@ -3247,7 +3254,27 @@ def main() -> int:
             return " ".join(source_lines[start - 1:end]).strip()
 
         DIALOG_CALLS = {"ThemedDialog", "_notify", "MessageBox", "MessageDialog"}
-        warn_titles, exempt = [], []
+
+        # **谁在调用**也要知道：`--version` 那个信息框用的是 `ThemedDialog`，
+        # 但它不是警告，**故意不带标志**（否则"信息"与"警告"分不出来）。
+        # 用 AST 追出每个调用**最内层的那个函数名**，比按文案猜可靠。
+        _owner: dict = {}
+
+        def _mark_owner(node, func_name: str) -> None:
+            for child in _ast.iter_child_nodes(node):
+                _owner[child] = func_name
+                _mark_owner(
+                    child,
+                    child.name if isinstance(
+                        child, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+                    else func_name)
+
+        _mark_owner(tree, "")
+
+        #: 允许"不自绘标志"的调用方：`--version` 的信息框（是"信息"不是"警告"）。
+        NO_ALERT_OWNERS = {"_show_message_safely"}
+
+        alerted, missing_alert, system_boxes = [], [], []
         for node in _ast.walk(tree):
             if not isinstance(node, _ast.Call):
                 continue
@@ -3256,48 +3283,61 @@ def main() -> int:
             if name not in DIALOG_CALLS:
                 continue
             statement = call_text(node)
-            if "WARN" in statement:
-                warn_titles.append(statement)
-                continue
-            # **两类合理的不加 ⚠️**（各写明理由，别用"数量不超过 N"兜）：
-            #
-            # ① `_notify(...)` 的**调用方**——⚠️ 由 `_notify` 自己加进正文，
-            #    所以调用处看不到 WARN。
-            # ② `--version` 的信息框——它是"信息"不是"警告"。
-            #
-            # 早先用"有意不加的 ≤ 1 处"这种计数断言，既漏检又误报。
-            # 现在按**语义**判：是 `_notify` 调用，或是版本框，都放过。
+            # `_notify(...)` 的**调用方**不算漏：标志由 `_notify` 内部传
             if name == "_notify":
                 continue
-            if "版本" in statement and "APP_NAME" in statement:
+            if name in ("MessageBox", "MessageDialog"):
+                system_boxes.append(statement)
                 continue
-            exempt.append(statement)
-        # **⚠️ 放在正文，不在标题里。**
-        #
-        # 用户要求："标题栏题头的 ⚠️ 换成程序图标，把 ⚠️ 放在说明文字的前面，
-        # 和 Roboc 一致。"
-        # Roboc 正是正文前缀（`Program.cs` L200、`ProgressWindow.cs` L469）。
+            if _owner.get(node) in NO_ALERT_OWNERS:
+                continue
+            if "alert=True" in statement:
+                alerted.append(statement)
+            else:
+                missing_alert.append(statement)
+
         check(
-            "所有警告/确认弹窗都在**正文**里带 ⚠️（Roboc 的做法）",
-            bool(warn_titles) and all("WARN" in t for t in warn_titles),
-            f"带 ⚠️ 的 {len(warn_titles)} 处；"
-            f"有意不加的 {len(exempt)} 处（`--version` 信息框）",
+            "每个自绘弹窗都带**警告标志**（`ThemedDialog(..., alert=True)`）",
+            not missing_alert,
+            "；".join(t[:72] for t in missing_alert) or
+            f"带标志的 {len(alerted)} 处全部有 alert=True",
         )
-        # **阳性对照：标题里不能再出现 ⚠️。**
+        # 阳性对照：必须真的找到了带标志的弹窗，否则上面那条是空转
+        check(
+            "阳性对照：确实扫到了带警告标志的弹窗（不是空集）",
+            len(alerted) >= 3,
+            f"扫到 {len(alerted)} 处 alert=True 的弹窗",
+        )
+        # 系统对话框**画不了**自绘标志，所以只允许那两个已知的早期场景，
+        # 并且它们各自带着**系统自己的**图标（ICON_WARNING / ICON_ERROR）。
+        check(
+            "剩下的系统对话框只有已知的两处，且都靠系统图标示警",
+            len(system_boxes) <= 2
+            and all(any(mark in t for mark in
+                        ("ICON_WARNING", "ICON_ERROR", "ICON_INFORMATION"))
+                    for t in system_boxes),
+            "；".join(t[:64] for t in system_boxes) or "无",
+        )
+        # **标志在正文里（由 `alert=True` 画出来），标题保持纯文字。**
         #
-        # 这条守的是"⚠️ 从标题栏搬走了"——只查正文有 ⚠️ 是不够的，
+        # 用户早先要求："标题栏题头的 ⚠️ 换成程序图标，把 ⚠️ 放在说明文字的前面，
+        # 和 Roboc 一致。" —— 现在那枚标志是自绘的三角，位置仍是"正文开头"。
+        #
+        # ## 阳性对照：标题里不能出现任何警示符号
+        #
+        # 这条守的是"标志不在标题栏里"——只查正文有标志是不够的，
         # 那样标题里留着一个也测不出来。
         #
         # ## 第一版有漏洞，被用户抓到了
         #
         # 原来只做字符串匹配：`'title=f"{WARN}' in statement`。
-        # **硬编码的 emoji 溜得过去**——`title=f"{WARN}路径不存在"` 能被抓到，
-        # 但 `title="⚠️路径不存在"` 不会（语句里没有 `WARN` 这个词）。
+        # **硬编码的 emoji 溜得过去**——`title="⚠️路径不存在"` 不会被抓到
+        # （语句里没有 `WARN` 这个词）。
         #
         # 用户正是在扫描弹窗时看到探针造出的那个标题带 ⚠️ 的窗口。
         #
         # 现在改成**从 AST 取 `title=` 那个实参本身**，
-        # 再检查它里面有没有 WARN 或任何警示类字符——
+        # 再检查它里面有没有任何警示类字符——
         # 不管写成 f-string、字符串拼接还是字面量，都跑不掉。
         MARKS = ("\u26a0", "\u2757", "\u2755", "\u2753", "\U0001f6a8")
 
@@ -3317,8 +3357,7 @@ def main() -> int:
         title_marks = []
 
         def looks_tainted(chunk: str) -> bool:
-            return bool(chunk) and (
-                "WARN" in chunk or any(m in chunk for m in MARKS))
+            return bool(chunk) and any(m in chunk for m in MARKS)
 
         for node in _ast.walk(tree):
             if not isinstance(node, _ast.Call):
@@ -3339,22 +3378,9 @@ def main() -> int:
                 if looks_tainted(chunk):
                     title_marks.append(f"L{value.lineno}: {name} 标题={chunk}")
         check(
-            "阳性对照：没有任何弹窗把 ⚠️ 留在标题里（AST 取实参，不是字符串匹配）",
+            "阳性对照：没有任何弹窗把警示符号留在标题里（AST 取实参，不是字符串匹配）",
             not title_marks,
             "；".join(t[:72] for t in title_marks) or "标题全部是纯文字",
-        )
-        # 阳性对照：必须真的找到了警告弹窗，否则上面那条是空转
-        check(
-            "阳性对照：确实扫到了警告弹窗（不是空集）",
-            len(warn_titles) >= 4,
-            f"扫到 {len(warn_titles)} 处带 ⚠️ 的弹窗",
-        )
-        # 排除掉上面两类之后，**不该再剩下任何弹窗**——
-        # 剩下的就是"忘了加 ⚠️"的漏网之鱼。
-        check(
-            "除 `_notify` 调用方与 `--version` 信息框外，没有弹窗漏掉 ⚠️",
-            not exempt,
-            "；".join(t[:72] for t in exempt) or "无漏网",
         )
         # 确认框已改成自绘弹窗（系统对话框没法适配深色主题）
         check(
@@ -3373,8 +3399,8 @@ def main() -> int:
         from file_tracker.theme import scale_for_dpi as _scale
 
         dialog = _widgets.ThemedDialog(
-            frame, frame.theme, f"{_app_module.WARN} 确定要清空所有记录吗？",
-            title="确认清空",
+            frame, frame.theme, "确定要清空所有记录吗？",
+            title="确认清空", alert=True,
         )
         dialog.Show()
         for _ in range(30):
@@ -3403,18 +3429,23 @@ def main() -> int:
         dc_dlg.SetFont(dialog.GetFont())
         widths = [dc_dlg.GetTextExtent(line).width for line in dialog._lines]
         text_width = max(widths, default=0)
-        # 宽度 = max(正文实宽, 按钮组宽) + margin×2，且正文实宽不超过上限
+        # **警告标志占掉正文左侧一条**，所以宽度公式里要多加这一条
+        badge_px, badge_gap_px = dialog._alert_metrics()
+        alert_extra = dialog._alert_extra
+        wrap_px = max(max_text_px - alert_extra, _scale(120, dpi_value))
+        # 宽度 = max(正文实宽 + 标志那一条, 按钮组宽) + margin×2
         check(
-            "弹窗宽度按**实际文字**算（不再固定 819，也不超过上限）",
+            "弹窗宽度按**实际文字 + 警告标志那一条**算（不固定 819，也不超上限）",
             client_width
-            == max(min(text_width, max_text_px),
+            == max(min(text_width, wrap_px) + alert_extra,
                    len(dialog._labels) * _scale(_DLG.dialog_button_width,
                                                 dpi_value)
                    + max(len(dialog._labels) - 1, 0)
                    * _scale(_DLG.dialog_button_gap, dpi_value))
             + margin_px * 2,
-            f"实际 {client_width}，正文实宽 {text_width}"
-            f"（上限 {max_text_px}），margin×2 = {margin_px * 2}",
+            f"实际 {client_width}，正文实宽 {text_width}（折行上限 {wrap_px}）"
+            f"，标志那一条 {alert_extra}（={badge_px}+{badge_gap_px}）"
+            f"，margin×2 = {margin_px * 2}",
         )
         check(
             "弹窗正文左边界 = margin（24 逻辑像素）",
@@ -3422,17 +3453,28 @@ def main() -> int:
             f"正文左边 = {dialog._body_rect[0]}，margin = {margin_px}",
         )
 
-        # **正文每一行都居中**——判据是左右留白相等（差 ≤ 1 px 取整误差）
+        # **"图标 + 间距 + 文字"作为一个整体居中**（2026-10-26 第二版）。
+        #
+        # 第一版把图标钉在正文区最左边、文字在自己的列里居中 —— 短消息时
+        # 图标离文字老远（实测图标 x=42、文字 x=174），像两个不相干的东西；
+        # 用户那张截图里 `⚠️` 是**紧挨着文字**的，所以判据改成"整组居中"。
         left, _t, right, _b = dialog._body_rect
-        center = (left + right) // 2
-        gaps = []
-        for line, width in zip(dialog._lines, widths):
-            x = center - width // 2
-            gaps.append(abs(x - (client_width - (x + width))))
+        body_w = right - left
+        block_w = text_width
+        group_w = alert_extra + block_w
+        group_x = left + max((body_w - group_w) // 2, 0)
+        text_left = group_x + alert_extra
         check(
-            "正文每一行都居中（左右留白相等）",
-            bool(gaps) and max(gaps) <= 1,
-            f"各行的左右留白差 = {gaps}，客户区宽 = {client_width}",
+            "正文（**警告标志 + 文字**）作为一组居中（左右留白相等）",
+            abs((group_x - left) - (right - (group_x + group_w))) <= 1,
+            f"组左边 = {group_x}（留白 {group_x - left}），"
+            f"组右边 = {group_x + group_w}（留白 {right - (group_x + group_w)}）",
+        )
+        check(
+            "每行文字在组内居中（左右留白相等，差 ≤ 1px）",
+            all(abs((block_w - w) // 2 - (block_w - w - (block_w - w) // 2)) <= 1
+                for w in widths),
+            f"文字块宽 {block_w}，各行宽 {widths}",
         )
         check(
             "阳性对照：正文确实有内容（不是空行凑出来的居中）",
@@ -3469,9 +3511,9 @@ def main() -> int:
         # 标题带 ⚠️ 的弹窗，与应用约定不符，扫描时看着像应用的 bug。
         # **探针也是代码，它造出来的东西必须符合被验证的约定。**
         single = _widgets.ThemedDialog(
-            frame, frame.theme, f"{_app_module.WARN} 路径不存在，请检查后重新输入。",
+            frame, frame.theme, "路径不存在，请检查后重新输入。",
             title="路径不存在",
-            yes_label="好", no_label=None,
+            yes_label="好", no_label=None, alert=True,
         )
         single.Show()
         for _ in range(30):
@@ -3521,12 +3563,101 @@ def main() -> int:
             f"{dialog_icon.GetSize() if dialog_icon and dialog_icon.IsOk() else None}"
             "（wx.Dialog 不继承父窗口图标，ThemedDialog._apply_icon 显式设的）",
         )
-        # 阳性对照：⚠️ 必须在**正文**里，且**不在**标题里
+        # ---- 警告标志是**画出来的**，而且比正文大（用户 2026-10-26 的明确要求）----
+        #
+        # 用户原话："把那个警告标志画出来，替换掉目前所有的"⚠️"符号。
+        #           调整尺寸：让它比正文字号大一点，醒目一点。"
+        #
+        # 判据分三层，全部可回读：
+        #   ① 尺寸：标志边长 > 正文行高（比例 = `METRICS.dialog_alert_ratio`）；
+        #   ② 墨迹：把**真实弹窗**的正文画到位图上，标志框里的暗像素占比
+        #      落在"线框"区间（实心三角会 > 0.4）；
+        #   ③ 形状：墨迹包围盒高/宽 ≈ 0.866（等边三角），且垂直居中在画布上。
+        from file_tracker.theme import warning_badge_geometry as _badge_geo
+
+        body_dc = wx.ClientDC(dialog)
+        body_dc.SetFont(dialog.GetFont())
+        line_height = body_dc.GetTextExtent(_widgets._measure_probe()).height or 1
         check(
-            "⚠️ 在正文开头（Roboc 的做法），标题是纯文字",
-            dialog._lines and dialog._lines[0].startswith(_app_module.WARN)
-            and _app_module.WARN not in dialog.GetTitle(),
-            f"正文首行 = {dialog._lines[0][:22]!r}，标题 = {dialog.GetTitle()!r}",
+            "警告标志**比正文字号大**（用户说「太小了」，要醒目）",
+            badge_px > line_height,
+            f"标志边长 {badge_px}px，正文行高 {line_height}px，"
+            f"比例 {badge_px / line_height:.2f}"
+            f"（= METRICS.dialog_alert_ratio {_DLG.dialog_alert_ratio}）",
+        )
+        geo = _badge_geo(badge_px)
+        check(
+            "警告标志是**等边三角**（高/底 = 0.866，不是等腰）",
+            abs(geo["height"] / geo["base"] - 0.866) < 0.01,
+            f"高/底 = {geo['height'] / geo['base']:.4f}，"
+            f"底 {geo['base']:.1f}，高 {geo['height']:.1f}",
+        )
+
+        # **把标志画到位图上**（位图上的 GetPixel 可靠；窗口抓图在这个环境
+        # 不可靠，见 tools/probes/README.md）。
+        #
+        # ⚠️ **不要通过 `_draw_body` 来量。** 踩过：`_draw_body` 用**传进来的
+        # DC** 去量行高，而 `wx.MemoryDC` 报出来的字高与窗口 DC 不同
+        # （实测位图侧 22px、窗口侧 30px），于是"盒子高度"算小了 8px、
+        # 图标被画高 4px —— 量出来"没居中"，而真实绘制是对的。
+        # **测量与绘制必须用同一种 DC**：这里用 `_line_height()`（ClientDC）
+        # 算出盒子高度，再只针对标志位图化。
+        body_w = dialog.GetClientSize().width
+        body_h = dialog._body_rect[3]
+        badge_canvas = wx.Bitmap(body_w, max(body_h, 1))
+        badge_dc = wx.MemoryDC(badge_canvas)
+        badge_dc.SetBackground(wx.Brush(wx.Colour(dialog.theme.background)))
+        badge_dc.Clear()
+        badge_box_h = dialog._line_height() + dialog._alert_extra_v
+        dialog._draw_alert_badge(badge_dc, dialog._body_rect[0],
+                                 dialog._body_rect[1], badge_box_h)
+        badge_image = badge_canvas.ConvertToImage()
+        # 标志框 = 正文区左上角那块 `badge_px` 见方
+        box_x0, box_y0 = dialog._body_rect[0], dialog._body_rect[1]
+        ink = []
+        for dy in range(max(badge_px, 1) + 2):
+            for dx in range(max(badge_px, 1) + 2):
+                x, y = box_x0 + dx, box_y0 + dy
+                if not (0 <= x < body_w and 0 <= y < body_h):
+                    continue
+                if badge_image.GetRed(x, y) < 128:
+                    ink.append((dx, dy))
+        ratio = len(ink) / float(max(badge_px * badge_px, 1))
+        check(
+            "警告标志真的**画出来**了，而且是**线框**不是实心（墨迹占比可区分）",
+            0.04 < ratio < 0.30,
+            f"标志框 {badge_px}×{badge_px} 里暗像素 {len(ink)} 个，"
+            f"占比 {ratio:.3f}（线框 ≈0.1x；实心三角会 > 0.4）",
+        )
+        if ink:
+            xs = [p[0] for p in ink]
+            ys = [p[1] for p in ink]
+            ink_w = max(xs) - min(xs) + 1
+            ink_h = max(ys) - min(ys) + 1
+            top_pad = min(ys)
+            bottom_pad = badge_px - max(ys)
+            check(
+                "警告标志的**墨迹比例**也是等边（高/宽 ≈ 0.866，在像素上回读）",
+                abs(ink_h / max(ink_w, 1) - 0.866) < 0.08,
+                f"墨迹 {ink_w}×{ink_h}，高/宽 = "
+                f"{ink_h / max(ink_w, 1):.3f}",
+            )
+            check(
+                "警告标志在标志框里**垂直居中**（上下留白差 ≤ 2px）",
+                abs(top_pad - bottom_pad) <= 2,
+                f"上留白 {top_pad}px，下留白 {bottom_pad}px",
+            )
+        else:
+            check("警告标志的墨迹包围盒可量", False, "框里一个暗像素都没有")
+        badge_dc.SelectObject(wx.NullBitmap)
+        # 标志在**文字左边**，且与文字列不重叠
+        check(
+            "警告标志**紧贴**文字：图标右缘 + 间距 == 文字块左缘（不重叠、不远离）",
+            alert_extra > 0
+            and badge_px + badge_gap_px == alert_extra
+            and group_x + badge_px + badge_gap_px == text_left,
+            f"标志 {badge_px} + 间距 {badge_gap_px} = {alert_extra}px；"
+            f"图标左缘 {group_x}，文字块左缘 {text_left}",
         )
         # 客户区是**内容说了算**的：窗口尺寸 = 客户区 + 标题栏 + 边框。
         # Roboc 用 `AdjustWindowRectExForDpi` 做这件事，wx 是 `SetClientSize`。
@@ -3576,11 +3707,33 @@ def main() -> int:
         dialog.Destroy()
         for _ in range(20):
             wx.YieldIfNeeded()
+        # **弹窗正文里不许再有那个字形**（标志改由 `alert=True` 自绘）。
+        #
+        # 为什么不去扫"整份源码有没有这个码点"：它在注释里大量用作
+        # "注意"的标记（`⚠️ 这里不能…`），扫整份源码只会一直误报。
+        # 判据必须落在**会显示给用户的那个实参**上 —— 所以从 AST 取
+        # 每个弹窗调用的正文实参，看里面有没有警示类字符。
+        #
+        # 位置：`ThemedDialog(parent, theme, message, ...)` 正文是第 3 个；
+        # `_notify(message, title)` 是第 1 个；`MessageBox(正文, 标题, 样式)` 也是第 1 个。
+        BODY_POSITION = {"ThemedDialog": 2, "MessageBox": 0,
+                         "MessageDialog": 0, "_notify": 0}
+        body_marks = []
+        for node in _ast.walk(tree):
+            if not isinstance(node, _ast.Call):
+                continue
+            name = (getattr(node.func, "id", None)
+                    or getattr(node.func, "attr", None))
+            slot = BODY_POSITION.get(name)
+            if slot is None or len(node.args) <= slot:
+                continue
+            chunk = _ast.get_source_segment(source, node.args[slot]) or ""
+            if any(m in chunk for m in MARKS):
+                body_marks.append(f"L{node.args[slot].lineno}: {chunk[:48]}")
         check(
-            "WARN 常量就是 ⚠️（U+26A0 U+FE0F）",
-            _app_module.WARN == "\u26a0\ufe0f",
-            f"WARN = {_app_module.WARN!r}  码点 = "
-            f"{[hex(ord(c)) for c in _app_module.WARN]}",
+            "弹窗**正文**里不再拼警示字形（标志由 alert=True 自绘）",
+            not body_marks,
+            "；".join(body_marks) or "所有弹窗正文都是纯文字",
         )
 
         # ==============================================================

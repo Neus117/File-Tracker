@@ -615,7 +615,8 @@ class ThemedDialog(wx.Dialog):
 
     def __init__(self, parent, theme: Theme, message: str, *,
                  title: str = "", yes_label: str | None = None,
-                 no_label: str | None | object = None):
+                 no_label: str | None | object = None,
+                 alert: bool = False):
         # **默认值不能在签名里写 `L(...)`。** 默认参数在**函数定义时**求值一次，
         # 而那时语言可能还没定下来。所以在体内取。
         if yes_label is None:
@@ -672,6 +673,13 @@ class ThemedDialog(wx.Dialog):
         self._buttons: list[RoundedButton] = []
         self._body_rect = None
         self._button_rects: list[tuple[int, int]] = []
+        #: 正文前是否画那枚**自绘警告三角**（2026-10-26 取代 `⚠️` 字形）。
+        #:
+        #: 用户："让所有警告弹窗都带警告标志" → 以前是在正文开头拼 `⚠️`，
+        #: 现在是这个开关：`alert=True` 时由 `_draw_body` 画图标。
+        #: **不要在正文里再拼 `⚠️`** —— 那会变成"图标 + 巨型 emoji"两枚标志。
+        self._alert = alert
+        self._alert_extra = 0
 
         # 按钮先建出来（尺寸由 `_layout` 定，这里只给最小尺寸）
         for label, handler in zip(self._labels, self._handlers()):
@@ -682,7 +690,6 @@ class ThemedDialog(wx.Dialog):
                                    on_click=handler)
             self._buttons.append(button)
 
-        self._layout()
         # **单按钮时加一个不可见的占位控件。**
         #
         # `wx.Dialog` 在 `Show()` 时会把**唯一的**子控件拉满客户区——
@@ -696,8 +703,16 @@ class ThemedDialog(wx.Dialog):
             self._stretch_guard = wx.Control(self, size=(1, 1))
             self._stretch_guard.Hide()
 
-        self._apply_window_chrome()
+        # ⚠️ **字体必须在 `_layout()` 之前设好。**
+        #
+        # 踩过（2026-10-26）：`_layout()` 用 `self.GetFont()` 量行高来算
+        # 警告图标的边长（行高 ×1.5），而那时本窗口还是**继承来的系统字体**
+        # —— 于是"布局时算出的 45px"与"真正绘制时按正文字体算出的 45px"
+        # 不是同一个数（实测 `_alert_extra` = 56，而绘制时 45+14 = 59），
+        # 图标与文字列因此错开几像素。**测量与绘制必须用同一个字体。**
         self.apply_body_font()
+        self._layout()
+        self._apply_window_chrome()
 
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
         self.Bind(wx.EVT_PAINT, self._on_paint)
@@ -834,7 +849,21 @@ class ThemedDialog(wx.Dialog):
         buttons_width = (len(self._labels) * button_width
                          + max(len(self._labels) - 1, 0) * gap)
         body_top = px(METRICS.dialog_margin)
-        body_height = self._measure_body_height(max_text_width)
+        # **警告图标占掉正文左侧的一条**（图标 + 间距），折行宽度要相应收窄，
+        # 否则"文字 + 图标"会超出 `max_text_width`，弹窗被撑宽。
+        badge_size, badge_gap = self._alert_metrics()
+        self._alert_extra = (badge_size + badge_gap) if self._alert else 0
+        wrap_width = max(max_text_width - self._alert_extra, px(120))
+        text_height = self._measure_body_height(wrap_width)
+        # **图标比一行字高时，要给它留出竖向空间。**
+        #
+        # 踩过（2026-10-26 第一次量）：标志边长 = 行高 ×1.5，直接"垂直居中在第一行"
+        # 会让它的顶点比正文区**高出 7~8 px** —— 位图上回读墨迹时被裁掉一截，
+        # 高/宽 从 0.866 掉到 0.711。这里把第一行放大成"图标那么高"的一个盒子，
+        # 文字与图标都在盒子里居中，于是图标刚好落在正文区内。
+        self._alert_extra_v = (max(0, badge_size - self._line_height())
+                               if self._alert else 0)
+        body_height = text_height + self._alert_extra_v
         buttons_top = (body_top + body_height
                        + px(METRICS.dialog_body_to_buttons))
 
@@ -843,7 +872,7 @@ class ThemedDialog(wx.Dialog):
         dc.SetFont(self.GetFont())
         text_width = max(
             (dc.GetTextExtent(line).width for line in self._lines), default=0)
-        content_width = min(text_width, max_text_width)
+        content_width = min(text_width, wrap_width) + self._alert_extra
         client_width = max(content_width, buttons_width) + margin * 2
         client_height = buttons_top + button_height + px(METRICS.dialog_bottom)
 
@@ -925,14 +954,42 @@ class ThemedDialog(wx.Dialog):
         event.Skip()
         self.Refresh()
 
+    def _line_height(self) -> int:
+        """正文一行的高度（物理像素）——**测量与绘制必须用同一个探针字符串**。"""
+        dc = wx.ClientDC(self)
+        dc.SetFont(self.GetFont())
+        return dc.GetTextExtent(_measure_probe()).height or 1
+
+    def _alert_metrics(self) -> tuple[int, int]:
+        """警告图标的 `(边长, 与正文的间距)`，单位物理像素。
+
+        **边长锚定"正文字高"**（`METRICS.dialog_alert_ratio`），不锚 DPI ——
+        换字体/字号时它跟着走。用户的要求是"比正文字号大一点"，
+        所以这个比例必须 > 1；1.5 是"明显大、又不至于像独立一行"的那一档。
+        没有警告标志的弹窗返回 `(0, 0)`。
+        """
+        if not getattr(self, "_alert", False):
+            return (0, 0)
+        dc = wx.ClientDC(self)
+        dc.SetFont(self.GetFont())
+        text_height = dc.GetTextExtent(_measure_probe()).height or 1
+        size = max(int(round(text_height * METRICS.dialog_alert_ratio)), 8)
+        return (size, scale_for_dpi(METRICS.dialog_alert_gap, dpi_of(self)))
+
     def _draw_body(self, dc) -> None:
-        """把正文**逐行居中**画到 ``dc`` 上。
+        """把正文**逐行居中**画到 ``dc`` 上，并在开头画警告图标。
 
         用户要求："现在让所有提示窗内容居中显示。"
 
-        每一行按自己的宽度算中心——所以"⚠️ 这条路径已失效："与
+        每一行按自己的宽度算中心——所以"这条路径已失效："与
         路径那一行、以及"要从记录中删除它吗？"三者都是各自居中的，
         而不是整块靠左。多行消息里这正是期望的观感。
+
+        ## 警告图标怎么参与居中（2026-10-26）
+
+        图标**不属于任何一行文字**：它在正文区最左侧，垂直居中在**第一行**上；
+        文字整块向右让出 `_alert_extra`，仍然在自己的那一列里居中。
+        这样"图标 + 居中文字"整体看着是均衡的，而不是左对齐一片。
 
         **抽出来是为了能被单独调用验证。** `_on_paint` 里画不出来的东西，
         很可能是"这段代码根本没跑"而不是"画得不对"——分开之后可以直接
@@ -945,12 +1002,69 @@ class ThemedDialog(wx.Dialog):
         dc.SetTextForeground(wx.Colour(self.theme.text))
         line_height = dc.GetTextExtent(_measure_probe()).height or 1
         lines = getattr(self, "_lines", None) or [self._message]
-        # 用 `_body_rect` 的中点当轴——左右各留了 margin，所以居中后
-        # 两边到窗口边缘的距离相等。
-        center = (left + right) // 2
+        extra = getattr(self, "_alert_extra", 0) or 0
+        extra_v = getattr(self, "_alert_extra_v", 0) or 0
+        # **文字第一行在"图标那个盒子"里居中**（盒子高 = 行高 + extra_v）：
+        # 于是图标恰好落在正文区顶部，不会溢出 `_body_rect`（踩过，见 `_layout`）。
+        first_top = top + extra_v // 2
+
+        # **图标紧贴文字，两者作为一组居中**（2026-10-26 第二版）。
+        #
+        # 第一版把图标钉在正文区最左边、文字在自己的那一列里居中 ——
+        # 短消息时图标离文字老远（实测图标 x=42、文字 x=174），
+        # 看着像两个不相干的东西。用户那张截图里 `⚠️` 是**紧挨着文字**的，
+        # 所以这里按"图标 + 间距 + 最宽那一行"作为一个整体居中。
+        widths = [dc.GetTextExtent(line).width for line in lines]
+        block_w = max(widths, default=0)
+        body_w = right - left
+        group_w = extra + block_w
+        group_x = left + max((body_w - group_w) // 2, 0)
+        text_left = group_x + extra
         for index, line in enumerate(lines):
-            x = center - dc.GetTextExtent(line).width // 2
-            dc.DrawText(line, x, top + index * line_height)
+            x = text_left + (block_w - widths[index]) // 2
+            dc.DrawText(line, x, first_top + index * line_height)
+        if self._alert and extra:
+            self._draw_alert_badge(dc, group_x, top, line_height + extra_v)
+
+    def _draw_alert_badge(self, dc, left: int, top: int, box_height: int) -> None:
+        """在正文区左上角画那枚警告三角（垂直居中在**第一行的盒子**里）。"""
+        size, _gap = self._alert_metrics()
+        if size <= 0:
+            return
+        cx = left + size / 2.0
+        cy = top + box_height / 2.0
+        colour = wx.Colour(self.theme.text)
+        background = wx.Colour(self.theme.background)
+        # **必须走 GraphicsContext 才没有锯齿**（同 `PathBar._draw_border`）：
+        # 三角是斜边，GDI 的 `DrawPolygon` 会画出台阶。
+        gc = wx.GraphicsContext.Create(dc)
+        if gc is not None:
+            _draw_icon(gc, icon_warning, cx, cy, size, colour, background)
+            return
+        # 取不到 GC 时退回 GDI：斜边会有锯齿，但形状、位置、比例一致
+        from .theme import warning_badge_geometry
+
+        g = warning_badge_geometry(size)
+        ox, oy = cx - size / 2.0, cy - size / 2.0
+
+        def _dot(point):
+            return wx.Point(int(round(ox + point[0])), int(round(oy + point[1])))
+
+        for points, fill in (([g["apex"], g["left"], g["right"]], colour),
+                             (g["inner"], background)):
+            dc.SetBrush(wx.Brush(fill))
+            dc.SetPen(wx.Pen(fill, 1))
+            dc.DrawPolygon([_dot(p) for p in points])
+        stroke = max(float(g["stroke"]), 1.0)
+        _x0, bar_top, _x1, bar_bottom = g["bar"]
+        dc.SetBrush(wx.Brush(colour))
+        dc.SetPen(wx.Pen(colour, 1))
+        dc.DrawRectangle(int(round(ox + cx - stroke / 2)), int(round(oy + bar_top)),
+                         max(int(round(stroke)), 1),
+                         max(int(round(bar_bottom - bar_top)), 1))
+        dot_x, dot_y, dot_r = g["dot"]
+        dc.DrawCircle(int(round(ox + dot_x)), int(round(oy + dot_y)),
+                      max(int(round(dot_r)), 1))
 
     def _on_paint(self, event) -> None:
         """画正文。
@@ -1155,6 +1269,63 @@ def _draw_icon(gc, painter, cx: float, cy: float, size: float,
             gc.SetBrush(wx.Brush(item_colour))
             gc.SetPen(wx.Pen(item_colour, _pen_width(1)))
             gc.FillPath(path)
+
+
+def icon_warning(cx: float, cy: float, size: float, colour,
+                 background=None) -> list:
+    """**警告三角 + 感叹号**（线框，不是实心）—— 对话框正文前那一枚。
+
+    ## 为什么不用 `⚠️`
+
+    用户 2026-10-26："每个弹窗的警告标志都使用正文中的"⚠️"符号。但现在我每次
+    看到弹窗时，发现这个警告标志实在是太小了……把那个警告标志画出来，
+    替换掉目前所有的"⚠️"符号。让它比正文字号大一点，醒目一点。"
+
+    emoji 是**字体字形**：大小由字体决定、不能比正文大，而且缺字体时不出现。
+    图元没有这两个问题（同 `02` 里"图标用几何图元，不用字形"）。
+
+    几何全部来自 `theme.warning_badge_geometry()`（唯一权威，可单测），
+    这里只把点变成图元：外三角实心 + **背景色**内三角挖空 = 线框；
+    感叹号 = 一根竖条（两端圆头）+ 一个圆点，**不用字体字形**。
+    """
+    from .theme import warning_badge_geometry
+
+    g = warning_badge_geometry(size)
+    ox, oy = cx - size / 2.0, cy - size / 2.0
+
+    def _pt(point):
+        return (ox + point[0], oy + point[1])
+
+    apex, left, right = _pt(g["apex"]), _pt(g["left"]), _pt(g["right"])
+    parts = [
+        ("polygon", (apex[0], apex[1], left[0], left[1], right[0], right[1]),
+         colour),
+    ]
+    if background is not None:
+        # 用**背景色**把中间挖空 —— 线框靠"再画一个背景色三角"实现，
+        # 因为 GC 上的透明画刷不可靠（见 `_draw_icon` 里 rect 分支的说明）。
+        inner = [_pt(p) for p in g["inner"]]
+        parts.append(
+            ("polygon", (inner[0][0], inner[0][1], inner[1][0], inner[1][1],
+                         inner[2][0], inner[2][1]), background))
+
+    stroke = max(float(g["stroke"]), 1.0)
+    bar_x, bar_top, _x, bar_bottom = g["bar"]
+    bar_x = ox + bar_x
+    # 竖条：上下各内缩半个线宽，再用两个圆头补上 ⇒ 总长 = 规格里的 0.20 s
+    top_y = oy + bar_top + stroke / 2.0
+    bottom_y = oy + bar_bottom - stroke / 2.0
+    parts.append(
+        ("polygon", (bar_x - stroke / 2, top_y, bar_x + stroke / 2, top_y,
+                     bar_x + stroke / 2, bottom_y, bar_x - stroke / 2, bottom_y),
+         colour))
+    for cap_y in (top_y, bottom_y):
+        parts.append(("ellipse_fill", bar_x - stroke / 2, cap_y - stroke / 2,
+                      bar_x + stroke / 2, cap_y + stroke / 2, colour))
+    dot_x, dot_y, dot_r = g["dot"]
+    parts.append(("ellipse_fill", ox + dot_x - dot_r, oy + dot_y - dot_r,
+                  ox + dot_x + dot_r, oy + dot_y + dot_r, colour))
+    return parts
 
 
 def icon_sun(cx: float, cy: float, size: float, colour,

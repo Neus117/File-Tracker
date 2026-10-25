@@ -420,6 +420,17 @@ class Metrics:
     dialog_button_gap: int = 8
     dialog_body_to_buttons: int = 28
     dialog_bottom: int = 20
+    # ── 弹窗正文前那枚**自绘警告三角**（2026-10-26）──
+    #
+    # 用户："每个弹窗的警告标志都使用正文中的"⚠️"符号。但现在我每次看到弹窗时，
+    # 发现这个警告标志实在是太小了。替换图标：把那个警告标志画出来，
+    # 替换掉目前所有的"⚠️"符号。调整尺寸：让它比正文字号大一点，醒目一点。"
+    #
+    # **尺寸锚定"正文字高"，不锚 DPI**（与树图标、排序箭头同一条规矩）：
+    # 换字体/换字号时它会跟着走，而按 DPI 定的话两者会脱钩。
+    # 1.5 是"比正文明显大一点、又不至于像独立的一行"的那一档。
+    dialog_alert_ratio: float = 1.5
+    dialog_alert_gap: int = 8          # 图标右缘 → 正文左缘
     # ── 设置窗口的分组布局（用户要求重排之后新增）──
     #
     # 用户反馈："按钮全部挤在一起，**没有层次感**，看着特别不方便、不太舒适。"
@@ -681,6 +692,80 @@ def point_size_for_dpi(points: float, dpi: int) -> int:
     if dpi <= 0:
         dpi = 96
     return -int(round(points * dpi / 72.0))
+
+
+def warning_badge_geometry(size: float) -> dict:
+    """对话框正文前那枚**警告三角**的几何（纯数学，不碰 wx）。
+
+    ## 为什么几何单独放这里
+
+    `widgets.icon_warning()` 只负责把这里算出来的点变成图元。
+    这样几何可以**在无桌面环境下逐点断言**（`tests/test_theme_win32.py`），
+    而不是只能靠人眼看截图。
+
+    ## 规格来源：`Icons-Drawing.md` 的 `warning` 徽标
+
+    那是用户验收过的等边三角（SSEject，2026-10-24）。本函数**照抄那套比例**：
+
+    * 留白 ``margin = 0.075 s``，底边 ``base = 0.85 s``，高 ``base × √3/2``
+      ⇒ **等边**（判据 ``高/底 = 0.866 ± 0.01``）；
+    * **包围盒垂直居中**，不是重心居中（不平移的话三角会整体偏下）；
+    * 线框：先画实心外三角，再用**背景色**画一个绕**重心**缩放的内三角挖空，
+      缩放系数 ``1 - 2.4·stroke/base``、下限 ``0.55`` ⇒ 三条边线宽一致；
+    * 感叹号**不用字体字形**：一根竖条（``0.20 s`` 长、线宽 = ``stroke``、
+      两端圆头）+ 间隙 ``0.060 s`` + 圆点半径 ``0.050 s``，整组沿重心垂直居中。
+
+    **判据（可回读）**：`高/底 ≈ 0.866`、`(顶点 y + 底边 y)/2 == size/2`；
+    线框的墨迹占比约 0.12（实心三角会 > 0.4）——这一条同时证明"没画成实心"。
+
+    :param size: 图标逻辑边长（物理像素）
+    :return: 一份几何数据（全部以 `size` 归一）
+    """
+    import math
+
+    margin = 0.075 * size
+    base = size - 2 * margin
+    height = base * math.sqrt(3) / 2
+    bottom = size - margin
+    top = bottom - height
+    # **包围盒垂直居中**（把整个三角往上/下平移到画布正中）
+    offset = (top + bottom) / 2 - size / 2
+    top -= offset
+    bottom -= offset
+    centre_x = size / 2
+    apex = (centre_x, top)
+    left = (margin, bottom)
+    right = (size - margin, bottom)
+    centroid_y = (apex[1] + left[1] + right[1]) / 3
+
+    stroke = 0.062 * size
+    # 内三角：绕**重心**缩放 ⇒ 三条边线宽相同（绕包围盒中心缩会让三条边不一样宽）
+    scale = max(0.55, 1 - (2.4 * stroke) / max(base, 1.0))
+    inner = [(centre_x + (x - centre_x) * scale,
+              centroid_y + (y - centroid_y) * scale)
+             for x, y in (apex, left, right)]
+
+    # 感叹号：竖条 + 间隙 + 圆点，整组沿重心垂直居中
+    bar_length = 0.20 * size
+    bar_gap = 0.060 * size
+    dot_radius = 0.050 * size
+    group_height = bar_length + bar_gap + 2 * dot_radius
+    group_top = centroid_y - group_height / 2
+    return {
+        "size": size,
+        "margin": margin,
+        "base": base,
+        "height": height,
+        "stroke": stroke,
+        "apex": apex,
+        "left": left,
+        "right": right,
+        "centroid_y": centroid_y,
+        "inner": inner,
+        "bar": (centre_x, group_top, centre_x, group_top + bar_length),
+        "dot": (centre_x, group_top + bar_length + bar_gap + dot_radius,
+                dot_radius),
+    }
 
 
 # --------------------------------------------------------------------------
