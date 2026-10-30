@@ -307,7 +307,7 @@ powershell -File tools/verify_gui.ps1
 |---|---|
 | `pytest` | 220 unit tests, no GUI required |
 | `check_wiring.py` | Things that are defined but never read |
-| `check_dialogs.py` | Dialogs given two buttons whose return value is ignored (users once reported "both buttons do the same thing") |
+| `check_dialogs.py` | Dialogs given two buttons whose return value is ignored (once reported: "both buttons do the same thing") |
 | `check_duplicate_methods.py` | A method defined twice — Python silently keeps the last one, so **editing the first has no effect** |
 | `check_audit_items.py` | Line-by-line audit sign-off (50 criteria) |
 | `add_bom.py --check` | The UTF-8 BOM on `.ps1` files — editors strip it, and PowerShell 5.1 then reads Chinese as mojibake |
